@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "workgraph",
+  "description": "Run a coding task as a graph: plan units, build them in parallel on the cheapest proven model, loop on real checks with model escalation, and learn weighted rules per repo.",
+  "owner": {
+    "name": "Dustin A",
+    "url": "https://github.com/pxm-0"
+  },
+  "plugins": [
+    {
+      "name": "workgraph",
+      "description": "Run a coding task as a graph: plan units, build them in parallel on the cheapest proven model, loop on real checks with model escalation, and learn weighted rules per repo.",
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}

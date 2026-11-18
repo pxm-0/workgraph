@@ -1,0 +1,9 @@
+{
+  "name": "workgraph",
+  "description": "Run a coding task as a graph: plan units, build them in parallel on the cheapest proven model, loop on real checks with model escalation, and learn weighted rules per repo.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Dustin A",
+    "url": "https://github.com/pxm-0"
+  }
+}
