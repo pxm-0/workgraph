@@ -37,6 +37,18 @@ current tree. Every call is in `~/.workgraph/cost.jsonl` with its provider and m
 and the layout under `~/.workgraph/` are in `docs/design/factory.md` (§5, §7.1, §9) and
 `docs/design/adr-001-claude-p-contract.md`. run.js stays the default until Phase 1b.
 
+**Shifts (Phase 2).** `wg shift run`, started at night by a launchd job you load yourself
+(`/workgraph:shift setup` prints it), takes the GitHub issues you labelled `wg:queued` in the
+repos listed in `~/.workgraph/factory.toml`. An issue is work only if a trusted actor wrote it,
+labelled it last and is the only one who edited it since. Each runs in its own worktree under
+`~/.workgraph-work/worktrees/` (your checkout is never touched) through the same dev pipeline,
+which then commits, pushes a `wg/<n>-<slug>` branch and opens a draft PR once the kernel's checks
+and an opus review hold at the tree. In the morning, `/workgraph:shift` walks the report:
+incidents, decisions (`wg decide` stores your answers and queues the issue again), approvals
+(`/workgraph:work approve <owner/repo>#<pr>` records Haruspex verification and makes the PR
+ready), and parked work. `~/.workgraph/STOP` pauses shifts; `wg shift resume <id>` finishes an
+interrupted one without paying again for the answers it already got.
+
 ## Memory
 
 One file per repo, `.claude/work-memory.json`:
