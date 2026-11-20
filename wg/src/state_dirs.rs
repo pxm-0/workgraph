@@ -51,6 +51,42 @@ impl Dirs {
         self.state().join("key")
     }
 
+    pub fn worktrees(&self) -> PathBuf {
+        self.work().join("worktrees")
+    }
+
+    pub fn shifts(&self) -> PathBuf {
+        self.state().join("shifts")
+    }
+
+    pub fn shift_lock(&self) -> PathBuf {
+        self.state().join("shift.lock")
+    }
+
+    /// While this file exists no shift starts, and a running one stops between steps.
+    pub fn stop_file(&self) -> PathBuf {
+        self.state().join("STOP")
+    }
+
+    /// The record that links every run of one issue (design §7.4).
+    pub fn task_record(&self, repo_slug: &str, issue: u64) -> PathBuf {
+        self.state()
+            .join("tasks")
+            .join(format!("{repo_slug}#{issue}.json"))
+    }
+
+    /// The owner's answers for one issue, written only by `wg decide`.
+    pub fn decisions(&self, repo_slug: &str, issue: u64) -> PathBuf {
+        self.state()
+            .join("decisions")
+            .join(format!("{repo_slug}#{issue}.json"))
+    }
+
+    /// Label edits and issues the factory made, so intake never takes its own work.
+    pub fn intake_ledger(&self) -> PathBuf {
+        self.state().join("intake.jsonl")
+    }
+
     pub fn claude_settings(&self) -> PathBuf {
         self.home.join(".claude").join("settings.json")
     }

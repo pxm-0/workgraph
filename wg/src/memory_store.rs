@@ -80,6 +80,11 @@ impl Lock {
         if let Some(dir) = p.parent() {
             crate::state_dirs::private_dir(dir)?;
         }
+        // A lock whose pid is dead (a killed shift) is stale and replaced (design §13.1).
+        if crate::shift::lock::holder(&p).is_some_and(|pid| !crate::shift::lock::alive(pid)) {
+            std::fs::remove_file(&p)
+                .map_err(|e| format!("cannot remove the stale lock {}: {e}", p.display()))?;
+        }
         let mut f = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -232,5 +237,7 @@ mod tests {
         assert!(Lock::take(&target).unwrap_err().contains("another run"));
         drop(lock);
         assert!(Lock::take(&target).is_ok());
+        std::fs::write(target.with_extension("lock"), "999999999\n").unwrap();
+        assert!(Lock::take(&target).is_ok(), "a dead holder's lock is stale");
     }
 }

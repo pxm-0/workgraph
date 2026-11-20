@@ -6,6 +6,9 @@
 //!   wg finalize --run R --by NAME --message M --evidence-message M2
 //!   wg config allow-check --repo SLUG --name N --cmd C --factory-cmd C2 | pin-haruspex --cli /abs
 //!   wg doctor [--live] | wg memory import | wg guard --manifest P | wg auth key PROVIDER
+//!   wg shift run | resume ID | status | report [ID] | recover | gc | schedule-print
+//!   wg decide --repo R --issue N --decisions-file F | wg approve --repo R --pr N --by NAME
+//!   wg approval-summary --repo R --pr N
 //!   wg recall | check | save | finalize (legacy, unchanged)
 
 use serde_json::{json, Value};
@@ -39,6 +42,10 @@ fn main() {
         Some("config") => print(wg::cli::admin::config(rest)),
         Some("doctor") => print(wg::cli::doctor::doctor(rest)),
         Some("memory") => print(wg::cli::admin::memory(rest)),
+        Some("shift") => print(wg::cli::shift::shift(rest)),
+        Some("decide") => print(wg::cli::shift::decide(rest)),
+        Some("approve") => print(wg::cli::shift::approve(rest)),
+        Some("approval-summary") => print(wg::cli::shift::approval_summary(rest)),
         _ => print(wg::cli::legacy::run(&args)),
     }
 }
