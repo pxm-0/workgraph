@@ -10,40 +10,47 @@ const AsyncFunction = (async () => {}).constructor
 const script = new AsyncFunction('agent', 'parallel', 'pipeline', 'phase', 'log', 'args', 'budget', body)
 
 const CLI = '/opt/haruspex/scripts/haruspex.py'
+const WG = '/opt/workgraph/wg/target/release/wg'
 const unit = (id, extra = {}) => ({ id, goal: `do ${id}`, files: [`src/${id}.js`], dependsOn: [], criteria: [`AC-${id}`], size: 'small', risky: false, ...extra })
 const B_FAIL = 'FAIL src/b.js:3 expected 302, got 200'
 const B_SIG = 'npm test | FAIL PATH expected N, got N'
 const PASS = { passed: true, criteria: [], findings: [] }
 const NO_CHALLENGE = { added: [], assign: [], escalations: [] }
 
+// The check relay: return what wg would print for the command line in the prompt.
+const unq = s => s.replace(/'\\''/g, "'")
+function wgOutput(prompt, checker, label, n, changed) {
+  const nonce = unq(prompt.match(/--nonce '((?:[^']|'\\'')*)'/)[1])
+  const cmds = [...prompt.matchAll(/--cmd '((?:[^']|'\\'')*)'/g)].map(m => unq(m[1]))
+  const results = cmds.map(cmd => {
+    const out = checker(label, cmd, n)
+    return out ? { cmd, exitCode: 1, outputTail: out } : { cmd, exitCode: 0, outputTail: 'ok' }
+  })
+  return JSON.stringify({ nonce, results, changedFiles: changed[label] || [] })
+}
+
 // checker(label, cmd, n) returns failure output (exit 1) or 0 (pass) for the n-th run of a check label.
 // memory: null = no file, string = raw file text, object = parsed file. review(n) answers review#n.
+// relay(label, honest) lets a test make the check relay lie; by default it returns wg's output.
 async function run({
   units, checks = ['npm test'], checker = () => 0, changed = {}, task = 'add a thing', memory = null,
   innocent = () => false, escalations = [], challenge = NO_CHALLENGE, review = () => PASS, extraArgs = {}, dirty = [],
+  relay = (label, honest) => honest,
 }) {
   const calls = [], opts = {}, prompts = {}, seen = {}
-  let saved = null
+  const recall = memory === null ? { exists: false, dirty } : { exists: true, dirty, content: typeof memory === 'string' ? memory : JSON.stringify(memory) }
   const agent = async (prompt, o) => {
     const { label } = o
     calls.push(label)
     opts[label] = o
     prompts[label] = prompt
-    if (label === 'memory:load') return memory === null ? { exists: false, dirty } : { exists: true, dirty, content: typeof memory === 'string' ? memory : JSON.stringify(memory) }
-    if (label === 'memory:save') { saved = JSON.parse(prompt.split('<<<\n')[1].split('\n>>>')[0]); return 'saved' }
     if (label === 'read') return { branch: 'work/test', taskId: 'T-001', initialized: true, risk: 'medium', checks, criteria: [], units, escalations }
     if (label === 'challenge') return challenge
     if (label.startsWith('review#')) return review(Number(label.slice(7)))
     if (label.startsWith('check:')) {
-      const n = (seen[label] = (seen[label] || 0) + 1)
-      const cmds = [...prompt.matchAll(/^- (.+)$/gm)].map(m => m[1])
-      return {
-        results: cmds.map(cmd => {
-          const out = checker(label, cmd, n)
-          return out ? { exitCode: 1, outputTail: out } : { exitCode: 0, outputTail: 'ok' }
-        }),
-        changedFiles: changed[label] || [],
-      }
+      const base = label.replace(/!retry$/, '')
+      const n = (seen[base] = (seen[base] || 0) + 1)
+      return { raw: relay(label, wgOutput(prompt, checker, base, n, changed)) }
     }
     if (label.startsWith('work:')) return { summary: 'done' }
     if (label.startsWith('fix:')) return innocent(label) ? { summary: '', blocked: 'not caused by my unit' } : { summary: 'patched it' }
@@ -57,9 +64,10 @@ async function run({
     throw new Error(`unexpected agent ${label}`)
   }
   const parallel = thunks => Promise.all(thunks.map(t => t().catch(() => null)))
-  const result = await script(agent, parallel, null, () => {}, () => {}, { task, haruspexCli: CLI, ...extraArgs }, { total: null })
+  const args = { task, haruspexCli: CLI, wg: WG, runId: 'run-abc123', memory: recall, ...extraArgs }
+  const result = await script(agent, parallel, null, () => {}, () => {}, args, { total: null })
   const model = label => opts[label] && opts[label].model
-  return { result, calls, opts, prompts, saved, model }
+  return { result, calls, opts, prompts, saved: result.memoryToSave, model }
 }
 
 test('graph: Reading, challenge, parallel layer, blamed-unit fix, dependent unit, review, memory', async () => {
@@ -72,9 +80,9 @@ test('graph: Reading, challenge, parallel layer, blamed-unit fix, dependent unit
     },
   })
   assert.deepEqual(calls, [
-    'memory:load', 'read', 'challenge', 'check:baseline',
+    'read', 'challenge', 'check:baseline',
     'work:a', 'work:b', 'check:L1', 'fix:b#1', 'check:L1', 'work:c', 'check:L2',
-    'review#1', 'learn', 'memory:save',
+    'review#1', 'learn',
   ])
   assert.equal(result.status, 'ready_for_review')
   assert.equal(result.reviewed, true)
@@ -95,7 +103,7 @@ test('the user\'s uncommitted work and the Haruspex init files are never counted
 
 test('a plan that edits files holding the user\'s uncommitted work escalates before any edit', async () => {
   const { result, calls, prompts } = await run({ units: [unit('a'), unit('b')], dirty: ['src/b.js', 'notes.md'] })
-  assert.deepEqual(calls, ['memory:load', 'read', 'challenge'])
+  assert.deepEqual(calls, ['read', 'challenge'])
   assert.equal(result.status, 'needs_decision')
   assert.deepEqual(result.escalations.map(e => e.id), ['DIRTY'])
   assert.match(result.escalations[0].question, /src\/b\.js/)
@@ -130,7 +138,6 @@ test('allocation: fixed models for fixed jobs; workers probe haiku once, sonnet 
   assert.equal(model('fix:b#1'), 'opus')
   assert.equal(model('work:c'), 'sonnet')
   assert.equal(model('learn'), 'sonnet')
-  assert.equal(model('memory:save'), 'haiku')
   assert.deepEqual(result.models.map(m => m.tier), ['haiku', 'sonnet', 'sonnet'])
 })
 
@@ -157,11 +164,40 @@ test('a critical escalation stops the run before any edit, after the challenge p
     escalations: [esc],
     challenge: { added: [{ id: 'ASM-003', summary: 'retry safety' }], assign: [], escalations: [{ ...esc, id: 'ASM-003', severity: 'high' }] },
   })
-  assert.deepEqual(calls, ['memory:load', 'read', 'challenge'])
+  assert.deepEqual(calls, ['read', 'challenge'])
   assert.equal(result.status, 'needs_decision')
   assert.deepEqual(result.escalations.map(e => e.id), ['FM-002', 'ASM-003'])
   assert.equal(result.taskId, 'T-001')
-  assert.equal(saved, null, 'nothing happened, so nothing is learned or saved')
+  assert.equal(saved, undefined, 'nothing happened, so nothing is learned or saved')
+})
+
+test('checks are run by wg: the relay prompt is one quoted wg command with a per-call nonce', async () => {
+  const { prompts, opts } = await run({ units: [unit('a')], checks: ["npm test -- --grep 'it''s'"] })
+  const p = prompts['check:L1']
+  assert.ok(p.includes(`'${WG}' check --nonce 'run-abc123:check:L1:1' --cmd 'npm test -- --grep '\\''it'\\'''\\''s'\\'''`), p)
+  assert.deepEqual([opts['check:L1'].model, opts['check:L1'].effort], ['haiku', 'low'])
+})
+
+test('a relay that paraphrases gets one retry; the honest second answer is used', async () => {
+  const { result, calls } = await run({
+    units: [unit('a')],
+    relay: (label, honest) => (label === 'check:L1' ? 'All tests passed!' : honest),
+  })
+  assert.ok(calls.includes('check:L1!retry'))
+  assert.equal(result.status, 'ready_for_review')
+})
+
+test('a relay that keeps inventing results stops the run instead of acting on them', async () => {
+  const forged = honest => JSON.stringify({ ...JSON.parse(honest), nonce: 'guessed' })
+  await assert.rejects(
+    run({ units: [unit('a')], relay: (label, honest) => (label.startsWith('check:L1') ? forged(honest) : honest) }),
+    /check:L1: no verified check result/,
+  )
+  const missing = honest => JSON.stringify({ ...JSON.parse(honest), results: [] })
+  await assert.rejects(
+    run({ units: [unit('a')], relay: (label, honest) => (label.startsWith('check:baseline') ? missing(honest) : honest) }),
+    /check:baseline: no verified check result/,
+  )
 })
 
 test('a rerun carries the user\'s decisions and the task id into the Reading', async () => {
@@ -190,7 +226,7 @@ test('review rejection: one fix round on the unit the finding names, recheck, re
       ? { passed: false, criteria: [{ id: 'AC-b', status: 'failed' }], findings: [{ id: 'RF-1', severity: 'high', file: 'src/b.js', summary: 'no error path' }, { id: 'RF-2', severity: 'low', file: 'src/a.js', summary: 'naming' }] }
       : PASS),
   })
-  assert.deepEqual(calls.slice(-6), ['review#1', 'fix:b#r1', 'check:review1', 'review#2', 'learn', 'memory:save'])
+  assert.deepEqual(calls.slice(-5), ['review#1', 'fix:b#r1', 'check:review1', 'review#2', 'learn'])
   assert.equal(model('fix:b#r1'), 'opus', 'b was built on sonnet, so its review fix runs one tier up')
   assert.equal(result.status, 'ready_for_review')
   assert.equal(result.reviewFixRounds, 1)
@@ -282,7 +318,7 @@ test('a risky unit and everything depending on it are skipped', async () => {
   const { result, calls } = await run({
     units: [unit('a', { risky: true, riskReason: 'migration' }), unit('b', { dependsOn: ['a'] }), unit('c')],
   })
-  assert.deepEqual(calls, ['memory:load', 'read', 'challenge', 'check:baseline', 'work:c', 'check:L1', 'review#1', 'memory:save'])
+  assert.deepEqual(calls, ['read', 'challenge', 'check:baseline', 'work:c', 'check:L1', 'review#1'])
   assert.deepEqual(result.skipped.map(s => s.id), ['a', 'b'])
   assert.match(result.skipped[0].why, /risky/)
 })
@@ -293,9 +329,9 @@ test('a layer that never passes escalates haiku → sonnet → opus → opus at 
     checker: label => (label === 'check:L1' ? 'boom in src/a.js' : 0),
   })
   assert.deepEqual(calls, [
-    'memory:load', 'read', 'challenge', 'check:baseline', 'work:a',
+    'read', 'challenge', 'check:baseline', 'work:a',
     'check:L1', 'fix:a#1', 'check:L1', 'fix:a#2', 'check:L1', 'fix:a#3', 'check:L1',
-    'learn', 'memory:save',
+    'learn',
   ])
   assert.deepEqual(['work:a', 'fix:a#1', 'fix:a#2', 'fix:a#3'].map(l => opts[l].model), ['haiku', 'sonnet', 'opus', 'opus'])
   assert.equal(opts['fix:a#3'].effort, 'high')
@@ -317,11 +353,13 @@ test('a command already failing before any change is left out of the gate', asyn
 
 test('a corrupt memory file is never overwritten', async () => {
   const { result, calls } = await run({ units: [unit('a')], memory: '{not json' })
-  assert.ok(!calls.includes('memory:save'))
-  assert.equal(result.memorySaved, false)
+  assert.equal(result.memoryToSave, null, 'nothing is handed to wg save, so the file stays as it is')
+  assert.ok(calls.length > 0)
 })
 
 test('bad input fails fast before any agent runs', async () => {
   await assert.rejects(run({ units: [unit('a')], task: '  ' }), /no task given/)
-  await assert.rejects(run({ units: [unit('a')], extraArgs: { haruspexCli: 'haruspex.py' } }), /absolute path/)
+  await assert.rejects(run({ units: [unit('a')], extraArgs: { haruspexCli: 'haruspex.py' } }), /absolute path to haruspex/)
+  await assert.rejects(run({ units: [unit('a')], extraArgs: { wg: 'wg' } }), /absolute path to the wg binary/)
+  await assert.rejects(run({ units: [unit('a')], extraArgs: { runId: 'x;rm' } }), /runId/)
 })
