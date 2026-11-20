@@ -1,0 +1,6 @@
+# The one Rust toolchain: the dev image (.devcontainer/Dockerfile, rust:1.100.0), CI and the release
+# builds all use it. Bump it together with the Dockerfile's rust tag and digest.
+[toolchain]
+channel = "1.100.0"
+components = ["rustfmt", "clippy", "llvm-tools-preview"]
+targets = ["thumbv7em-none-eabihf"]

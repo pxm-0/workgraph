@@ -1,15 +1,28 @@
 name: release
 
+# A `v*` tag builds the matrix and attaches each binary to a new release. A pull request that
+# touches the build runs the same matrix without publishing, so the release assets are proven to
+# build before merge.
 on:
   push:
     tags: ["v*"]
+  pull_request:
+    paths:
+      - "wg/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/release.yml"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   create:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - run: gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag
@@ -18,6 +31,10 @@ jobs:
 
   build:
     needs: create
+    # On a pull request `create` is skipped; build anyway, but never after it failed.
+    if: ${{ !cancelled() && needs.create.result != 'failure' }}
+    permissions:
+      contents: write
     strategy:
       matrix:
         include:
@@ -27,12 +44,15 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # The toolchain CI tests with (rust-toolchain.toml), plus the matrix target.
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.100.0"
           targets: ${{ matrix.target }}
       - name: Build
         run: cargo build --release --locked -p wg --target ${{ matrix.target }}
       - name: Upload binary and checksum
+        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
