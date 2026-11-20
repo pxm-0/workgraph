@@ -87,6 +87,35 @@ impl Dirs {
         self.state().join("intake.jsonl")
     }
 
+    /// The hash-chained self-ledger (design §12.1).
+    pub fn self_ledger(&self) -> PathBuf {
+        self.state().join("self-ledger.jsonl")
+    }
+
+    /// The self lane's switches: paused, merge enabled, denylisted SHAs (design §12.5).
+    pub fn self_state(&self) -> PathBuf {
+        self.state().join("self.json")
+    }
+
+    /// Installed binaries: `wg-<sha12>/wg`, with the `current` and `previous` symlinks.
+    pub fn bin(&self) -> PathBuf {
+        self.state().join("bin")
+    }
+
+    pub fn memory_root(&self) -> PathBuf {
+        self.state().join("memory")
+    }
+
+    /// `memory/` as the binary `sha12` last left it, taken at install (design §10.1).
+    pub fn memory_snapshot(&self, sha12: &str) -> PathBuf {
+        self.state().join("memory-snapshots").join(sha12)
+    }
+
+    /// Throwaway clones for the eval and capture (design §12.4).
+    pub fn eval_work(&self) -> PathBuf {
+        self.work().join("eval")
+    }
+
     pub fn claude_settings(&self) -> PathBuf {
         self.home.join(".claude").join("settings.json")
     }

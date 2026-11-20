@@ -35,6 +35,15 @@
 //! ```compile_fail
 //! let _: wg::tokens::SandboxRun = serde_json::from_str("{}").unwrap();
 //! ```
+//!
+//! ```compile_fail
+//! let _ = wg::tokens::SelfMergeDecision { pr: 1, head: String::new(), base: String::new(),
+//!     ledger_entry: 1 };
+//! ```
+//!
+//! ```compile_fail
+//! let _: wg::tokens::SelfMergeDecision = serde_json::from_str("{}").unwrap();
+//! ```
 
 /// Where a check ran: the repo's dev stack on the Mac, or the sim sandbox (design §8.5 step 7).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -251,5 +260,38 @@ impl SandboxRun {
     }
     pub fn clean(&self) -> bool {
         self.clean
+    }
+}
+
+/// The self-merge gate passed every step for PR `pr` at head `head` (design §12.3): the only
+/// way to reach `gh pr merge`. Minted by `selfimprove::gate` alone, after the head re-read.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SelfMergeDecision {
+    pr: u64,
+    head: String,
+    base: String,
+    ledger_entry: u64,
+}
+
+impl SelfMergeDecision {
+    pub(crate) fn new(pr: u64, head: &str, base: &str, ledger_entry: u64) -> SelfMergeDecision {
+        SelfMergeDecision {
+            pr,
+            head: head.into(),
+            base: base.into(),
+            ledger_entry,
+        }
+    }
+    pub fn pr(&self) -> u64 {
+        self.pr
+    }
+    pub fn head(&self) -> &str {
+        &self.head
+    }
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+    pub fn ledger_entry(&self) -> u64 {
+        self.ledger_entry
     }
 }

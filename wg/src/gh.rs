@@ -98,13 +98,13 @@ impl Gh {
         Err(last)
     }
 
-    fn json(&self, args: &[&str]) -> Result<Value, String> {
+    pub(crate) fn json(&self, args: &[&str]) -> Result<Value, String> {
         let text = self.run(args)?;
         serde_json::from_str(&text).map_err(|e| format!("gh {}: not JSON: {e}", args[0]))
     }
 
     /// One JSON object per line (`--jq` output).
-    fn lines(&self, args: &[&str]) -> Result<Vec<Value>, String> {
+    pub(crate) fn lines(&self, args: &[&str]) -> Result<Vec<Value>, String> {
         self.run(args)?
             .lines()
             .filter(|l| !l.trim().is_empty())
@@ -215,7 +215,7 @@ impl Gh {
         self.run(&args).map(|_| ())
     }
 
-    fn body_file(&self, body: &str) -> Result<PathBuf, String> {
+    pub(crate) fn body_file(&self, body: &str) -> Result<PathBuf, String> {
         crate::state_dirs::private_dir(&self.scratch)?;
         let p = self
             .scratch
@@ -341,6 +341,24 @@ impl Gh {
             "number,url,state,headRefOid,mergeCommit",
         ])?;
         pr_of(&v)
+    }
+
+    /// Squash-merges a self PR, pinned to the head the gate decided on (design §12.1 step 5).
+    /// Reachable only with a `SelfMergeDecision`; never `--admin`.
+    pub fn merge(&self, repo: &str, d: &crate::tokens::SelfMergeDecision) -> Result<(), String> {
+        check_repo(repo)?;
+        self.run(&[
+            "pr",
+            "merge",
+            &d.pr().to_string(),
+            "-R",
+            repo,
+            "--squash",
+            "--match-head-commit",
+            d.head(),
+            "--delete-branch",
+        ])
+        .map(|_| ())
     }
 
     pub fn pr_ready(&self, repo: &str, n: u64) -> Result<(), String> {

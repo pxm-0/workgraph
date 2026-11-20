@@ -24,6 +24,7 @@ pub mod render;
 pub mod report;
 pub mod risk;
 pub mod sandbox;
+pub mod selfimprove;
 pub mod shift;
 pub mod state_dirs;
 pub mod tokens;

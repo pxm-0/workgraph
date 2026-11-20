@@ -1,0 +1,35 @@
+# What a self PR may change (design §12.2). This file is protected: the self-merge gate uses the
+# union of the copy compiled into the running binary and origin/main's copy, so a PR can never
+# relax it for itself. Every path not listed as editable is protected, including new ones.
+
+self_editable = [            # allowlist
+  "wg-factory/src/model/**", "wg-factory/src/plan/**", "wg-factory/src/alloc_tiers/**",
+  "wg-factory/src/learn/**", "wg-factory/src/engine/**",
+  "prompts/**/*.md",
+  "pipelines/dev.toml", "pipelines/qa.toml", "pipelines/release.toml",
+  "docs/**", "README.md",
+]
+add_only = ["wg-factory/tests/**"]   # status A only; M or D of an existing file is protected
+never_editable = [           # wins over self_editable
+  "wg/**", "xtask/**", "wg-factory/src/lib.rs", "wg-factory/src/api.rs", "wg-factory/Cargo.toml",
+  "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "clippy.toml", "**/build.rs",
+  "config/**", "eval/**", "pipelines/self.toml",
+  "prompts/_preamble.md", "prompts/self-plan.md", "prompts/self-review.md", "prompts/learn.md",
+  ".github/**", ".githooks/**", ".devcontainer/**", "compose.dev.yml",
+  "skills/**", ".claude-plugin/**", ".claude/**", ".mcp.json", ".haruspex/**",
+]
+# (workflow path, job name), matched with head_sha and app.slug == "github-actions" (§12.3)
+required_checks = [
+  [".github/workflows/ci.yml", "test"], [".github/workflows/ci.yml", "coverage"],
+  [".github/workflows/ci.yml", "no-std-build"],
+  [".github/workflows/self-gate.yml", "protected-paths"], [".github/workflows/self-gate.yml", "lint-editable"],
+  [".github/workflows/self-gate.yml", "replay-eval"],
+]
+# Owner decision D2 (§17), final: a PR touching editable Rust (wg-factory/**) passes the gate but
+# is held for the owner.
+auto_merge_paths = ["prompts/**/*.md", "pipelines/dev.toml", "pipelines/qa.toml", "pipelines/release.toml", "docs/**", "README.md"]
+max_changed_lines = 400
+max_changed_files = 12
+min_hours_between_merges = 24
+drift_checkpoint_every = 10   # after 10 self-merges, auto-merge pauses until `wg self resume`
+shadow_prs = 5                # the gate decides and records, never merges, for the first 5 self PRs

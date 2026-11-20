@@ -9,4 +9,5 @@ pub mod legacy;
 pub mod live;
 pub mod run;
 pub mod sandbox;
+pub mod self_;
 pub mod shift;

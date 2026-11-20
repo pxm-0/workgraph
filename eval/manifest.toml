@@ -1,0 +1,14 @@
+# The eval pins (design §12.4), protected. `wg eval replay` loads this file and the cases under
+# eval/replay/ from the BASE checkout, and the number of cases it replays must equal replay_cases.
+replay_cases = 3
+
+# Tier B: the private fixture store, cloned to ~/.workgraph/eval/store at the pinned commit. The
+# commit and tree hash stay empty until the owner seeds the store (at least min_fixtures, of which
+# min_needs_decision expect needs_decision) and pins it here in a PR; until then the live eval is
+# unavailable and every prompt or pipeline PR is held for the owner.
+[store]
+repo = "pxm-0/workgraph-eval"
+commit = ""
+tree_sha256 = ""
+min_fixtures = 10
+min_needs_decision = 3
