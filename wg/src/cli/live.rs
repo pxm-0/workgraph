@@ -1,6 +1,7 @@
 //! `wg doctor --live`: one small haiku call on the default provider, with no tools, in a throwaway
 //! directory, through the same argv, env, settings and guard as a real run.
 
+use crate::budget::{Ledger, Spend};
 use crate::claude::argv::{argv, Input};
 use crate::claude::auth::{env, plugin_profile, settings, EnvInput};
 use crate::claude::envelope::classify;
@@ -82,8 +83,32 @@ pub fn probe(cfg: &Config, dirs: &Dirs) -> Result<String, String> {
     });
     std::fs::write(dir.join("doctor.envelope.json"), &raw.stdout)
         .map_err(|e| format!("cannot keep the envelope: {e}"))?;
-    let e = classify(raw.exit, raw.timed_out, &raw.stdout)
-        .map_err(|f| format!("{:?}: {}", f.class, f.detail))?;
+    let classified = classify(raw.exit, raw.timed_out, &raw.stdout);
+    // Every call is ledgered, the doctor's too.
+    let ledger = Ledger::new(&dirs.ledger(), &id, 1);
+    let lease = ledger.lease("doctor", &provider.id, provider.model(Tier::Haiku))?;
+    let env = match &classified {
+        Ok(e) => e.clone(),
+        Err(f) => f.envelope.clone(),
+    };
+    ledger.settle(
+        lease,
+        &Spend {
+            tier: "haiku".into(),
+            stage: "doctor".into(),
+            cost_micros: env.cost_micros,
+            model_used: env.model_used.clone(),
+            turns: env.turns,
+            session_id: env.session_id.clone(),
+            outcome: match &classified {
+                Ok(_) => "ok".into(),
+                Err(f) => format!("{:?}", f.class),
+            },
+            ..Spend::default()
+        },
+        provider.first_party(),
+    )?;
+    let e = classified.map_err(|f| format!("{:?}: {}", f.class, f.detail))?;
     if e.structured.as_ref().and_then(|s| s["ok"].as_bool()) != Some(true) {
         return Err("the reply had no structured_output with ok = true".into());
     }
