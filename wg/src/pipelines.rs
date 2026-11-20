@@ -192,7 +192,8 @@ fn llm(a: &Assets, s: &Stage, ceiling_of: &str, vars: &[&str]) -> Result<LlmStag
 
 fn parse(name: &str, text: &str) -> Result<File, String> {
     let f: File = toml::from_str(text).map_err(|e| format!("pipeline {name}: {e}"))?;
-    if !f.pipeline.haruspex {
+    // Invariant 1: only the compiled-in self pipeline may run without Haruspex (§6.3, §12.2).
+    if !f.pipeline.haruspex && name != "self" {
         return Err(format!(
             "pipeline {}: haruspex must be true",
             f.pipeline.name
@@ -319,7 +320,10 @@ pub fn chain(
     let mut ids: Vec<String> = Vec::new();
     for name in names {
         if name == "self" {
-            return Err("the self pipeline is Phase 5".into());
+            if names.len() != 1 {
+                return Err("the self pipeline runs alone".into());
+            }
+            return self_chain(max_calls);
         }
         let text = a
             .pipeline(name)
@@ -339,6 +343,7 @@ pub fn chain(
             assets: a,
             repo,
             built: out.dev.is_some(),
+            self_lane: false,
         };
         for s in &f.stage {
             out.stages.push(stages::stage(s, &ctx)?);
@@ -353,6 +358,45 @@ pub fn chain(
         return Err(format!(
             "the chain {}'s worst case is {worst} calls, over the cap of {max_calls}",
             names.join("+")
+        ));
+    }
+    Ok(out)
+}
+
+/// The self lane's chain (design §6.2, §12.1): `self.toml` from the compiled assets only (never
+/// disk or an overlay, invariant 7), the dev stages with its prompts, then its own publish.
+fn self_chain(max_calls: u32) -> Result<Chain, String> {
+    let a = Assets::compiled();
+    let text = a.pipeline("self").ok_or("no compiled self pipeline")?;
+    let File {
+        pipeline,
+        mut stage,
+    } = parse("self", text)?;
+    if stage.len() < ORDER.len() {
+        return Err("the self pipeline runs the dev stages first".into());
+    }
+    let rest = stage.split_off(ORDER.len());
+    let mut out = Chain {
+        dev: Some(dev(&a, &File { pipeline, stage })?),
+        ..Chain::default()
+    };
+    let ctx = stages::Ctx {
+        assets: &a,
+        repo: &RepoView::default(),
+        built: true,
+        self_lane: true,
+    };
+    for s in &rest {
+        out.stages.push(stages::stage(s, &ctx)?);
+    }
+    stages::publish_after_review(&out)?;
+    if out.publish().is_none_or(|p| p.draft) {
+        return Err("the self pipeline ends with a non-draft publish".into());
+    }
+    let worst = worst_case(&out);
+    if worst > max_calls {
+        return Err(format!(
+            "the self chain's worst case is {worst} calls, over the cap of {max_calls}"
         ));
     }
     Ok(out)

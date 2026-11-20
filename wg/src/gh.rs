@@ -294,7 +294,10 @@ impl Gh {
             args.push("--draft");
         }
         for l in labels {
-            crate::ids::gh_label(l)?;
+            // A self-lane PR is opened with wg:self; no issue ever gets it from the factory.
+            if !(l == "wg:self" && crate::git::self_branch(head)) {
+                crate::ids::gh_label(l)?;
+            }
             args.extend(["--label", l.as_str()]);
         }
         let out = self.run(&args)?;

@@ -239,6 +239,7 @@ pub fn run(dirs: &Dirs, cfg: &Config) -> Result<Value, String> {
         Taken::Fresh(l) => (l, None),
         Taken::Stale(l, pid) => (l, Some(pid)),
     };
+    let previous = super::report::latest(dirs)?;
     let id = shift_id(dirs)?;
     let dir = dirs.shifts().join(&id);
     private_dir(&dir)?;
@@ -247,13 +248,48 @@ pub fn run(dirs: &Dirs, cfg: &Config) -> Result<Value, String> {
         "shift_started",
         json!({ "binary": crate::claude::replay::binary_hash(), "stale_lock_pid": lock.1 }),
     )?;
+    let gh = Gh::new(&cfg.gh_bin, dir.join("gh"));
+    // The canary over the last shift, which may have died on a newly installed binary (§12.5).
+    if let Some(prev) = &previous {
+        match super::selfupdate::canary(dirs, cfg, &gh, prev, &j) {
+            Ok(true) => {
+                j.append("stopped", json!({ "why": "the last shift's binary was rolled back; the next shift runs the previous one" }))?;
+                j.append("shift_finished", json!({ "tasks": 0 }))?;
+                return super::report::write(dirs, &id);
+            }
+            Ok(false) => {}
+            Err(why) => {
+                j.append("warning", json!({ "canary": why }))?;
+            }
+        }
+    }
     let now_min = super::config::minutes(&local("%H:%M")?)?;
     let Some(left) = minutes_left(cfg.shift.start, cfg.shift.until, now_min) else {
         j.append("stopped", json!({ "why": "window closed" }))?;
         return super::report::write(dirs, &id);
     };
     let deadline = now() + u64::from(left) * 60;
-    let gh = Gh::new(&cfg.gh_bin, dir.join("gh"));
+    // Step 2: self-update. The new binary runs this shift from the start, under a new id.
+    match super::selfupdate::update(dirs, cfg, &gh, &j) {
+        Ok(Some(exe)) => {
+            j.append(
+                "stopped",
+                json!({ "why": "self-updated; re-exec of the new binary" }),
+            )?;
+            j.append("shift_finished", json!({ "tasks": 0 }))?;
+            super::report::write(dirs, &id)?;
+            drop(lock);
+            use std::os::unix::process::CommandExt;
+            let err = std::process::Command::new(exe)
+                .args(std::env::args().skip(1))
+                .exec();
+            return Err(format!("cannot re-exec the updated binary: {err}"));
+        }
+        Ok(None) => {}
+        Err(why) => {
+            j.append("warning", json!({ "self_update": why }))?;
+        }
+    }
     if let Err(why) = preflight(dirs, cfg, &gh) {
         j.append("stopped", json!({ "why": format!("preflight: {why}") }))?;
         return super::report::write(dirs, &id);
@@ -276,9 +312,15 @@ pub fn run(dirs: &Dirs, cfg: &Config) -> Result<Value, String> {
     let mut ready: Vec<&RepoCfg> = Vec::new();
     let mut stopped = false;
     let mut enough = false;
+    let mut self_repo: Option<&RepoCfg> = None;
     'repos: for repo in &cfg.repos {
         if let Some(why) = repo_problem(cfg, repo) {
             j.append("repo_skipped", json!({ "repo": repo.name, "why": why }))?;
+            continue;
+        }
+        if repo.is_self() {
+            // The self lane runs after the dev repos (design §7.3 step 11).
+            self_repo = Some(repo);
             continue;
         }
         ready.push(repo);
@@ -341,6 +383,18 @@ pub fn run(dirs: &Dirs, cfg: &Config) -> Result<Value, String> {
             }
         }
     }
+    // The self lane (design §7.3 step 11): proposals, at most one task, then the gate.
+    if let (Some(repo), true) = (self_repo, cfg.self_improve.enabled) {
+        let stopping = stopped || task::stop_reason(&dirs.stop_file(), deadline).is_some();
+        match super::selflane::lane(&env, repo, stopping) {
+            Ok(v) => {
+                j.append("self_lane_done", v)?;
+            }
+            Err(why) => {
+                j.append("error", json!({ "repo": repo.name, "self_lane": why }))?;
+            }
+        }
+    }
     // The release line (design §7.3 step 10): verified, merged tasks, prepared up to the owner's gate.
     // max_tasks and the failure count end intake only; STOP, the window and incidents end this too.
     for repo in ready.into_iter().filter(|_| !stopped) {
@@ -357,6 +411,10 @@ pub fn run(dirs: &Dirs, cfg: &Config) -> Result<Value, String> {
     }
     super::sandbox::end(cfg, &j, &sandbox)?;
     j.append("shift_finished", json!({ "tasks": c.tasks }))?;
+    // The canary over this shift: the first shift on a new binary may roll it back (§12.5).
+    if let Err(why) = super::selfupdate::canary(dirs, cfg, &gh, &id, &j) {
+        j.append("warning", json!({ "canary": why }))?;
+    }
     let out = super::report::write(dirs, &id);
     drop(lock);
     out

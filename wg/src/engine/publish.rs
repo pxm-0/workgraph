@@ -103,6 +103,60 @@ pub fn scope_refusal(k: &Kernel, changed: &[String], initialized: bool) -> Optio
     (!out.is_empty()).then(|| format!("files no unit planned: {}", out.join(", ")))
 }
 
+/// Haruspex's harness files (its records, and the AGENTS.md and CLAUDE.md its init wrote), as
+/// `plan::scope` defines them. In the self lane they stay local: they are protected and never ship.
+fn harness(f: &str, initialized: bool) -> bool {
+    f.starts_with(".haruspex/") || (initialized && (f == "AGENTS.md" || f == "CLAUDE.md"))
+}
+
+/// Why a self-lane change may not be pushed: any path off the editable allowlist (Haruspex's own
+/// records excepted, which never ship), checked again here whatever the plan said (design §12.1).
+pub fn self_refusal(
+    repo: &std::path::Path,
+    base: &str,
+    changed: &[String],
+    initialized: bool,
+) -> Option<String> {
+    let rules = crate::selfimprove::protected::compiled();
+    let bad: Vec<String> = changed
+        .iter()
+        .filter(|f| !harness(f, initialized))
+        .filter_map(|f| {
+            let existed = crate::git::exists_at(repo, base, f);
+            rules.refusal(if existed { 'M' } else { 'A' }, f)
+        })
+        .collect();
+    (!bad.is_empty()).then(|| {
+        format!(
+            "the self change touches protected paths: {}",
+            bad.join("; ")
+        )
+    })
+}
+
+/// In the self lane, why the Reading's plan may not be built: a unit names a protected path. The
+/// Workers' write roots are their units' files, so no protected change can even be produced.
+pub fn self_plan_refusal(ctx: &RunCtx, r: &wg_factory::api::Reading) -> Option<String> {
+    if !ctx
+        .shift
+        .as_ref()
+        .is_some_and(|s| crate::git::self_branch(&s.branch))
+    {
+        return None;
+    }
+    let rules = crate::selfimprove::protected::compiled();
+    let bad: Vec<String> = r
+        .units
+        .iter()
+        .flat_map(|u| u.files.iter())
+        .filter_map(|f| {
+            let existed = ctx.repo.join(f).exists();
+            rules.refusal(if existed { 'M' } else { 'A' }, f.trim_end_matches('/'))
+        })
+        .collect();
+    (!bad.is_empty()).then(|| format!("the self plan names protected paths: {}", bad.join("; ")))
+}
+
 /// The `risky:<category>` labels of the risky units in this task.
 pub fn risky_labels(k: &Kernel) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
@@ -190,7 +244,8 @@ pub fn publish(ctx: &RunCtx, k: &Kernel, def: &PublishDef, title: &str) -> Resul
         return Err(why);
     }
     let on = crate::git::branch(&ctx.repo)?;
-    if on != sh.branch || !crate::git::task_branch(&on) {
+    let self_lane = crate::git::self_branch(&on);
+    if on != sh.branch || !(crate::git::task_branch(&on) || self_lane) {
         return Err(format!(
             "the worktree is on {on:?}, not the task branch {}",
             sh.branch
@@ -202,10 +257,22 @@ pub fn publish(ctx: &RunCtx, k: &Kernel, def: &PublishDef, title: &str) -> Resul
     if let Some(why) = scope_refusal(k, &changed, initialized) {
         return Err(why);
     }
+    if !def.draft && !self_lane {
+        return Err("only a self-lane PR opens ready; a shift PR is always a draft".into());
+    }
+    if self_lane {
+        if let Some(why) = self_refusal(&ctx.repo, &base, &changed, initialized) {
+            return Err(why);
+        }
+    }
     if let Some(pr) = sh.gh.pr_for_head(&ctx.repo_name, &sh.branch)? {
         return Ok(pr.url);
     }
-    let files = crate::git::dirty_in(&ctx.repo)?;
+    // Harness files stay local in the self lane: they are protected, so they never ship.
+    let files: Vec<String> = crate::git::dirty_in(&ctx.repo)?
+        .into_iter()
+        .filter(|f| !(self_lane && harness(f, initialized)))
+        .collect();
     let message = format!(
         "{title}\n\nWorkgraph-Run: {}\nWorkgraph-Shift: {}\n\n{}",
         ctx.run_id, sh.shift_id, sh.attribution
@@ -217,13 +284,21 @@ pub fn publish(ctx: &RunCtx, k: &Kernel, def: &PublishDef, title: &str) -> Resul
         sh.gh.ensure_label(&ctx.repo_name, &l)?;
         labels.push(l);
     }
+    let body = if self_lane {
+        format!(
+            "Closes #{}\n\nSelf PR by a workgraph shift (run {}). The self-merge gate decides it from the installed base binary after CI: protected paths, lint, check-runs and the eval. It never merges while the lane is in shadow mode.",
+            sh.issue, ctx.run_id
+        )
+    } else {
+        body(ctx, k, sh.issue)
+    };
     sh.gh.pr_create(
         &ctx.repo_name,
         &sh.branch,
         &sh.base,
         title,
-        &body(ctx, k, sh.issue),
-        true,
+        &body,
+        def.draft,
         &labels,
     )
 }

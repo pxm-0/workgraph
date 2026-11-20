@@ -197,7 +197,11 @@ fn write_back(
         Kind::Parked => (e.cfg.shift.label.as_str(), "parked"),
         Kind::Incident => ("wg:incident", "incident"),
     };
-    if add != IN_SHIFT {
+    let self_lane = e.cfg.repo(repo).is_some_and(|r| r.is_self());
+    if self_lane && d.kind == Kind::Parked && !d.resumable() {
+        // Back to the owner's queue: it still carries wg:self, which the factory never touches.
+        intake::relabel(e.dirs, e.gh, repo, n, &[], &[IN_SHIFT])?;
+    } else if add != IN_SHIFT {
         intake::relabel(e.dirs, e.gh, repo, n, &[add], &[IN_SHIFT])?;
     }
     e.gh.comment(repo, n, &comment(repo, n, e.shift_id, d))?;
@@ -221,7 +225,8 @@ fn write_back(
 pub fn work(e: &Env, repo: &RepoCfg, i: &Issue, resume: bool) -> Result<Done, String> {
     let existing = record::load(e.dirs, &repo.name, i.number)?;
     if !resume {
-        intake::claim(e.dirs, e.gh, &e.cfg.shift, &repo.name, i.number, e.shift_id)?;
+        let shift = super::selflane::lane_shift(e.cfg, repo);
+        intake::claim(e.dirs, e.gh, &shift, &repo.name, i.number, e.shift_id)?;
     }
     // Journalled before the worktree and the install, so a shift killed there is resumable.
     let run_id = format!("r-{}", tokens_store::random_hex(6)?);
@@ -232,11 +237,14 @@ pub fn work(e: &Env, repo: &RepoCfg, i: &Issue, resume: bool) -> Result<Done, St
     let branch = existing
         .as_ref()
         .map(|r| r.branch.clone())
-        .unwrap_or_else(|| format!("wg/{}-{}", i.number, issue::slug(&i.title)));
+        .unwrap_or_else(|| {
+            let prefix = if repo.is_self() { "wg-self" } else { "wg" };
+            format!("{prefix}/{}-{}", i.number, issue::slug(&i.title))
+        });
     let rel = format!(
         "{}/{}",
         record::slug(&repo.name),
-        branch.trim_start_matches("wg/")
+        branch.split_once('/').map_or(branch.as_str(), |(_, r)| r)
     );
     let worktree = git::worktree(
         Path::new(&repo.path),
@@ -412,6 +420,12 @@ fn run(
             driver::run_task(ctx, start, &wg_factory::engine::step)?,
         )
     })?;
+    if out["proposals"].as_array().is_some_and(|p| !p.is_empty()) {
+        e.journal.append(
+            "proposals",
+            json!({ "repo": repo.name, "issue": i.number, "run": run_id, "proposals": out["proposals"] }),
+        )?;
+    }
     let task_id = Some(ran.kernel.task_id())
         .filter(|t| !t.is_empty())
         .or(rec.task_id.clone());

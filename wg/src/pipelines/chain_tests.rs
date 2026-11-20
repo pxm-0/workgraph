@@ -146,7 +146,7 @@ fn each_chain_invariant_rejects_one_bad_chain() {
         (release(RELEASE.replace("gate = \"ready-to-release\"    # parks", "gate = \"deployment\"    # parks")), s(&["release"]), "gate must be one of"),
         (release(RELEASE.replace("ask = \"Review", "ask = \"\\nReview")), s(&["release"]), "one line"),
         (Assets::compiled(), s(&["qa", "dev"]), "dev must come first"),
-        (Assets::compiled(), s(&["dev", "self"]), "Phase 5"),
+        (Assets::compiled(), s(&["dev", "self"]), "runs alone"),
         (Assets::compiled(), s(&["dev", "nope"]), "no pipeline named"),
     ];
     for (a, names, want) in cases {

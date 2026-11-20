@@ -15,7 +15,9 @@ its check through `wg sandbox exec`, the one Bash it is granted. Phase 4 stages:
 agent) passes, `rereview` reviews as `review` does, every `<stage>:<unit>#<n>` label is a fixer
 (a `regression:` one sets `E2E = True` in calc.py, which a test's e2e check asserts), `notes`
 writes release notes and `plan` fills the Haruspex task's release plan (and, when the file
-`$HOME/release-incident` exists, also approves ready-to-release itself: an incident)."""
+`$HOME/release-incident` exists, also approves ready-to-release itself: an incident). Phase 5:
+SELF-DOCS plans and writes one editable file, docs/calc.md (a self-lane task), and when the file
+`$HOME/factory-proposal` exists the learn agent proposes a `factory` change."""
 import json
 import os
 import subprocess
@@ -134,6 +136,8 @@ if label.startswith("read"):
              "units": [{"id": "fix", "goal": "make add add", "files": ["calc.py", "test_calc.py"], "dependsOn": [],
                         "criteria": ["AC-001"], "size": "small", "risky": False}],
              "escalations": []}
+    if "SELF-DOCS" in prompt:
+        reply["units"][0]["files"] = ["docs/calc.md"]
     if "RISKY" in prompt:
         reply["units"][0].update({"files": ["calc.py", "test_calc.py", "auth_token.py"], "risky": True,
                                   "riskReason": "touches the auth token"})
@@ -147,6 +151,12 @@ elif label.startswith("work:"):
     record["hook_edit_other_file"] = hook("Edit", {"file_path": "check.py"})
     record["hook_chained_bash"] = hook("Bash", {"command": "python3 check.py; touch escaped"})
     record["hook_approved_check"] = hook("Bash", {"command": "python3 check.py"})
+    if "SELF-DOCS" in prompt:
+        os.makedirs("docs", exist_ok=True)
+        with open("docs/calc.md", "w") as f:
+            f.write("# calc\n\nadd(a, b) returns a + b.\n")
+        print(envelope({"summary": "documented add"}))
+        sys.exit(0)
     test = "from calc import add\nassert add(2, 3) == 5, 'add is wrong'\n"
     if "FAIL-CHECK" in prompt:
         test = "from calc import add\nassert add(2, 3) == 6, 'add(2, 3) is not 6'\n"
@@ -206,6 +216,9 @@ elif label.startswith(("review", "rereview")):
     with open(task_path(), "w") as f:
         json.dump(task, f, indent=2)
     reply = {"passed": True, "criteria": [{"id": "AC-001", "status": "passed", "evidence": ["check:test"]}], "findings": []}
+elif os.path.exists(os.path.join(home, "factory-proposal")):
+    reply = {"rules": [], "proposals": [{"category": "factory", "proposal": "The worker prompt should name the check command once.",
+                                         "evidence": "work:fix ran the check three times"}]}
 else:
     reply = {"rules": [], "proposals": []}
 
