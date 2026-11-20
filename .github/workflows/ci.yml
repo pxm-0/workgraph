@@ -22,7 +22,7 @@ jobs:
           node-version: 22
       - uses: dtolnay/rust-toolchain@stable
       - name: Workflow control-flow tests
-        run: node --test tests/
+        run: node --test tests/*.test.mjs
       - name: wg integration tests (with the real Haruspex CLI)
         working-directory: wg
         env:

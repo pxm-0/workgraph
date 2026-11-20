@@ -72,6 +72,6 @@ claude plugin install workgraph@workgraph
 Control-flow tests run the real workflow script against fake agents. No dependencies.
 
 ```
-node --test tests/
+node --test tests/*.test.mjs
 HARUSPEX_CLI=/abs/path/haruspex.py cargo test --manifest-path wg/Cargo.toml
 ```
