@@ -40,6 +40,14 @@ means it refused: show it and stop.
      release worktree's Haruspex task. The factory stopped there: recording ready-to-release and
      deploying are the owner's own acts, outside this skill. Never run `record`, `approve` or a
      deploy for them.
+   - **Self-improvement.** From `selfImprovement`: a rollback first (say the lane is paused and
+     that `<wg> self resume` is the owner's call); each merged self PR with its revert command; each
+     held or refused self PR with the condition; and each shadow decision ("would merge"): ask the
+     owner whether they agree, and remind them to merge or close it by hand. Never run
+     `<wg> self resume`, least of all `--enable-merge`, or a merge, without the owner's explicit
+     yes in this conversation; enabling merge is the owner's switch once 5 shadow decisions agree.
+     Factory proposals (`wg:self-proposed`) are shown, never worked: the owner files their own
+     `wg:self` issue to act on one.
    - **Parked.** Say why each parked (rate limited, call cap, the issue changed after the claim,
      sandbox unavailable with the doctor's reason; the report's Sandbox section has the doctor
      verdict and the argus fingerprint before and after):
