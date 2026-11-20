@@ -2,14 +2,18 @@
 name = "wg"
 version = "0.3.0"
 edition = "2021"
-description = "Deterministic I/O for the workgraph plugin: recall, check, save, finalize"
+description = "The workgraph kernel: every effect of the factory, plus the legacy recall, check, save and finalize"
 publish = false
 # Test targets are listed below so cli.rs can be compiled through a wrapper (see tests/cli_target.rs,
 # which also fails when a tests/*.rs file has no [[test]] entry here).
 autotests = false
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+toml = "0.8"
+wg-factory = { path = "../wg-factory" }
 
 [[test]]
 name = "cli"
@@ -22,3 +26,7 @@ path = "tests/legacy_args.rs"
 [[test]]
 name = "claude_fixtures"
 path = "tests/claude_fixtures.rs"
+
+[[test]]
+name = "flow"
+path = "tests/flow.rs"

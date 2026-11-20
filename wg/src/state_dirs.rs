@@ -1,0 +1,67 @@
+//! The owner-local layout. `~/.workgraph/` holds state the kernel trusts and is denied to every
+//! agent; `~/.workgraph-work/` holds what agents may touch (temp dirs, later worktrees).
+
+use std::path::PathBuf;
+
+#[derive(Clone, Debug)]
+pub struct Dirs {
+    pub home: PathBuf,
+}
+
+impl Dirs {
+    /// From `$HOME`, which must be absolute.
+    pub fn from_env() -> Result<Dirs, String> {
+        let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
+        let home = PathBuf::from(home);
+        if !home.is_absolute() {
+            return Err("HOME must be an absolute path".into());
+        }
+        Ok(Dirs { home })
+    }
+
+    pub fn state(&self) -> PathBuf {
+        self.home.join(".workgraph")
+    }
+
+    pub fn work(&self) -> PathBuf {
+        self.home.join(".workgraph-work")
+    }
+
+    pub fn config(&self) -> PathBuf {
+        self.state().join("factory.toml")
+    }
+
+    pub fn run(&self, run: &str) -> PathBuf {
+        self.state().join("runs").join(run)
+    }
+
+    pub fn run_tmp(&self, run: &str) -> PathBuf {
+        self.work().join("tmp").join(run)
+    }
+
+    pub fn memory(&self, slug: &str) -> PathBuf {
+        self.state().join("memory").join(format!("{slug}.json"))
+    }
+
+    pub fn ledger(&self) -> PathBuf {
+        self.state().join("cost.jsonl")
+    }
+
+    pub fn key(&self) -> PathBuf {
+        self.state().join("key")
+    }
+
+    pub fn claude_settings(&self) -> PathBuf {
+        self.home.join(".claude").join("settings.json")
+    }
+}
+
+/// Creates `dir` (and parents) readable only by the owner.
+pub fn private_dir(dir: &std::path::Path) -> Result<(), String> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .map_err(|e| format!("cannot create {}: {e}", dir.display()))
+}
