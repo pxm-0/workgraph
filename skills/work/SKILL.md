@@ -2,11 +2,12 @@
 name: work
 description: Run a coding task in the current repo as a graph under a Haruspex Reading. It plans units mapped to acceptance criteria, mitigates non-critical risks itself, builds test-first in parallel on the cheapest proven model, gates on real checks, reviews independently against the criteria, and learns weighted rules. Only when the user types /workgraph:work.
 disable-model-invocation: true
-argument-hint: [--experimental] <task>
+argument-hint: [--experimental] <task> | approve <owner/repo>#<pr>
 ---
 
-If the command starts with `--experimental`, follow **section 6** instead of sections 2-5: the
-Rust path (`wg run`), Phase 1a of the factory design. Otherwise run.js stays the default.
+If the command starts with `approve`, follow **section 7** (a shift's draft PR). If it starts with
+`--experimental`, follow **section 6** instead of sections 2-5: the Rust path (`wg run`), Phase 1a
+of the factory design. Otherwise run.js stays the default.
 
 If no task came with the command, ask for it in one line. Run every command below from the repo
 root. Mechanical steps go through the `wg` binary, which prints one JSON line; read its fields,
@@ -159,3 +160,23 @@ It refuses unless the run's checks and independent review hold at the current tr
 commits (leaving `userChangesBefore` out), approves and records the build gate, verifies and
 records the verification gate, and commits the evidence. On `passed`, push with `-u` and open the
 PR as in section 5; otherwise show `blockedAt` and its `outputTail`, or the refusal.
+
+## 7. `approve <owner/repo>#<pr>`: a shift's draft PR
+
+A nightly shift (`/workgraph:shift`) leaves draft PRs it built under the auto-proceed policy; the
+owner approves each one here. Find `wg` as in section 6.
+
+1. Run `<wg> approval-summary --repo <owner/repo> --pr <pr>` and show: title and URL, `verified`,
+   `reviewed`, the review's criterion verdicts and open findings, `checks`, `checksAlreadyFailing`
+   (handle them as in section 5), skipped risky units, and cost (`costUsd`, `spend` by provider).
+   If `headMatches` is false, someone pushed to the PR after the shift: say so and stop.
+2. Ask once, with AskUserQuestion: "Approve the Haruspex build gate for PR #<pr> and make it ready
+   for review? It is recorded as approved after the build, under your auto-proceed policy."
+   Options: approve (Recommended when verified and reviewed), change something, leave it. Never
+   approve on the owner's behalf.
+3. On approve, run `<wg> approve --repo <owner/repo> --pr <pr> --by "$(git config user.name)"`. It
+   hits the `ask` permission prompt, re-checks the run's kernel evidence at the PR head in the
+   task worktree, approves and records the build gate, verifies, records the verification gate,
+   commits the evidence, pushes the task branch, marks the PR ready and labels the issue
+   `wg:verified`. If `passed` is false, show `blockedAt` and that step's `outputTail`; an `error`
+   is a refusal, show it.
