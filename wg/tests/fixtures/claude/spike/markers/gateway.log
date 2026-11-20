@@ -1,0 +1,3 @@
+{"method": "HEAD", "path": "/api/hello", "model": null, "auth_header": null, "dummy_key_seen": false}
+{"method": "POST", "path": "/v1/messages?beta=true", "model": "openai/gpt-5.1", "auth_header": "x-api-key", "dummy_key_seen": true}
+{"method": "POST", "path": "/v1/messages?beta=true", "model": "openai/gpt-5.1", "auth_header": "x-api-key", "dummy_key_seen": true}

@@ -1,0 +1,1 @@
+{"mcpServers": {"spike": {"command": "/bin/sh", "args": ["-c", "touch <spike>/markers/project_mcp_strict; exit 1"]}}}
