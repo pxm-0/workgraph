@@ -427,3 +427,22 @@ Tracked as GitHub issues; each blocks the Phase 1a work named. The design owner 
 | Permission layer vs `\|`, `$()`, backticks, newline, `>` with a positive control | the "no Bash" fallback decision |
 | Child calls isolated from the owner's `~/.claude`; rerun 8d (no key in Bash env) and 8c (helper cadence on a valid key) there | any key-bearing profile |
 | Doctor refuses user-scope `permissions.allow`/`ask`/`defaultMode` | the runner's first real call |
+
+## Phase 1a follow-up (feat/phase-1)
+
+Recorded with Claude Code 2.1.311 and the `wg` built by CI for `aarch64-apple-darwin` from the
+Phase 1a branch, haiku only, in throwaway repos. Evidence in
+`wg/tests/fixtures/claude/spike/phase1/`.
+
+| Open item | Outcome |
+|---|---|
+| #6 gateway builder dry run | **Done.** `claude/auth_tests.rs` pins the argv, the cleared env plus `ANTHROPIC_BASE_URL`, and the per-call `apiKeyHelper` for `openrouter` and `litellm` profiles, with no network; the shape matches §9 above. Gateway profiles stay unconfirmed for structured output, tools, skills and background calls (no real gateway yet). |
+| #7 a guard built to panic still blocks | **Done.** `wg guard` runs its handler under `catch_unwind` with a 5 s deadline; a forced panic (debug builds, `WG_GUARD_TEST_PANIC`), a corrupt or missing manifest and bad input each exit 2 with a deny (`tests/guard.rs`). A real session (`guard_fail_closed.json`) with the hook pointed at a missing manifest had every Bash and Read call blocked by that exit 2, and the same session with a valid manifest allowed them. |
+| #8 permission layer vs every metacharacter | **Done.** One `dontAsk` session with `Bash(echo spike:*)` (`metachar_positive_control.json`): the plain `echo spike plain` ran (the positive control) and `\|`, `$(...)`, backticks, a newline and `>` were each denied; no marker file exists. With the guard's own metacharacter rule (`guard/bash.rs`, `tests/guard.rs`) both boundaries refuse chaining, so the "no Bash at all" fallback is not needed. |
+| #10 doctor refuses user-scope permissions | **Done.** `wg doctor` and `wg run` refuse `permissions.allow`, `permissions.defaultMode`, and any `permissions.ask` rule other than the four `wg` rules the work skill offers to install (design §9.4); under `-p` an ask is a deny (§14), so those only narrow. |
+| #5 usage-limit and 429 envelopes | **Open.** `RateLimited` is `api_error_status == 429` only, every other `is_error` is `Died`; no limited envelope has occurred yet. |
+| #9 child calls isolated from `~/.claude`; 8c, 8d | **Open.** The per-call plugin profile turns off every plugin but haruspex, mattpocock-skills and ecc (GateGuard), so ecc's own session hooks still write to `~/.claude`. A child with another `HOME` is not logged in (observed), so isolation needs a dedicated config dir or an owner decision; 8c and 8d still need a valid API key. Key-bearing profiles stay unusable until then (`wg doctor` warns). |
+
+Also observed: `wg doctor --live` (haiku, no tools) returns `structured_output` on the
+subscription profile through the full Phase 1a argv, settings and guard; the guard log shows the
+`StructuredOutput` tool passing it.

@@ -1,0 +1,88 @@
+{
+  "argv": "claude -p --output-format stream-json --verbose --model haiku --max-turns 10 --no-session-persistence --permission-mode dontAsk --setting-sources user --strict-mcp-config --mcp-config {\"mcpServers\":{}} --settings <every plugin false> --allowedTools 'Bash(echo spike:*)'",
+  "tool_uses": [
+    "echo spike plain",
+    "echo spike a | touch m_pipe",
+    "echo spike $(touch m_subst)",
+    "echo spike `touch m_tick`",
+    "echo spike nl\ntouch m_newline",
+    "echo spike > m_redirect"
+  ],
+  "tool_results": [
+    {
+      "is_error": false,
+      "content": "spike plain"
+    },
+    {
+      "is_error": true,
+      "content": "Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomp"
+    },
+    {
+      "is_error": true,
+      "content": "Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomp"
+    },
+    {
+      "is_error": true,
+      "content": "Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomp"
+    },
+    {
+      "is_error": true,
+      "content": "Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomp"
+    },
+    {
+      "is_error": true,
+      "content": "Permission to use Bash has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomp"
+    }
+  ],
+  "result": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "num_turns": 7,
+    "total_cost_usd": 0.005950210000000001,
+    "permission_denials": [
+      {
+        "tool_name": "Bash",
+        "tool_use_id": "toolu_0129z22eAAo9nj1pRntNBeaJ",
+        "tool_input": {
+          "command": "echo spike a | touch m_pipe",
+          "description": "Run pipe test command"
+        }
+      },
+      {
+        "tool_name": "Bash",
+        "tool_use_id": "toolu_01XLQresiiPR2sAo3L575X6x",
+        "tool_input": {
+          "command": "echo spike $(touch m_subst)",
+          "description": "Run command substitution test command"
+        }
+      },
+      {
+        "tool_name": "Bash",
+        "tool_use_id": "toolu_0186NLeb6fVx12iYUWV9wDQg",
+        "tool_input": {
+          "command": "echo spike `touch m_tick`",
+          "description": "Run backtick substitution test command"
+        }
+      },
+      {
+        "tool_name": "Bash",
+        "tool_use_id": "toolu_01DgRUcGLWcpBVdHm2AkmbEb",
+        "tool_input": {
+          "command": "echo spike nl\ntouch m_newline",
+          "description": "Run two-line test command"
+        }
+      },
+      {
+        "tool_name": "Bash",
+        "tool_use_id": "toolu_01RVLWR2XwxBXaYM2VrmcyqK",
+        "tool_input": {
+          "command": "echo spike > m_redirect",
+          "description": "Run redirect test command"
+        }
+      }
+    ],
+    "terminal_reason": "completed"
+  },
+  "markers_after": []
+}

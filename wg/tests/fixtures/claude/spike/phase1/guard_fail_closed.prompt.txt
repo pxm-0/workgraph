@@ -1,0 +1,2 @@
+Use the Bash tool to run exactly: echo spike guarded
+Then use the Read tool on notes.txt. Then reply with one line per step: ran or denied.

@@ -1,0 +1,111 @@
+{
+  "argv": "claude -p --output-format stream-json --verbose --model haiku --max-turns 6 --no-session-persistence --permission-mode dontAsk --setting-sources user --strict-mcp-config --mcp-config {\"mcpServers\":{}} --settings <variant> --allowedTools 'Bash(echo spike:*)' Read",
+  "hook": "'<wg release build from CI>' guard --manifest <variant manifest>",
+  "broken": {
+    "manifest": "manifest path does not exist",
+    "tool_uses": [
+      {
+        "tool": "Bash",
+        "input": {
+          "command": "echo spike guarded",
+          "description": "Print spike guarded marker"
+        }
+      },
+      {
+        "tool": "Read",
+        "input": {
+          "file_path": "<spike>/spike7/repo/notes.txt"
+        }
+      },
+      {
+        "tool": "Bash",
+        "input": {
+          "command": "echo spike guarded",
+          "description": "Print spike guarded marker"
+        }
+      },
+      {
+        "tool": "Read",
+        "input": {
+          "file_path": "<spike>/spike7/repo/notes.txt"
+        }
+      }
+    ],
+    "tool_results": [
+      {
+        "is_error": true,
+        "content": "PreToolUse:Bash hook error: cannot read manifest: No such file or directory (os error 2)"
+      },
+      {
+        "is_error": true,
+        "content": "PreToolUse:Read hook error: cannot read manifest: No such file or directory (os error 2)"
+      },
+      {
+        "is_error": true,
+        "content": "PreToolUse:Bash hook error: cannot read manifest: No such file or directory (os error 2)"
+      },
+      {
+        "is_error": true,
+        "content": "PreToolUse:Read hook error: cannot read manifest: No such file or directory (os error 2)"
+      }
+    ],
+    "result": {
+      "subtype": "success",
+      "is_error": false,
+      "num_turns": 5,
+      "total_cost_usd": 0.006140199999999999
+    }
+  },
+  "ok": {
+    "manifest": "valid manifest allowing Read in the repo and Bash prefix 'echo spike'",
+    "tool_uses": [
+      {
+        "tool": "Bash",
+        "input": {
+          "command": "echo spike guarded",
+          "description": "Print spike guarded marker"
+        }
+      },
+      {
+        "tool": "Read",
+        "input": {
+          "file_path": "<spike>/spike7/repo/notes.txt"
+        }
+      }
+    ],
+    "tool_results": [
+      {
+        "is_error": null,
+        "content": "1\thello\n2\t"
+      },
+      {
+        "is_error": false,
+        "content": "spike guarded"
+      }
+    ],
+    "result": {
+      "subtype": "success",
+      "is_error": false,
+      "num_turns": 3,
+      "total_cost_usd": 0.0009965400000000002
+    },
+    "guard_log": [
+      {
+        "ts": 1795171080,
+        "label": "spike7",
+        "tool": "Bash",
+        "decision": "allow",
+        "effect": true,
+        "reason": ""
+      },
+      {
+        "ts": 1795171080,
+        "label": "spike7",
+        "tool": "Read",
+        "decision": "allow",
+        "effect": false,
+        "reason": ""
+      }
+    ]
+  }
+}
