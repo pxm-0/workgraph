@@ -29,6 +29,14 @@ it, your final approval is recorded as approved after the build, under the auto-
 Verification evidence is tied to the commit, so it runs after the commit, and the PR only opens
 if the verification gate passes.
 
+**The Rust path (Phase 1a).** `/workgraph:work --experimental <task>` runs the same pipeline
+through `wg run`: one `claude -p` child per stage with a cleared environment, a per-role tool
+allowlist and the fail-closed `wg guard` hook; the kernel runs the checks itself and keeps their
+results, and `wg finalize --run` refuses unless they and the independent review hold at the
+current tree. Every call is in `~/.workgraph/cost.jsonl` with its provider and model id. Setup
+and the layout under `~/.workgraph/` are in `docs/design/factory.md` (§5, §7.1, §9) and
+`docs/design/adr-001-claude-p-contract.md`. run.js stays the default until Phase 1b.
+
 ## Memory
 
 One file per repo, `.claude/work-memory.json`:
