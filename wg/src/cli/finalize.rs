@@ -101,20 +101,21 @@ pub fn finalize_at(
     {
         return refuse(format!("check {name} changed in project.json since Read"));
     }
-    let pins = if meta.tainted {
-        match sandbox_pins(cfg, repo, &meta) {
-            Ok(p) => p,
-            Err(why) => return refuse(why),
-        }
-    } else {
-        meta.pins.clone()
-    };
     let head = git::head(repo)?;
     let approval = HumanApproval::new(&meta.task_id, &head, by);
+    // Taken before any sandbox pin is written: the commit never carries one.
     let staged: Vec<String> = git::dirty_in(repo)?
         .into_iter()
         .filter(|p| !meta.exclude.contains(p))
         .collect();
+    let (pins, verify_project) = if meta.tainted {
+        match sandbox_pins(cfg, repo, &meta) {
+            Ok((p, text)) => (p, Some(text)),
+            Err(why) => return refuse(why),
+        }
+    } else {
+        (meta.pins.clone(), None)
+    };
     let mut out = finalize_run(
         &approval,
         &RunFinalize {
@@ -123,6 +124,7 @@ pub fn finalize_at(
             evidence_message,
             staged,
             pins: &pins,
+            verify_project,
         },
     );
     out["runId"] = json!(run);
@@ -130,14 +132,16 @@ pub fn finalize_at(
     Ok(out)
 }
 
-/// A tainted task never verifies on the Mac (design §9.5): every pinned check's `project.json`
-/// command becomes the repo's `[repo.sandbox].verify` string, so Haruspex verify runs it in the
-/// sandbox. Without one for every check, the kernel refuses.
+/// A tainted task never verifies on the Mac (design §9.5): for the verify step only, every pinned
+/// check's `project.json` command becomes the repo's `[repo.sandbox].verify` string, so Haruspex
+/// verify runs it in the sandbox. Returns those pins and the `project.json` text that says so;
+/// `finalize_run` writes it just for verify and puts the Read pins back. Without a verify string
+/// for every check, the kernel refuses.
 fn sandbox_pins(
     cfg: &crate::config::Config,
     repo: &std::path::Path,
     meta: &tokens_store::RunMeta,
-) -> Result<std::collections::BTreeMap<String, String>, String> {
+) -> Result<(std::collections::BTreeMap<String, String>, String), String> {
     let host_refused =
         "host verify refused for tainted task; add [repo.sandbox].verify or verify yourself";
     let verify = cfg
@@ -159,10 +163,8 @@ fn sandbox_pins(
     for (check, cmd) in &pins {
         v["commands"][check] = json!(cmd);
     }
-    std::fs::write(
-        &path,
+    Ok((
+        pins,
         serde_json::to_string_pretty(&v).expect("serializes") + "\n",
-    )
-    .map_err(|e| format!("cannot pin project.json to the sandbox: {e}"))?;
-    Ok(pins)
+    ))
 }

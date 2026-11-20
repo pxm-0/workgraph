@@ -117,6 +117,19 @@ pub struct RunFinalize<'a> {
     pub evidence_message: &'a str,
     pub staged: Vec<String>,
     pub pins: &'a std::collections::BTreeMap<String, String>,
+    /// A tainted task's `project.json` for the verify step alone (its checks pointed at the
+    /// sandbox); the original is put back right after, pass or fail, so nothing commits it.
+    pub verify_project: Option<String>,
+}
+
+const PROJECT: &str = ".haruspex/project.json";
+const STATE: &str = ".haruspex/state.json";
+
+/// Writes `text` as `project.json`, recorded as step `name`.
+fn write_project(steps: &mut Vec<Value>, name: &str, text: &str) -> bool {
+    let result = fs::write(PROJECT, text).map_err(|e| format!("cannot write {PROJECT}: {e}"));
+    steps.push(json!({ "step": name, "ok": result.is_ok(), "outputTail": result.err().unwrap_or_default() }));
+    steps.last().is_some_and(|s| s["ok"] == true)
 }
 
 /// `project.json` commands still equal the pins taken at Read (design §9.3).
@@ -154,7 +167,10 @@ pub fn finalize_run(approval: &crate::tokens::HumanApproval, f: &RunFinalize) ->
         step(&mut s, "stage", "git", &git_add)
             && step(&mut s, "commit", "git", &["commit", "-m", f.message])
     };
-    let passed = committed
+    // A finalize that stops leaves no approval or gate behind, so the owner can run it again
+    // (the kernel would otherwise see an approval made outside finalize).
+    let state_before = fs::read_to_string(STATE).ok();
+    let ready = committed
         && step(
             &mut s,
             "approve ready-to-build",
@@ -176,9 +192,28 @@ pub fn finalize_run(approval: &crate::tokens::HumanApproval, f: &RunFinalize) ->
             "python3",
             &[cli, "gate", "ready-to-build", ".", "--record"],
         )
-        && set_task_status(&mut s, task, "verifying")
-        && pins_hold(&mut s, f.pins)
-        && step(&mut s, "verify", "python3", &[cli, "verify", "."])
+        && set_task_status(&mut s, task, "verifying");
+    let verified = match (&f.verify_project, ready) {
+        (Some(sandbox), true) => match fs::read_to_string(PROJECT) {
+            Ok(original) => {
+                let ran = write_project(&mut s, "pin verify to the sandbox", sandbox)
+                    && pins_hold(&mut s, f.pins)
+                    && step(&mut s, "verify", "python3", &[cli, "verify", "."]);
+                write_project(&mut s, "restore project.json", &original) && ran
+            }
+            Err(e) => {
+                s.push(json!({ "step": "pin verify to the sandbox", "ok": false,
+                               "outputTail": format!("cannot read {PROJECT}: {e}") }));
+                false
+            }
+        },
+        (_, ready) => {
+            ready
+                && pins_hold(&mut s, f.pins)
+                && step(&mut s, "verify", "python3", &[cli, "verify", "."])
+        }
+    };
+    let passed = verified
         && step(
             &mut s,
             "gate verification",
@@ -196,5 +231,16 @@ pub fn finalize_run(approval: &crate::tokens::HumanApproval, f: &RunFinalize) ->
         .iter()
         .find(|x| x["ok"] == false)
         .map(|x| x["step"].clone());
+    if !passed {
+        let undone = match &state_before {
+            Some(text) => fs::write(STATE, text),
+            None => fs::remove_file(STATE).or_else(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => Ok(()),
+                _ => Err(e),
+            }),
+        };
+        s.push(json!({ "step": "restore state.json", "ok": undone.is_ok(),
+                       "outputTail": undone.err().map(|e| format!("cannot restore {STATE}: {e}")).unwrap_or_default() }));
+    }
     json!({ "passed": passed, "blockedAt": blocked_at, "staged": f.staged, "steps": s })
 }

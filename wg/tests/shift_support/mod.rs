@@ -292,6 +292,62 @@ impl Fx {
             .join(format!("{}#{n}.json", repo.replace('/', "__")))
     }
 
+    /// Gives the one repo a `[repo.sandbox]` and a fake `orb` (fixtures/fake-orb.py) playing the
+    /// agent; with `verify`, Haruspex verify of a tainted task goes through `wg sandbox exec`.
+    pub fn with_sandbox(&self, verify: bool) {
+        for name in ["orb", "orbctl"] {
+            let to = copy_script(&self.base, "fake-orb.py");
+            fs::rename(&to, self.base.join(name)).unwrap();
+        }
+        let text = fs::read_to_string(self.toml()).unwrap().replacen(
+            "[tools]\n",
+            &format!(
+                "[tools]\norb = \"{}\"\norbctl = \"{}\"\n",
+                self.base.join("orb").display(),
+                self.base.join("orbctl").display()
+            ),
+            1,
+        );
+        fs::write(self.toml(), text).unwrap();
+        let verify = if verify {
+            format!(
+                "verify = {{ test = \"{} sandbox exec --task {{task}} --check test\" }}\n",
+                env!("CARGO_BIN_EXE_wg")
+            )
+        } else {
+            String::new()
+        };
+        self.append_toml(&format!(
+            "[repo.sandbox]\nimage = \"docker.io/library/python@sha256:{}\"\nchecks = {{ test = \"python3 check.py\" }}\n{verify}",
+            "a".repeat(64)
+        ));
+    }
+
+    /// What the fake `claude` recorded for each call of run `run`.
+    pub fn claude_records(&self, run: &str) -> Vec<Value> {
+        self.journal(
+            &self
+                .home
+                .join(".workgraph/runs")
+                .join(run)
+                .join("guard/fake-claude.jsonl"),
+        )
+    }
+
+    /// `(label, target)` of every `checks_run` in run `run`.
+    pub fn check_targets(&self, run: &str) -> Vec<(String, String)> {
+        self.run_journal(run)
+            .iter()
+            .filter(|e| e["kind"] == "checks_run")
+            .map(|e| {
+                (
+                    e["label"].as_str().unwrap_or("").to_string(),
+                    e["target"].as_str().unwrap_or("").to_string(),
+                )
+            })
+            .collect()
+    }
+
     pub fn record(&self, repo: &str, n: u64) -> Value {
         let p = self
             .home
