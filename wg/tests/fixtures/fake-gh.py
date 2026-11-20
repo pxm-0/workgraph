@@ -4,7 +4,9 @@ state file named by FAKE_GH_STATE, applies label edits, comments and PRs to it, 
 Label edits are made by FAKE_GH_ACTOR (the owner's token), PR heads are read from the local bare
 origin named in the state. `fail` maps a command ("pr ready") to how many more calls of it fail,
 and `touch` maps one to a file it creates when it runs (a STOP file mid-publish, say). A PR the
-test merged carries `state: MERGED` and its `mergeCommit` oid."""
+test merged carries `state: MERGED` and its `mergeCommit` oid (`merge_exits_nonzero` makes the next
+merge land and still exit 1; `merge_commit_late` hides it from `pr view`). `pr edit` refuses a
+label the repo does not have, as GitHub does."""
 import json
 import os
 import subprocess
@@ -80,7 +82,8 @@ def pr_view(p):
         view |= {"baseRefName": p["base"], "isDraft": p["draft"], "mergeable": p.get("mergeable", "MERGEABLE"),
                  "labels": [{"name": l} for l in p["labels"]], "commits": commits(p)}
     if "mergeCommit" in args[-1]:  # `pr view --json ...,mergeCommit`: a merged PR names its merge
-        view["mergeCommit"] = {"oid": p["mergeCommit"]} if p.get("mergeCommit") else None
+        late = state.get("merge_commit_late")  # GitHub has not computed it yet
+        view["mergeCommit"] = {"oid": p["mergeCommit"]} if p.get("mergeCommit") and not late else None
     return view
 
 
@@ -144,6 +147,10 @@ if args[:2] == ["pr", "list"] and "--label" in args:
                    if p["repo"] == repo and p.get("state") == "OPEN" and label in p["labels"]])
 if args[:2] == ["pr", "edit"]:
     p = next(p for p in state["prs"] if p["repo"] == opt("-R") and p["number"] == int(args[2]))
+    missing = [l for l in opts("--add-label") if l not in state.get("labels", {}).get(opt("-R"), [])]
+    if missing:  # as GitHub does: a label the repo lacks is an error, not a new label
+        sys.stderr.write(f"fake gh: '{missing[0]}' not found\n")
+        save_and_exit(None, 1)
     for l in opts("--add-label"):
         if l not in p["labels"]:
             p["labels"].append(l)
@@ -167,6 +174,9 @@ if args[:2] == ["pr", "merge"]:
     if "--delete-branch" in args:
         git(p["repo"], "update-ref", "-d", f"refs/heads/{p['headRefName']}")
     p.update({"state": "MERGED", "mergeCommit": m, "headRefOid": h})
+    if state.get("merge_exits_nonzero"):  # merged, then the connection dropped
+        state["merge_exits_nonzero"] = False
+        save_and_exit(None, 1)
     save_and_exit("")
 if args[:2] == ["issue", "create"]:
     repo = opt("-R")

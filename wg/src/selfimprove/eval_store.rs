@@ -44,6 +44,23 @@ pub fn checked_store_at(s: &Path, m: &replay_check::Manifest) -> Result<Vec<Fixt
     if format!("{:x}", Sha256::digest(tree.as_bytes())) != m.store.tree_sha256 {
         return Err("the fixture store's tree does not match its pinned sha256".into());
     }
+    // The arms read fixtures from the working tree, so it must be exactly the pinned commit.
+    let dirty = git(
+        s,
+        &[
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--ignored",
+        ],
+        &[],
+    )?;
+    if !dirty.trim().is_empty() {
+        return Err(format!(
+            "the fixture store has changes outside its pinned commit: {}",
+            crate::ids::one_line(&dirty, 200)
+        ));
+    }
     let f = eval_live::fixtures(s)?;
     eval_live::enough(&f, m.store.min_fixtures, m.store.min_needs_decision)?;
     Ok(f)
@@ -104,6 +121,9 @@ impl Arms for ProcArms {
             cost_micros: v["cost_micros"].as_u64().unwrap_or(0),
             incidents: v["incidents"].as_u64().unwrap_or(0) as u32,
             by_provider: serde_json::from_value(v["by_provider"].clone()).unwrap_or_default(),
+            units: v["units"].as_u64().unwrap_or(0) as u32,
+            criteria: strings(&v["criteria"]),
+            required_checks: strings(&v["required_checks"]),
         })
     }
 }
@@ -268,10 +288,12 @@ pub fn arm(
         &fx.expected_status,
         hidden_ok,
     );
+    let shape = eval_live::shape(ran.kernel.reading.as_ref(), &ran.kernel.required);
     Ok(
         json!({ "run": run_id, "status": r.status, "escalations": r.escalations, "gates": r.gates,
                "schema_ok": r.schema_ok, "passed": r.passed, "cost_micros": r.cost_micros,
-               "incidents": r.incidents, "by_provider": r.by_provider }),
+               "incidents": r.incidents, "by_provider": r.by_provider, "units": shape.units,
+               "criteria": shape.criteria, "required_checks": shape.required_checks }),
     )
 }
 
@@ -392,6 +414,22 @@ mod tests {
         assert!(checked_store_at(&d, &more)
             .unwrap_err()
             .contains("at least 11"));
+        // Uncommitted, untracked or ignored files are not the pinned data the arms may read.
+        for change in [
+            "echo 'checks = {}' >> fixtures/f0/fixture.toml",
+            "echo x > fixtures/f1/task.md",
+            "mkdir -p fixtures/f2/hidden && echo y > fixtures/f2/hidden/test_x.py",
+        ] {
+            sh(&d, change);
+            assert!(
+                checked_store_at(&d, &m)
+                    .unwrap_err()
+                    .contains("changes outside its pinned commit"),
+                "{change}"
+            );
+            sh(&d, "git checkout -q -- . && git clean -qfdx");
+        }
+        assert_eq!(checked_store_at(&d, &m).unwrap().len(), 10);
         sh(&d, "git commit -q --allow-empty -m later");
         assert!(checked_store_at(&d, &m).unwrap_err().contains("the pin is"));
         let _ = std::fs::remove_dir_all(&d);

@@ -7,6 +7,7 @@
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 pub const GENESIS: &str = "0000000000000000000000000000000000000000000000000000000000000000";
@@ -17,6 +18,25 @@ pub struct Ledger {
 
 fn sha(line: &str) -> String {
     format!("{:x}", Sha256::digest(line.as_bytes()))
+}
+
+/// An exclusive `flock` on `<path>.lock`, held until the file drops: the owner's CLI commands and a
+/// shift's self lane never interleave a read-modify-write of the ledger or of `self.json`.
+pub fn exclusive(path: &Path) -> Result<std::fs::File, String> {
+    if let Some(d) = path.parent() {
+        crate::state_dirs::private_dir(d)?;
+    }
+    let lock = path.with_extension("lock");
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&lock)
+        .map_err(|e| format!("cannot open {}: {e}", lock.display()))?;
+    f.lock()
+        .map_err(|e| format!("cannot lock {}: {e}", lock.display()))?;
+    Ok(f)
 }
 
 impl Ledger {
@@ -53,6 +73,7 @@ impl Ledger {
 
     /// Appends `{seq, at, prev, kind, ...fields}` (fsynced) and returns it.
     pub fn append(&self, kind: &str, fields: Value) -> Result<Value, String> {
+        let _held = exclusive(&self.path)?;
         let entries = self.entries()?;
         let prev = match std::fs::read_to_string(&self.path) {
             Ok(t) => t.lines().last().map(sha).unwrap_or_else(|| GENESIS.into()),
@@ -71,9 +92,6 @@ impl Ledger {
             }
         }
         let v = Value::Object(m);
-        if let Some(d) = self.path.parent() {
-            crate::state_dirs::private_dir(d)?;
-        }
         let mut f = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -102,9 +120,55 @@ impl Ledger {
             .and_then(|e| e["run"].as_str().map(str::to_string)))
     }
 
-    /// Merge SHAs on main of every factory merge.
+    /// The last gate decision recorded for `pr` at `head`.
+    pub fn last_decision(&self, pr: u64, head: &str) -> Result<Option<Value>, String> {
+        Ok(self
+            .of_kind("decision")?
+            .into_iter()
+            .rev()
+            .find(|d| d["pr"] == pr && d["head"] == head))
+    }
+
+    /// Every factory merge, oldest first. A `merging` decision counts from the moment it is recorded
+    /// (so a merge whose follow-up call failed still holds every rate limit), until a `merged`
+    /// entry names its merge SHA or a later decision on the same head says it never happened; until
+    /// then its `merge` is null.
     pub fn merges(&self) -> Result<Vec<Value>, String> {
-        self.of_kind("merged")
+        let all = self.entries()?;
+        let same = |a: &Value, b: &Value| a["pr"] == b["pr"] && a["head"] == b["head"];
+        let mut out: Vec<Value> = Vec::new();
+        for (i, e) in all.iter().enumerate() {
+            let unresolved = e["kind"] == "decision"
+                && e["outcome"] == "merging"
+                && !all[i + 1..]
+                    .iter()
+                    .any(|l| (l["kind"] == "merged" || l["kind"] == "decision") && same(l, e));
+            if e["kind"] == "merged" {
+                out.push(e.clone());
+            } else if unresolved {
+                out.push(
+                    json!({ "seq": e["seq"], "at": e["at"], "kind": "merged", "pr": e["pr"],
+                                 "head": e["head"], "merge": null, "decision": e["seq"] }),
+                );
+            }
+        }
+        Ok(out)
+    }
+
+    /// `merging` decisions with no merge SHA yet, as `(pr, head, decision seq)`.
+    pub fn unresolved_merges(&self) -> Result<Vec<(u64, String, u64)>, String> {
+        Ok(self
+            .merges()?
+            .iter()
+            .filter(|m| m["merge"].is_null())
+            .filter_map(|m| {
+                Some((
+                    m["pr"].as_u64()?,
+                    m["head"].as_str()?.to_string(),
+                    m["decision"].as_u64()?,
+                ))
+            })
+            .collect())
     }
 }
 
@@ -147,5 +211,58 @@ mod tests {
         assert!(l.entries().is_err(), "a replayed line breaks it too");
         std::fs::write(dir.join("self-ledger.jsonl"), "nope\n").unwrap();
         assert!(l.entries().unwrap_err().contains("not JSON"));
+    }
+
+    #[test]
+    fn concurrent_writers_never_break_the_chain() {
+        let dir = std::env::temp_dir().join(format!("wg-ledger-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("self-ledger.jsonl");
+        let writers: Vec<_> = (0..8)
+            .map(|w| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for i in 0..15 {
+                        Ledger::at(&path)
+                            .append("x", json!({ "w": w, "i": i }))
+                            .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for w in writers {
+            w.join().unwrap();
+        }
+        assert_eq!(Ledger::at(&path).entries().unwrap().len(), 120);
+    }
+
+    #[test]
+    fn a_merging_decision_counts_as_a_merge_until_resolved() {
+        let dir = std::env::temp_dir().join(format!("wg-ledger-merge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let l = Ledger::at(&dir.join("self-ledger.jsonl"));
+        let merging = |pr: u64| json!({ "pr": pr, "head": "h", "outcome": "merging" });
+        l.append("decision", merging(1)).unwrap();
+        let m = l.merges().unwrap();
+        assert_eq!((m.len(), m[0]["merge"].is_null()), (1, true), "{m:?}");
+        assert_eq!(l.unresolved_merges().unwrap(), [(1, "h".to_string(), 1)]);
+        l.append("merged", json!({ "pr": 1, "head": "h", "merge": "m1" }))
+            .unwrap();
+        assert_eq!(l.merges().unwrap().len(), 1, "one merge, now with its SHA");
+        assert_eq!(l.merges().unwrap()[0]["merge"], "m1");
+        // A merge that never happened is followed by a refusal on the same head.
+        l.append("decision", merging(2)).unwrap();
+        l.append(
+            "decision",
+            json!({ "pr": 2, "head": "h", "outcome": "refused" }),
+        )
+        .unwrap();
+        assert_eq!(l.merges().unwrap().len(), 1);
+        assert!(l.unresolved_merges().unwrap().is_empty());
+        assert_eq!(
+            l.last_decision(2, "h").unwrap().unwrap()["outcome"],
+            "refused"
+        );
+        assert!(l.last_decision(3, "h").unwrap().is_none());
     }
 }

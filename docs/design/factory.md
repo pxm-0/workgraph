@@ -2491,7 +2491,22 @@ Deviations, each on the safe side:
   act on one the owner files a `wg:self` issue of their own.
 - Install requires the `ci.yml` checks (self-gate runs on PRs only) and the release build of a
   push to main, which uploads `wg`, `wg.sha256` and `head_sha` per target. Self-update happens only
-  when the shift runs the installed `current` binary.
+  when the shift runs the installed `current` binary, and compares origin/main with what `current`
+  points at (not the ledger's last install), so it re-execs at most once.
+- The gate decides a head once: the same outcome and reason on the same head is not recorded,
+  labelled or commented again, and an `eval` entry for (PR, head) is reused, so re-gating an
+  unchanged head is free and only a new head spends one of `max_eval_runs_per_pr`.
+  `mergeable: UNKNOWN` is `pending`. The `merging` decision counts as a merge for every rate limit
+  until a `merged` entry names its SHA; a merge call that errors is judged by the PR's state on
+  GitHub. The self-ledger and `self.json` are written under an exclusive lock.
+- Stage 1 also compares the Reading's shape: a candidate whose Reading loses criteria, required
+  checks or every unit fails. In an eval nothing publishes, so a `done` fixture passes on
+  `ready_for_review` with its hidden tests passing.
+- A shift that stops before its work (window closed, preflight, sandbox start) journals
+  `shift_ended_early`; the canary does not judge it. A rollback is recorded before its revert PR;
+  a revert PR that could not open (`revert_failed`) is retried by the next `wg self rollback`.
+  The fixture store must be clean at its pinned commit, and `wg eval capture` refuses a history
+  that holds any `.env*` file other than `.env.example`.
 
 ### Phase 6: hardening (optional, each needing an owner decision)
 

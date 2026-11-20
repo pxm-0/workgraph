@@ -23,6 +23,9 @@ fn ok(cost: u64) -> ArmResult {
         cost_micros: cost,
         incidents: 0,
         by_provider: BTreeMap::new(),
+        units: 1,
+        criteria: vec!["AC-001".into(), "AC-002".into()],
+        required_checks: vec!["test".into()],
     }
 }
 
@@ -102,6 +105,35 @@ fn each_regression_fails_the_pr() {
         ),
         (
             Box::new(|_, a, _| ArmResult {
+                criteria: if a == Arm::Candidate {
+                    vec!["AC-001".into()]
+                } else {
+                    ok(1).criteria
+                },
+                ..ok(1)
+            }),
+            "lost criteria [\"AC-002\"]",
+        ),
+        (
+            Box::new(|_, a, _| ArmResult {
+                required_checks: if a == Arm::Candidate {
+                    vec![]
+                } else {
+                    vec!["test".into()]
+                },
+                ..ok(1)
+            }),
+            "lost required checks",
+        ),
+        (
+            Box::new(|_, a, _| ArmResult {
+                units: u32::from(a == Arm::Base),
+                ..ok(1)
+            }),
+            "units became none",
+        ),
+        (
+            Box::new(|_, a, _| ArmResult {
                 schema_ok: a == Arm::Base,
                 ..ok(1)
             }),
@@ -135,6 +167,19 @@ fn each_regression_fails_the_pr() {
         assert!(!o.passed && o.reason.contains(want), "{want}: {}", o.reason);
     }
     let at_limit = script(|_, a, _| ok(if a == Arm::Candidate { 115 } else { 100 }));
+    let more = script(|_, a, _| ArmResult {
+        criteria: if a == Arm::Candidate {
+            vec!["AC-001".into(), "AC-002".into(), "AC-003".into()]
+        } else {
+            ok(1).criteria
+        },
+        units: if a == Arm::Candidate { 3 } else { 1 },
+        ..ok(1)
+    });
+    assert!(
+        evaluate(&ten(), &more, 7).unwrap().passed,
+        "a Reading that adds criteria or splits units loses nothing"
+    );
     assert!(evaluate(&ten(), &at_limit, 7).unwrap().passed);
 }
 
@@ -193,6 +238,13 @@ fn arm_results_come_from_the_result_journal_and_ledger() {
     assert_eq!(r.by_provider["anthropic-api"], 2);
     assert!(!arm_result(&out, &journal, &ledger, "r-1", "done", true).passed);
     assert!(!arm_result(&out, &journal, &ledger, "r-1", "needs_decision", false).passed);
+    let built = json!({ "status": "ready_for_review" });
+    assert!(
+        arm_result(&built, &journal, &ledger, "r-1", "done", true).passed,
+        "a done fixture passes on a finished build whose hidden tests pass"
+    );
+    assert!(!arm_result(&built, &journal, &ledger, "r-1", "done", false).passed);
+    assert!(!arm_result(&built, &journal, &ledger, "r-1", "needs_decision", true).passed);
 }
 
 #[test]

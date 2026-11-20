@@ -142,17 +142,20 @@ pub fn lane(e: &Env, repo: &RepoCfg, stopped: bool) -> Result<Value, String> {
             e.journal
                 .append("self_lane", json!({ "task": null, "why": w }))?;
         }
-        None => task = one_task(e, repo, &ledger)?,
+        None => task = one_task(e, repo)?,
     }
     let mut gated = Vec::new();
     let mut merges = 0;
     for pr in github::open_self_prs(e.gh, &repo.name)? {
+        let before = ledger.merges()?.len();
         let o = crate::cli::self_::run_gate(e.dirs, e.cfg, e.gh, pr, merges);
         let (name, reason) = match &o {
             Ok(o) => (o.name().to_string(), o.reason()),
             Err(why) => ("error".to_string(), why.clone()),
         };
-        if matches!(o, Ok(crate::selfimprove::gate::Outcome::Merged { .. })) {
+        // The ledger, not the outcome, says whether a merge happened: an error after the merge
+        // still counts toward one merge per shift.
+        if ledger.merges()?.len() > before {
             merges += 1;
         }
         e.journal.append(
@@ -166,7 +169,7 @@ pub fn lane(e: &Env, repo: &RepoCfg, stopped: bool) -> Result<Value, String> {
 
 /// Takes the first owner-queued `wg:self` issue no factory process labelled, works it, and
 /// records the published head in the self-ledger.
-fn one_task(e: &Env, repo: &RepoCfg, ledger: &Ledger) -> Result<Value, String> {
+fn one_task(e: &Env, repo: &RepoCfg) -> Result<Value, String> {
     let shift = lane_shift(e.cfg, repo);
     let reruns = super::record::issues_of(e.dirs, &repo.name)?;
     let picked = intake::intake(
@@ -202,19 +205,34 @@ fn one_task(e: &Env, repo: &RepoCfg, ledger: &Ledger) -> Result<Value, String> {
     }
     let d = super::run::work_one(e, repo, i, false)?;
     let mut out = json!({ "issue": i.number, "outcome": d.kind.name() });
-    if d.kind == Kind::Pr {
-        let rec = super::record::load(e.dirs, &repo.name, i.number)?.ok_or("no task record")?;
-        let head = crate::git::head(std::path::Path::new(&rec.worktree))?;
-        let pr = rec.pr.ok_or("the self PR has no number")?;
-        let spend = run_spend(e, d.run.as_deref().unwrap_or(""))?;
-        ledger.append(
-            "authored",
-            json!({ "repo": repo.name, "pr": pr, "head": head, "run": d.run, "branch": rec.branch, "issue": i.number, "spend": spend }),
-        )?;
+    if let Some(pr) = authored(e, repo, i.number, &d)? {
         out["pr"] = json!(pr);
     }
     e.journal.append("self_lane", json!({ "task": out }))?;
     Ok(out)
+}
+
+/// Records the head a self task published, with its run and spend, so the gate knows the factory
+/// authored it and the day and week caps count it. Called after a shift's task and after
+/// `wg shift resume` finishes one; the PR number when there was a PR.
+pub fn authored(
+    e: &Env,
+    repo: &RepoCfg,
+    issue: u64,
+    d: &super::task::Done,
+) -> Result<Option<u64>, String> {
+    if !repo.is_self() || d.kind != Kind::Pr {
+        return Ok(None);
+    }
+    let rec = super::record::load(e.dirs, &repo.name, issue)?.ok_or("no task record")?;
+    let head = crate::git::head(std::path::Path::new(&rec.worktree))?;
+    let pr = rec.pr.ok_or("the self PR has no number")?;
+    let spend = run_spend(e, d.run.as_deref().unwrap_or(""))?;
+    Ledger::at(&e.dirs.self_ledger()).append(
+        "authored",
+        json!({ "repo": repo.name, "pr": pr, "head": head, "run": d.run, "branch": rec.branch, "issue": issue, "spend": spend }),
+    )?;
+    Ok(Some(pr))
 }
 
 /// A run's spend by provider, from the cost ledger (micro-dollars; unknown costs counted apart).

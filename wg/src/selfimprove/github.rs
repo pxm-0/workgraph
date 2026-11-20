@@ -206,9 +206,33 @@ pub fn required(
     Ok(None)
 }
 
+/// Adds a gate label to PR `n`, creating it first: `gh pr edit --add-label` fails on a label the
+/// repo does not have.
 pub fn label_pr(gh: &Gh, repo: &str, n: u64, label: &str) -> Result<(), String> {
     crate::config::repo_slug(repo)?;
     crate::ids::gh_label(label)?;
+    let (color, what) = match label {
+        SHADOW => (
+            "0E8A16",
+            "workgraph: the self gate would merge this (shadow mode)",
+        ),
+        _ => (
+            "D93F0B",
+            "workgraph: the self gate held or refused this; the owner's now",
+        ),
+    };
+    gh.run(&[
+        "label",
+        "create",
+        label,
+        "-R",
+        repo,
+        "--color",
+        color,
+        "--description",
+        what,
+        "--force",
+    ])?;
     gh.run(&[
         "pr",
         "edit",

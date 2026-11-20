@@ -7,7 +7,7 @@
 use crate::config::Config;
 use crate::gh::Gh;
 use crate::journal::Journal;
-use crate::selfimprove::{install, ledger::Ledger};
+use crate::selfimprove::install;
 use crate::state_dirs::Dirs;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -17,6 +17,11 @@ pub fn installed(dirs: &Dirs) -> bool {
     let cur = dirs.bin().join("current").join("wg").canonicalize();
     let exe = std::env::current_exe().and_then(|p| p.canonicalize());
     matches!((cur, exe), (Ok(c), Ok(e)) if c == e)
+}
+
+/// The `bin/` directory a main SHA installs to.
+fn dir_of(sha: &str) -> String {
+    format!("wg-{}", &sha[..12])
 }
 
 /// Installs origin/main when it moved and its CI passed; the path to re-exec, if it did.
@@ -37,14 +42,13 @@ pub fn update(dirs: &Dirs, cfg: &Config, gh: &Gh, j: &Journal) -> Result<Option<
     let path = Path::new(&repo.path);
     crate::git::fetch(path)?;
     let main = crate::git::git(path, &["rev-parse", "origin/main"], &[])?;
-    let last = Ledger::at(&dirs.self_ledger())
-        .of_kind("installed")?
-        .last()
-        .and_then(|i| i["sha"].as_str().map(str::to_string));
-    if last.as_deref() == Some(main.as_str()) {
+    // What `current` points at decides, not the ledger's last install: a rollback or a drill can
+    // leave those apart, and re-exec'ing an install that changed nothing would never end.
+    if install::sha_ok(&main) && install::link(dirs, "current") == Some(dir_of(&main)) {
         return Ok(None);
     }
     match install::install(dirs, gh, &cfg.self_improve.repo, &main) {
+        Ok(v) if v["already"] == true => Ok(None),
         Ok(v) => {
             j.append("self_update", json!({ "installed": v }))?;
             Ok(Some(dirs.bin().join("current").join("wg")))

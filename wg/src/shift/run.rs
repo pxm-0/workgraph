@@ -228,6 +228,13 @@ pub fn work_one(e: &Env, repo: &RepoCfg, i: &Issue, resume: bool) -> Result<Done
     Ok(d)
 }
 
+/// A shift that stops before its work: the canary never takes it for a crash (design §12.5).
+fn ended_early(dirs: &Dirs, j: &Journal, id: &str, why: String) -> Result<Value, String> {
+    j.append("stopped", json!({ "why": why }))?;
+    j.append("shift_ended_early", json!({ "why": why }))?;
+    super::report::write(dirs, id)
+}
+
 pub fn run(dirs: &Dirs, cfg: &Config) -> Result<Value, String> {
     if dirs.stop_file().exists() {
         return Ok(json!({ "skipped": "the STOP file exists" }));
@@ -265,8 +272,7 @@ pub fn run(dirs: &Dirs, cfg: &Config) -> Result<Value, String> {
     }
     let now_min = super::config::minutes(&local("%H:%M")?)?;
     let Some(left) = minutes_left(cfg.shift.start, cfg.shift.until, now_min) else {
-        j.append("stopped", json!({ "why": "window closed" }))?;
-        return super::report::write(dirs, &id);
+        return ended_early(dirs, &j, &id, "window closed".into());
     };
     let deadline = now() + u64::from(left) * 60;
     // Step 2: self-update. The new binary runs this shift from the start, under a new id.
@@ -291,11 +297,13 @@ pub fn run(dirs: &Dirs, cfg: &Config) -> Result<Value, String> {
         }
     }
     if let Err(why) = preflight(dirs, cfg, &gh) {
-        j.append("stopped", json!({ "why": format!("preflight: {why}") }))?;
-        return super::report::write(dirs, &id);
+        return ended_early(dirs, &j, &id, format!("preflight: {why}"));
     }
     j.append("preflight", json!({ "ok": true }))?;
-    let sandbox = super::sandbox::start(cfg, &j)?;
+    let sandbox = match super::sandbox::start(cfg, &j) {
+        Ok(s) => s,
+        Err(why) => return ended_early(dirs, &j, &id, format!("sandbox: {why}")),
+    };
     let env = Env {
         dirs,
         cfg,

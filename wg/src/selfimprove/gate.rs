@@ -98,11 +98,19 @@ fn step1(p: &SelfPr, ledger: &Ledger, open: usize) -> Result<Option<Outcome>, St
             ))));
         }
     }
-    if p.mergeable != "MERGEABLE" {
-        return Ok(Some(Outcome::Held(format!(
-            "the PR is not mergeable ({})",
-            p.mergeable
-        ))));
+    match p.mergeable.as_str() {
+        "MERGEABLE" => {}
+        // GitHub computes it lazily: a PR opened moments ago reads UNKNOWN until then.
+        "" | "UNKNOWN" => {
+            return Ok(Some(Outcome::Pending(
+                "GitHub has not computed mergeability yet".into(),
+            )))
+        }
+        m => {
+            return Ok(Some(Outcome::Held(format!(
+                "the PR is not mergeable ({m})"
+            ))))
+        }
     }
     if open > super::config::MAX_OPEN_SELF_PRS {
         return Ok(Some(Outcome::Held(format!(
@@ -117,6 +125,12 @@ fn step1(p: &SelfPr, ledger: &Ledger, open: usize) -> Result<Option<Outcome>, St
 fn finish(e: &Env, ledger: &Ledger, p: &SelfPr, base: &str, o: Outcome) -> Result<Outcome, String> {
     if matches!(o, Outcome::Pending(_)) {
         return Ok(o);
+    }
+    // The same decision on the same head was recorded, labelled and commented already.
+    if let Some(last) = ledger.last_decision(p.number, &p.head)? {
+        if last["outcome"] == o.name() && last["reason"] == o.reason() {
+            return Ok(o);
+        }
     }
     let st = state::load(&e.dirs.self_state())?;
     ledger.append(
@@ -156,7 +170,17 @@ pub fn gate(e: &Env, pr: u64) -> Result<Outcome, String> {
     let repo = e.cfg.self_improve.repo.clone();
     let ledger = Ledger::at(&e.dirs.self_ledger());
     ledger.entries()?;
+    super::merge::reconcile(e.gh, &repo, &ledger)?;
     let p = github::self_pr(e.gh, &repo, pr)?;
+    if ledger
+        .unresolved_merges()?
+        .iter()
+        .any(|(n, h, _)| *n == pr && *h == p.head)
+    {
+        return Ok(Outcome::Pending(
+            "merged; GitHub has not named its merge commit yet".into(),
+        ));
+    }
     let open = github::open_self_prs(e.gh, &repo)?.len();
     if let Some(o) = step1(&p, &ledger, open)? {
         return finish(e, &ledger, &p, "", o);
@@ -215,13 +239,27 @@ pub fn gate(e: &Env, pr: u64) -> Result<Outcome, String> {
             files.join(", ")
         )));
     }
-    // Step 5: Tier B, only when prompts or pipelines changed.
-    if !assets.is_empty() {
-        let used = ledger
-            .of_kind("eval")?
-            .iter()
-            .filter(|v| v["pr"] == pr)
-            .count() as u32;
+    // Step 5: Tier B, only when prompts or pipelines changed. A head already evaluated keeps its
+    // result: re-gating an unchanged head never pays for, or counts, another eval.
+    let evals: Vec<Value> = ledger
+        .of_kind("eval")?
+        .into_iter()
+        .filter(|v| v["pr"] == pr)
+        .collect();
+    let earlier = evals.iter().rev().find(|v| v["head"] == p.head.as_str());
+    if let (false, Some(v)) = (assets.is_empty(), earlier) {
+        if v["passed"] != true {
+            let why = v["reason"].as_str().unwrap_or("").to_string();
+            return finish(
+                e,
+                &ledger,
+                &p,
+                &base,
+                Outcome::Refused(format!("eval: {why}")),
+            );
+        }
+    } else if !assets.is_empty() {
+        let used = evals.len() as u32;
         if used >= e.cfg.self_improve.max_eval_runs_per_pr {
             return finish(
                 e,
@@ -288,14 +326,12 @@ pub fn gate(e: &Env, pr: u64) -> Result<Outcome, String> {
         json!({ "pr": pr, "head": p.head, "base": base, "outcome": "merging", "reason": "every condition passed", "shadow": false }),
     )?;
     let decision = SelfMergeDecision::new(pr, &p.head, &base, entry["seq"].as_u64().unwrap_or(0));
-    e.gh.merge(&repo, &decision)?;
-    let merge =
-        e.gh.pr_view(&repo, pr)?
-            .merge_commit
-            .ok_or("the merged PR names no merge commit")?;
-    ledger.append(
-        "merged",
-        json!({ "pr": pr, "head": p.head, "merge": merge, "decision": decision.ledger_entry() }),
-    )?;
-    Ok(Outcome::Merged { merge })
+    match super::merge::merge(e.gh, &repo, &ledger, &decision)? {
+        Ok(merged) => Ok(merged),
+        Err(why) => finish(e, &ledger, &p, &base, Outcome::Refused(why)),
+    }
 }
+
+#[cfg(test)]
+#[path = "gate_tests.rs"]
+mod tests;
