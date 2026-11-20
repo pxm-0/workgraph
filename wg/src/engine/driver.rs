@@ -35,6 +35,9 @@ pub struct Start {
     /// Checks that failed at the first clean baseline of this task (a rerun on a kept worktree):
     /// only these may leave the gate, so an earlier run's edits never shrink it (design §4.1).
     pub baseline_floor: Option<Vec<String>>,
+    /// An earlier run of this task built a risky unit on the worktree this run keeps: the task is
+    /// tainted from the start, so even its baseline runs in the sandbox (design §8.1).
+    pub tainted_earlier: bool,
 }
 
 /// How a run ended. Made once per run.
@@ -81,10 +84,11 @@ pub fn run_task(ctx: &RunCtx, start: Start, step: Step) -> Result<Ran, String> {
         baseline_floor: start.baseline_floor.clone(),
         approvals: ctx.ports.hx.approvals()?,
         managed: ctx.ports.hx.managed_hash()?,
-        tainted: ctx
-            .cfg
-            .repo(&ctx.repo_name)
-            .is_some_and(|r| r.always_tainted),
+        tainted: start.tainted_earlier
+            || ctx
+                .cfg
+                .repo(&ctx.repo_name)
+                .is_some_and(|r| r.always_tainted),
         ..Kernel::default()
     };
     for w in &start.memory.warnings {
@@ -275,10 +279,12 @@ impl Loop<'_> {
                 return Ok(None);
             }
         };
-        if label != "check:baseline" {
-            if let Some(end) = super::risk::after_layer(self.ctx, &mut self.k)? {
-                return Ok(Some(end));
-            }
+        // Before the baseline too: a kept worktree may already hold a risky unit's edits.
+        let risky_before = (self.k.risky.len(), self.k.tainted);
+        if let Some(end) = super::risk::after_layer(self.ctx, &mut self.k)? {
+            return Ok(Some(end));
+        }
+        if label != "check:baseline" || (self.k.risky.len(), self.k.tainted) != risky_before {
             self.queue
                 .push_back(Event::RiskUpdated(self.k.risk_view(self.ctx)));
         }
@@ -331,6 +337,19 @@ impl Loop<'_> {
         if batch.is_empty() {
             return Ok(None);
         }
+        // The batch runs at once in one worktree: if it builds a risky unit, every call in it is
+        // checked as tainted, whatever order the factory listed them in (design §8.1).
+        let builds_risky = batch.iter().any(|c| {
+            matches!(c.role, Role::Worker | Role::Fixer)
+                && c.unit.as_deref().is_some_and(|u| self.k.is_risky(u))
+        });
+        if builds_risky && !self.k.tainted && self.k.sandbox_blocker(self.ctx).is_none() {
+            self.k.tainted = true;
+            self.ctx.journal.append(
+                "risk_updated",
+                json!({ "tainted": true, "why": "a risky unit in this batch is built in the sandbox" }),
+            )?;
+        }
         let mut reqs: Vec<(LlmCall, Result<Request, Refusal>)> = Vec::new();
         for c in batch {
             self.ctx.journal.append(
@@ -380,6 +399,11 @@ impl Loop<'_> {
                     .map(|h| h.map(|h| h.join().unwrap_or_else(|_| panicked())))
                     .collect::<Vec<_>>()
             }));
+        }
+        // A Worker's or Reviewer's own sandbox jobs report back: leftovers or a lost job mark the
+        // sandbox unusable for the rest of the shift (design §8.5 step 6).
+        if let Some(why) = crate::sandbox::client::recorded_fault(&self.ctx.run_dir)? {
+            self.ctx.ports.sandbox.mark_broken(&why);
         }
         for ((c, r), a) in reqs.into_iter().zip(answers) {
             let Some(mut a) = a else {

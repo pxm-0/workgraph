@@ -138,8 +138,10 @@ impl Client {
             .find(|l| !l.trim().is_empty())
             .unwrap_or("")
             .to_string();
+        // A job's own result may carry `error` too; only an answer about no job is a refusal.
         let refusal = serde_json::from_str::<Value>(&line)
             .ok()
+            .filter(|v| v.get("job").is_none())
             .and_then(|v| v["error"].as_str().map(str::to_string));
         match (code, refusal) {
             (0, None) if !line.is_empty() => Ok(line),
@@ -169,18 +171,34 @@ impl Client {
         job::check_result(&self.call("poll", Some(&j.job), &[], CALL)?, j)
     }
 
-    /// Polls until the job is done or `cap` passes (then `Pending`).
+    /// Polls until the job is done or `cap` passes (then `Pending` or `Queued`).
     pub fn wait(&self, j: &Job, cap: Duration) -> Result<Polled, String> {
+        self.wait_running(j, cap, Duration::ZERO)
+    }
+
+    /// Like `wait`, but time the job spends queued behind another job (the agent runs one at a
+    /// time) counts against `queue`, not `cap`: `cap` starts once the job runs.
+    pub fn wait_running(&self, j: &Job, cap: Duration, queue: Duration) -> Result<Polled, String> {
         let start = Instant::now();
+        let mut running: Option<Instant> = None;
         loop {
-            if let Polled::Done(r) = self.poll(j)? {
-                return Ok(Polled::Done(r));
+            let p = self.poll(j)?;
+            if matches!(p, Polled::Done(_)) {
+                return Ok(p);
             }
-            if start.elapsed() + POLL_EVERY >= cap {
-                return Ok(Polled::Pending);
+            if p == Polled::Pending || start.elapsed() >= queue {
+                running.get_or_insert_with(Instant::now);
+            }
+            if running.is_some_and(|t| t.elapsed() + POLL_EVERY >= cap) {
+                return Ok(p);
             }
             std::thread::sleep(POLL_EVERY);
         }
+    }
+
+    /// Stops a job the Mac gave up on; its unit's cleanup still runs.
+    pub fn cancel(&self, j: &Job) -> Result<(), String> {
+        self.call("cancel", Some(&j.job), &[], CALL).map(|_| ())
     }
 
     pub fn doctor(&self) -> Result<Value, String> {
@@ -232,6 +250,41 @@ pub fn new_job(
 /// Whether risky work may run: unchecked, or the doctor's verdict, shared by every task of a shift.
 pub type Status = Arc<Mutex<Option<Result<(), String>>>>;
 
+/// A job waits at most this long behind others before the Mac gives up on it.
+pub const QUEUE: Duration = Duration::from_secs(60 * 60);
+
+/// Why the sandbox may not be trusted with more work, from the jobs a run's agents sent through
+/// `wg sandbox exec` (`<run>/sandbox.jsonl`): leftovers, or a job lost without a result.
+pub fn recorded_fault(run_dir: &Path) -> Result<Option<String>, String> {
+    let text = match std::fs::read_to_string(run_dir.join("sandbox.jsonl")) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("cannot read the run's sandbox jobs: {e}")),
+    };
+    for line in text.lines() {
+        let v: Value = serde_json::from_str(line)
+            .map_err(|e| format!("the run's sandbox jobs are corrupt: {e}"))?;
+        let job = v["job"].as_str().unwrap_or("?");
+        let left = |k: &str| v["cleanup"][k].as_u64().unwrap_or(0);
+        if left("containers_left") > 0 || left("volumes_left") > 0 {
+            return Ok(Some(format!(
+                "sandbox dirty: job {job} left {} containers and {} volumes",
+                left("containers_left"),
+                left("volumes_left")
+            )));
+        }
+        if let Some(e) = v["error"].as_str().filter(|e| lost(e)) {
+            return Ok(Some(format!("job {job}: {e}")));
+        }
+    }
+    Ok(None)
+}
+
+/// The agent lost the job (it was stopped, or the job is gone): not the code's fault.
+fn lost(error: &str) -> bool {
+    error.contains("without a result") || error.contains("gone")
+}
+
 /// The engine's sandbox port for one repo and worktree.
 pub struct SimSandbox {
     pub cfg: Config,
@@ -267,6 +320,10 @@ impl Sandbox for SimSandbox {
         s.clone().and_then(Result::err)
     }
 
+    fn mark_broken(&self, why: &str) {
+        self.broken(why);
+    }
+
     fn run(&self, nonce: &str, steps: Vec<Step>) -> Result<JobResult, String> {
         if let Some(why) = self.unavailable() {
             return Err(format!("sandbox unavailable: {why}"));
@@ -277,7 +334,7 @@ impl Sandbox for SimSandbox {
         let wall = Duration::from_secs(u64::from(j.limits.wall_secs) + 120);
         let polled = client
             .submit(&j, &self.root)
-            .and_then(|_| client.wait(&j, wall));
+            .and_then(|_| client.wait_running(&j, wall, QUEUE));
         match polled {
             Ok(Polled::Done(r)) => {
                 if r.cleanup.containers_left > 0 || r.cleanup.volumes_left > 0 {
@@ -288,7 +345,7 @@ impl Sandbox for SimSandbox {
                 }
                 match &r.error {
                     Some(e) => {
-                        if e.contains("without a result") || e.contains("gone") {
+                        if lost(e) {
                             self.broken(e);
                         }
                         Err(format!("sandbox unavailable: {e}"))
@@ -296,9 +353,20 @@ impl Sandbox for SimSandbox {
                     None => Ok(r),
                 }
             }
-            Ok(Polled::Pending) => {
-                self.broken("a job outlived its wall time");
-                Err(format!("sandbox unavailable: job {} did not finish", j.job))
+            Ok(p) => {
+                let why = match p {
+                    Polled::Queued => "a job waited over an hour behind others",
+                    _ => "a job outlived its wall time",
+                };
+                let cancelled = client
+                    .cancel(&j)
+                    .err()
+                    .map_or(String::new(), |e| format!(" (cancel failed: {e})"));
+                self.broken(&format!("{why}{cancelled}"));
+                Err(format!(
+                    "sandbox unavailable: job {} did not finish: {why}{cancelled}",
+                    j.job
+                ))
             }
             Err(e) => {
                 self.broken(&e);
@@ -425,6 +493,146 @@ mod tests {
         let t = Instant::now();
         assert_eq!(c.wait(&j, Duration::from_secs(5)).unwrap(), Polled::Pending);
         assert!(t.elapsed() < Duration::from_secs(6), "never past the cap");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn time_queued_behind_another_job_does_not_count_against_the_wall() {
+        let d = std::env::temp_dir().join(format!(
+            "wg-client-queue-{}-{}",
+            std::process::id(),
+            crate::journal::now_nanos()
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        // Answers queued while `<d>/queued` exists (removing it once), then running.
+        let script = r#"#!/bin/sh
+for a; do last=$a; done
+if [ -e DIR/always ] || [ -e DIR/queued ]; then rm -f DIR/queued; echo "{\"job\":\"$last\",\"pending\":true,\"queued\":true}"; else echo "{\"job\":\"$last\",\"pending\":true}"; fi
+"#;
+        let orb = d.join("orb");
+        std::fs::write(&orb, script.replace("DIR", &d.to_string_lossy())).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&orb, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let c = Client {
+            orb: orb.to_string_lossy().into(),
+            machine: Machine {
+                machine: "m".into(),
+                user: "u".into(),
+                probe: String::new(),
+            },
+        };
+        let sb: RepoSandbox = toml::from_str(&format!(
+            "image = \"docker.io/library/node@sha256:{}\"",
+            "a".repeat(64)
+        ))
+        .unwrap();
+        let step = Step {
+            name: "t".into(),
+            cmd: "true".into(),
+            timeout_secs: 5,
+        };
+        let j = new_job(&sb, vec![step], "n", false).unwrap();
+        std::fs::write(d.join("queued"), "").unwrap();
+        let t = Instant::now();
+        let got = c
+            .wait_running(&j, Duration::from_secs(3), Duration::from_secs(60))
+            .unwrap();
+        assert_eq!(got, Polled::Pending);
+        assert!(
+            t.elapsed() >= Duration::from_secs(4),
+            "the cap started after the queue"
+        );
+        std::fs::write(d.join("always"), "").unwrap();
+        let t = Instant::now();
+        let got = c
+            .wait_running(&j, Duration::from_secs(1), Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(got, Polled::Queued, "the queue has its own cap");
+        assert!(t.elapsed() < Duration::from_secs(5));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn exec_faults_are_read_back_from_the_run() {
+        let d = std::env::temp_dir().join(format!(
+            "wg-client-fault-{}-{}",
+            std::process::id(),
+            crate::journal::now_nanos()
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        assert_eq!(recorded_fault(&d).unwrap(), None, "no jobs yet");
+        let line = |v: &str| {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(d.join("sandbox.jsonl"))
+                .unwrap();
+            writeln!(f, "{v}").unwrap();
+        };
+        line(r#"{"job":"j-1","cleanup":{"containers_left":0,"volumes_left":0},"error":null}"#);
+        line(
+            r#"{"job":"j-2","cleanup":{"containers_left":0,"volumes_left":0},"error":"the job's wall time ran out"}"#,
+        );
+        assert_eq!(
+            recorded_fault(&d).unwrap(),
+            None,
+            "a code failure is no fault"
+        );
+        line(
+            r#"{"job":"j-3","cleanup":{"containers_left":0,"volumes_left":0},"error":"the sandbox job is gone without a result"}"#,
+        );
+        assert!(recorded_fault(&d).unwrap().unwrap().contains("j-3"));
+        std::fs::write(
+            d.join("sandbox.jsonl"),
+            r#"{"job":"j-4","cleanup":{"containers_left":0,"volumes_left":2},"error":null}"#,
+        )
+        .unwrap();
+        assert!(recorded_fault(&d)
+            .unwrap()
+            .unwrap()
+            .starts_with("sandbox dirty: job j-4"));
+        std::fs::write(d.join("sandbox.jsonl"), "not json").unwrap();
+        assert!(recorded_fault(&d).is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_job_result_carrying_an_error_is_a_result_not_a_refusal() {
+        let d = std::env::temp_dir().join(format!(
+            "wg-client-err-{}-{}",
+            std::process::id(),
+            crate::journal::now_nanos()
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        let orb = d.join("orb");
+        std::fs::write(&orb, "#!/bin/sh\nfor a; do last=$a; done\necho \"{\\\"job\\\":\\\"$last\\\",\\\"nonce\\\":\\\"n\\\",\\\"steps\\\":[],\\\"cleanup\\\":{\\\"containers_left\\\":0,\\\"volumes_left\\\":0},\\\"error\\\":\\\"the job's wall time ran out\\\"}\"\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&orb, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let c = Client {
+            orb: orb.to_string_lossy().into(),
+            machine: Machine {
+                machine: "m".into(),
+                user: "u".into(),
+                probe: String::new(),
+            },
+        };
+        let sb: RepoSandbox = toml::from_str(&format!(
+            "image = \"docker.io/library/node@sha256:{}\"",
+            "a".repeat(64)
+        ))
+        .unwrap();
+        let step = Step {
+            name: "t".into(),
+            cmd: "true".into(),
+            timeout_secs: 5,
+        };
+        // The agent's stored result for a job that stopped early, as `poll` answers it.
+        let j = new_job(&sb, vec![step], "n", false).unwrap();
+        match c.poll(&j).unwrap() {
+            Polled::Done(r) => assert_eq!(r.error.as_deref(), Some("the job's wall time ran out")),
+            p => panic!("{p:?}"),
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 

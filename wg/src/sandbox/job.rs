@@ -268,9 +268,10 @@ pub fn tail(text: &str) -> String {
     t[start..].to_string()
 }
 
-/// What a poll answers: still running, or the result.
+/// What a poll answers: waiting behind another job, still running, or the result.
 #[derive(Debug, PartialEq)]
 pub enum Polled {
+    Queued,
     Pending,
     Done(JobResult),
 }
@@ -285,6 +286,7 @@ pub fn check_result(line: &str, sent: &Job) -> Result<Polled, String> {
         .map_err(|_| "the sandbox result is not JSON".to_string())?;
     if v["pending"] == true {
         return match v["job"].as_str() {
+            Some(j) if j == sent.job && v["queued"] == true => Ok(Polled::Queued),
             Some(j) if j == sent.job => Ok(Polled::Pending),
             _ => Err("a pending answer for another job".into()),
         };

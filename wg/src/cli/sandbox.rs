@@ -14,7 +14,7 @@
 
 use super::args::parse;
 use crate::guard::hook::{Manifest, SandboxGrant};
-use crate::sandbox::client::{new_job, Client, EXEC_CAP};
+use crate::sandbox::client::{new_job, recorded_fault, Client, EXEC_CAP, QUEUE};
 use crate::sandbox::job::{self, Job, Polled, Step};
 use crate::state_dirs::{private_dir, Dirs};
 use serde_json::{json, Value};
@@ -82,12 +82,13 @@ fn finish(
     run_dir: &Path,
 ) -> Result<Value, String> {
     let r = match p {
-        Polled::Pending => {
+        Polled::Done(r) => r,
+        waiting => {
             return Ok(
-                json!({ "job": j.job, "pending": true, "next": "wg sandbox poll --job <this job>" }),
+                json!({ "job": j.job, "pending": true, "queued": waiting == Polled::Queued,
+                        "next": "wg sandbox poll --job <this job>" }),
             )
         }
-        Polled::Done(r) => r,
     };
     let mut out = json!({ "job": r.job, "steps": r.steps, "cleanup": r.cleanup, "error": r.error });
     if let Some(patch) = &r.patch {
@@ -126,6 +127,10 @@ fn granted_exec(
     }
     let command = cmd.join(" ");
     job::command(&command, "the command")?;
+    // An earlier job of this run left the sandbox unusable: no more jobs until the kernel decides.
+    if let Some(why) = recorded_fault(&run_dir)? {
+        return Err(format!("sandbox unavailable: {why}"));
+    }
     let cfg = super::run::load_config(dirs)?;
     let sb = cfg
         .repo(&g.repo)
@@ -212,8 +217,7 @@ fn check(dirs: &Dirs, task: &str, name: &str) -> Result<(String, i32), String> {
     let client = Client::new(&cfg);
     client.submit(&j, &root)?;
     let wall = Duration::from_secs(u64::from(j.limits.wall_secs) + 120);
-    match client.wait(&j, wall)? {
-        Polled::Pending => Err(format!("sandbox job {} did not finish", j.job)),
+    match client.wait_running(&j, wall, QUEUE)? {
         Polled::Done(r) => match (&r.error, r.steps.first()) {
             (Some(e), _) => Err(format!("sandbox unavailable: {e}")),
             (None, Some(s)) => Ok((
@@ -221,10 +225,27 @@ fn check(dirs: &Dirs, task: &str, name: &str) -> Result<(String, i32), String> {
                     "{}\n[wg sandbox: job {} on {}, exit {}]",
                     s.tail, r.job, cfg.sandbox.machine, s.exit
                 ),
-                s.exit.clamp(0, 255) as i32,
+                verify_status(s),
             )),
             (None, None) => Err("the sandbox ran no step".into()),
         },
+        _ => {
+            let cancelled = client
+                .cancel(&j)
+                .err()
+                .map_or(String::new(), |e| format!(" (cancel failed: {e})"));
+            Err(format!("sandbox job {} did not finish{cancelled}", j.job))
+        }
+    }
+}
+
+/// The process status Haruspex records for a sandbox step: 0 only for a clean pass. An exit the
+/// agent could not read (-1: podman died by a signal or never started) fails, never clamps to 0.
+fn verify_status(s: &job::StepResult) -> i32 {
+    match s.exit {
+        0 if !s.timed_out && !s.oom => 0,
+        e @ 1..=255 => e as i32,
+        _ => 1,
     }
 }
 
@@ -336,5 +357,22 @@ mod tests {
         assert_eq!(code(&json!({ "steps": [{ "exit": 0 }] })), 0);
         assert_eq!(code(&json!({ "steps": [{ "exit": 3 }] })), 1);
         assert_eq!(code(&json!({ "steps": [], "error": "x" })), 1);
+    }
+
+    #[test]
+    fn verify_fails_closed_on_any_abnormal_step() {
+        let step = |exit: i64, timed_out: bool, oom: bool| job::StepResult {
+            name: "test".into(),
+            exit,
+            timed_out,
+            oom,
+            tail: String::new(),
+        };
+        assert_eq!(verify_status(&step(0, false, false)), 0);
+        assert_eq!(verify_status(&step(3, false, false)), 3);
+        assert_eq!(verify_status(&step(-1, false, false)), 1, "no exit code");
+        assert_eq!(verify_status(&step(256, false, false)), 1);
+        assert_ne!(verify_status(&step(0, true, false)), 0, "timed out");
+        assert_ne!(verify_status(&step(0, false, true)), 0, "OOM");
     }
 }

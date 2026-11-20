@@ -41,20 +41,29 @@ pub fn taints(k: &mut Kernel, role: Role, unit: &str) -> bool {
 }
 
 /// The classifier on what each not-yet-risky unit actually changed: its paths, then the lines it
-/// added. A hit taints the task; without a usable sandbox the task parks.
+/// added. A hit taints the task; without a usable sandbox the task parks. A risky unit whose files
+/// changed though no Worker of this run built it (a kept worktree's leftovers) taints it too.
 pub fn after_layer(ctx: &RunCtx, k: &mut Kernel) -> Result<Option<End>, String> {
     let Some(reading) = k.reading.clone() else {
         return Ok(None);
     };
     let changed = ctx.ports.repo.changed()?;
     let mut found = Vec::new();
-    for u in reading.units.iter().filter(|u| !k.is_risky(&u.id)) {
+    let mut leftovers = Vec::new();
+    for u in &reading.units {
         let touched: Vec<String> = changed
             .iter()
             .filter(|f| in_unit(f, &u.files))
             .cloned()
             .collect();
         if touched.is_empty() {
+            continue;
+        }
+        if k.is_risky(&u.id) {
+            let owners = touched.iter().any(|f| !k.user_changes.contains(f));
+            if owners && !k.built_risky.contains(&u.id) {
+                leftovers.push(u.id.clone());
+            }
             continue;
         }
         let why = match crate::risk::paths(&touched) {
@@ -65,20 +74,23 @@ pub fn after_layer(ctx: &RunCtx, k: &mut Kernel) -> Result<Option<End>, String> 
             found.push((u.id.clone(), w));
         }
     }
-    if found.is_empty() {
+    if found.is_empty() && leftovers.is_empty() {
         return Ok(None);
     }
-    for (id, _) in &found {
-        k.built_risky.push(id.clone());
-    }
+    k.built_risky.extend(leftovers.iter().cloned());
+    k.built_risky.extend(found.iter().map(|(id, _)| id.clone()));
     k.risky.extend(found.iter().cloned());
     k.tainted = true;
     ctx.journal.append(
         "risk_updated",
-        json!({ "after_the_fact": found, "tainted": true }),
+        json!({ "after_the_fact": found, "leftovers": leftovers, "tainted": true }),
     )?;
     Ok(k.sandbox_blocker(ctx).map(|why| {
-        let ids: Vec<&str> = found.iter().map(|(id, _)| id.as_str()).collect();
+        let ids: Vec<&str> = found
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .chain(leftovers.iter().map(String::as_str))
+            .collect();
         End::Parked(format!(
             "sandbox unavailable: {} turned out risky after it was built, and its checks may not run on the Mac: {why}",
             ids.join(", ")

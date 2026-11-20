@@ -308,12 +308,23 @@ pub fn work(e: &Env, repo: &RepoCfg, i: &Issue, resume: bool) -> Result<Done, St
         _ => Replay::none(),
     };
     let floor = first_baseline(e.dirs, &rec.runs);
+    let tainted_earlier = tainted_earlier(e.dirs, &rec.runs);
     let rec = TaskRecord {
         runs: rec.runs.iter().cloned().chain([run_id.clone()]).collect(),
         ..rec
     };
     record::save(e.dirs, &rec)?;
-    let (d, ran_rec) = run(e, repo, i, rec, &worktree, &run_id, replay, floor)?;
+    let (d, ran_rec) = run(
+        e,
+        repo,
+        i,
+        rec,
+        &worktree,
+        &run_id,
+        replay,
+        floor,
+        tainted_earlier,
+    )?;
     write_back(e, &repo.name, i.number, ran_rec, &d)?;
     Ok(d)
 }
@@ -337,6 +348,18 @@ pub fn first_baseline(dirs: &Dirs, runs: &[String]) -> Option<Vec<String>> {
     })
 }
 
+/// Whether an earlier run of this task tainted it (a risky unit was built, or a unit turned risky):
+/// its edits stay in the kept worktree, so the rerun is tainted from the start (design §8.1). A run
+/// with no journal tainted nothing.
+pub fn tainted_earlier(dirs: &Dirs, runs: &[String]) -> bool {
+    runs.iter().any(|r| {
+        crate::journal::read(&dirs.run(r).join("journal.jsonl")).is_ok_and(|j| {
+            j.iter()
+                .any(|e| e["kind"] == "risk_updated" && e["tainted"] == true)
+        })
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run(
     e: &Env,
@@ -347,6 +370,7 @@ fn run(
     run_id: &str,
     replay: Replay,
     baseline_floor: Option<Vec<String>>,
+    tainted_earlier: bool,
 ) -> Result<(Done, TaskRecord), String> {
     let dirs = e.dirs;
     let run_dir = dirs.run(run_id);
@@ -436,6 +460,7 @@ fn run(
         start_branch: rec.branch.clone(),
         initializing: !worktree.join(".haruspex").exists(),
         baseline_floor,
+        tainted_earlier,
     };
     let ran = driver::run_task(&ctx, start, &wg_factory::engine::step)?;
     crate::cli::run::persist(&ctx, dirs, &ran)?;
@@ -617,5 +642,24 @@ mod tests {
             json!([{ "name": "test", "exit": 1 }, { "name": "lint", "exit": 1 }]),
         );
         assert_eq!(first_baseline(&dirs, &runs), Some(vec!["lint".to_string()]));
+    }
+
+    #[test]
+    fn a_rerun_is_tainted_when_any_earlier_run_was() {
+        let home = std::env::temp_dir().join(format!("wg-task-taint-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let dirs = Dirs { home };
+        let runs = ["r-a", "r-b"].map(String::from);
+        let journal = |run: &str, tainted: bool| {
+            std::fs::create_dir_all(dirs.run(run)).unwrap();
+            let j = Journal::open(&dirs.run(run).join("journal.jsonl"), run).unwrap();
+            j.append("risk_updated", json!({ "risky": [], "tainted": tainted }))
+                .unwrap();
+        };
+        assert!(!tainted_earlier(&dirs, &runs), "no journals");
+        journal("r-a", false);
+        assert!(!tainted_earlier(&dirs, &runs));
+        journal("r-b", true);
+        assert!(tainted_earlier(&dirs, &runs));
     }
 }
