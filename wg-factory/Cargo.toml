@@ -1,0 +1,8 @@
+[package]
+name = "wg-factory"
+version = "0.1.0"
+edition = "2021"
+description = "The workgraph factory: pure no_std step functions over owned values"
+publish = false
+
+[dependencies]
