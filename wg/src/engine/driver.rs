@@ -22,6 +22,7 @@ pub type Step<'f> = &'f dyn Fn(&RunState, &Event) -> (RunState, Vec<Command>);
 
 pub struct Start {
     pub task: String,
+    pub title: String,
     pub decisions: Vec<Decision>,
     pub resume_task: Option<String>,
     pub initialized_earlier: bool,
@@ -45,6 +46,8 @@ pub enum End {
 
 pub struct Ran {
     pub end: End,
+    /// The draft PR's URL, when publish succeeded.
+    pub published: Option<String>,
     pub kernel: Kernel,
     pub memory_saved: bool,
     pub rejected_rules: Vec<(String, String)>,
@@ -61,6 +64,8 @@ struct Loop<'a> {
     can_save: bool,
     memory_saved: bool,
     rejected: Vec<(String, String)>,
+    publish: Option<wg_factory::api::PublishDef>,
+    published: Option<String>,
 }
 
 pub fn run_task(ctx: &RunCtx, start: Start, step: Step) -> Result<Ran, String> {
@@ -79,6 +84,7 @@ pub fn run_task(ctx: &RunCtx, start: Start, step: Step) -> Result<Ran, String> {
     }
     let input = RunInput {
         task: start.task.clone(),
+        title: start.title.clone(),
         decisions: start.decisions.clone(),
         resume_task: start.resume_task.clone(),
         initialized_earlier: start.initialized_earlier,
@@ -98,12 +104,18 @@ pub fn run_task(ctx: &RunCtx, start: Start, step: Step) -> Result<Ran, String> {
         can_save: start.memory.can_save,
         memory_saved: false,
         rejected: Vec::new(),
+        publish: start.pipeline.publish.clone(),
+        published: None,
     };
     let mut state = RunState::default();
     let end = loop {
         let Some(ev) = l.queue.pop_front() else {
             break End::Failed("the factory stopped without finishing".into());
         };
+        if let Some(why) = ctx.shift.as_ref().and_then(|s| (s.stop)()) {
+            ctx.journal.append("parked", json!({ "reason": why }))?;
+            break End::Parked(format!("shift stopped: {why}"));
+        }
         ctx.journal
             .append("step", json!({ "event": event_name(&ev) }))?;
         let (next, cmds) = step(&state, &ev);
@@ -114,6 +126,7 @@ pub fn run_task(ctx: &RunCtx, start: Start, step: Step) -> Result<Ran, String> {
     };
     Ok(Ran {
         end,
+        published: l.published,
         kernel: l.k,
         memory_saved: l.memory_saved,
         rejected_rules: l.rejected,
@@ -129,6 +142,8 @@ fn event_name(ev: &Event) -> String {
         Event::ChecksUnavailable { label, .. } => format!("checks_unavailable {label}"),
         Event::RiskUpdated(_) => "risk_updated".into(),
         Event::KernelEscalations(e) => format!("kernel_escalations {}", e.len()),
+        Event::Published { .. } => "published".into(),
+        Event::PublishRefused { .. } => "publish_refused".into(),
     }
 }
 
@@ -204,6 +219,25 @@ impl Loop<'_> {
                     "warning",
                     json!({ "warning": crate::ids::one_line(&s, 1000) }),
                 )?;
+                Ok(None)
+            }
+            Command::Publish { title } => {
+                j.append("command", json!({ "what": "publish" }))?;
+                let r = match &self.publish {
+                    Some(def) => super::publish::publish(self.ctx, &self.k, def, &title),
+                    None => Err("the pipeline has no publish stage".into()),
+                };
+                match r {
+                    Ok(url) => {
+                        j.append("pr_opened", json!({ "url": url }))?;
+                        self.published = Some(url.clone());
+                        self.queue.push_back(Event::Published { url });
+                    }
+                    Err(why) => {
+                        j.append("warning", json!({ "refused": format!("publish: {why}") }))?;
+                        self.queue.push_back(Event::PublishRefused { why });
+                    }
+                }
                 Ok(None)
             }
             Command::Finish(o) => Ok(Some(End::Finish(o))),
@@ -286,20 +320,28 @@ impl Loop<'_> {
             }
             reqs.push((c, r));
         }
-        let answers: Vec<Option<Answer>> = std::thread::scope(|s| {
-            let handles: Vec<_> = reqs
-                .iter()
-                .map(|(_, r)| {
-                    r.as_ref()
-                        .ok()
-                        .map(|req| s.spawn(|| runner::call(self.ctx, &self.limited, req)))
-                })
-                .collect();
-            handles
-                .into_iter()
-                .map(|h| h.map(|h| h.join().unwrap_or_else(|_| panicked())))
-                .collect()
-        });
+        let parallel = self
+            .ctx
+            .shift
+            .as_ref()
+            .map_or(usize::MAX, |s| s.max_parallel.max(1));
+        let mut answers: Vec<Option<Answer>> = Vec::new();
+        for chunk in reqs.chunks(parallel) {
+            answers.extend(std::thread::scope(|s| {
+                let handles: Vec<_> = chunk
+                    .iter()
+                    .map(|(_, r)| {
+                        r.as_ref()
+                            .ok()
+                            .map(|req| s.spawn(|| runner::call(self.ctx, &self.limited, req)))
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| h.map(|h| h.join().unwrap_or_else(|_| panicked())))
+                    .collect::<Vec<_>>()
+            }));
+        }
         for ((c, r), a) in reqs.into_iter().zip(answers) {
             let Some(mut a) = a else {
                 let why = r.err().map(|e| e.why).unwrap_or_default();
@@ -410,9 +452,12 @@ impl Loop<'_> {
                 self.k.challenge_escalations = ch.escalations.clone();
                 self.k.challenge_added = ch.added.clone();
             }
-            (Role::Reviewer, Ok(Reply::Review(rv))) if rv.passed && c.tier == Tier::Opus => {
-                let tree = self.ctx.ports.repo.tree()?;
-                self.k.review_pass = Some(ReviewPass::new(&self.k.task_id(), &tree, &c.label));
+            (Role::Reviewer, Ok(Reply::Review(rv))) => {
+                self.k.review = Some(rv.clone());
+                if rv.passed && c.tier == Tier::Opus {
+                    let tree = self.ctx.ports.repo.tree()?;
+                    self.k.review_pass = Some(ReviewPass::new(&self.k.task_id(), &tree, &c.label));
+                }
             }
             _ => {}
         }

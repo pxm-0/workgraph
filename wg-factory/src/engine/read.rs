@@ -14,6 +14,7 @@ use alloc::vec::Vec;
 
 pub fn start(s: &mut RunState, input: &RunInput, out: &mut Vec<Command>) {
     s.task = input.task.clone();
+    s.title = input.title.clone();
     s.decisions = input.decisions.clone();
     s.resume_task = input.resume_task.clone();
     s.initialized_earlier = input.initialized_earlier;

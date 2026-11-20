@@ -57,3 +57,11 @@ model = "sonnet"
 prompt = "learn"
 max_turns = 3
 timeout_secs = 600
+
+# Phase 2: a shift publishes a draft PR once every kernel invariant holds. In place (wg run) this
+# stage is skipped and the skill commits through wg finalize --run.
+[[stage]]
+id = "publish"
+kind = "publish"
+draft = true
+labels = ["wg:awaiting-approval"]

@@ -1,9 +1,10 @@
-//! Load and validate a pipeline (design §6.1, §6.3). Phase 1 knows the dev chain only. The
+//! Load and validate a pipeline (design §6.1, §6.3). Phase 2 knows the dev chain only, with an
+//! optional closing `publish` stage. The
 //! invariants are a backstop: finalize still needs the kernel's tokens whatever the file says.
 
 use crate::config::MAX_TURNS;
 use serde::Deserialize;
-use wg_factory::api::{Effort, LlmStage, PipelineDef, Tier};
+use wg_factory::api::{Effort, LlmStage, PipelineDef, PublishDef, Tier};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -34,6 +35,8 @@ struct Stage {
     max_fix_rounds: Option<u32>,
     worker_prompt: Option<String>,
     fix_prompt: Option<String>,
+    draft: Option<bool>,
+    labels: Option<Vec<String>>,
 }
 
 /// Per-role ceilings from design §5.2: (max turns, timeout seconds).
@@ -74,6 +77,8 @@ fn keys_set(s: &Stage) -> Vec<&'static str> {
     add(s.max_fix_rounds.is_some(), "max_fix_rounds");
     add(s.worker_prompt.is_some(), "worker_prompt");
     add(s.fix_prompt.is_some(), "fix_prompt");
+    add(s.draft.is_some(), "draft");
+    add(s.labels.is_some(), "labels");
     k
 }
 
@@ -105,6 +110,7 @@ fn allowed_keys(kind: &str) -> &'static [&'static str] {
             "max_fix_rounds",
         ],
         "learn" => &["model", "prompt", "max_turns", "timeout_secs"],
+        "publish" => &["draft", "labels"],
         _ => &[],
     }
 }
@@ -154,9 +160,10 @@ pub fn load(text: &str, max_calls: u32) -> Result<PipelineDef, String> {
         ));
     }
     let kinds: Vec<&str> = f.stage.iter().map(|s| s.kind.as_str()).collect();
-    if kinds.iter().copied().ne(ORDER.iter().copied()) {
+    let body = kinds.strip_suffix(&["publish"]).unwrap_or(&kinds);
+    if body.iter().copied().ne(ORDER.iter().copied()) {
         return Err(format!(
-            "pipeline {}: Phase 1 runs exactly the stages {} in that order",
+            "pipeline {}: Phase 2 runs exactly the stages {}, then an optional publish, in that order",
             f.pipeline.name,
             ORDER.join(", ")
         ));
@@ -212,6 +219,27 @@ pub fn load(text: &str, max_calls: u32) -> Result<PipelineDef, String> {
         review: review_llm,
         review_max_fix_rounds: review_fix,
         learn: llm(st("learn"))?,
+        publish: f
+            .stage
+            .iter()
+            .find(|s| s.kind == "publish")
+            .map(publish)
+            .transpose()?,
+    })
+}
+
+/// The publish stage: draft by default, at most 5 labels, never one that queues self work.
+fn publish(s: &Stage) -> Result<PublishDef, String> {
+    let labels = s.labels.clone().unwrap_or_default();
+    if labels.len() > 5 {
+        return Err(format!("stage {}: at most 5 labels", s.id));
+    }
+    for l in &labels {
+        crate::ids::gh_label(l).map_err(|e| format!("stage {}: {e}", s.id))?;
+    }
+    Ok(PublishDef {
+        draft: s.draft.unwrap_or(true),
+        labels,
     })
 }
 
@@ -234,6 +262,9 @@ mod tests {
         assert_eq!(p.challenge.tier, Tier::Sonnet);
         assert_eq!((p.learn.tier, p.learn.max_turns), (Tier::Sonnet, 3));
         assert_eq!(p.build_max_turns, 80);
+        let publish = p.publish.expect("dev.toml ends with publish (Phase 2)");
+        assert!(publish.draft);
+        assert_eq!(publish.labels, ["wg:awaiting-approval"]);
     }
 
     #[test]
@@ -282,6 +313,25 @@ mod tests {
                 "does not apply",
             ),
             (format!("{DEV_PIPELINE}\nsurprise = 1\n"), "unknown field"),
+            (
+                DEV_PIPELINE.replace(
+                    "labels = [\"wg:awaiting-approval\"]",
+                    "labels = [\"wg:self\"]",
+                ),
+                "wg:self",
+            ),
+            (
+                DEV_PIPELINE.replace("labels = [\"wg:awaiting-approval\"]", "labels = [\"a b\"]"),
+                "label",
+            ),
+            (
+                DEV_PIPELINE.replace("draft = true", "draft = true\nprompt = \"read\""),
+                "does not apply",
+            ),
+            (
+                format!("{DEV_PIPELINE}\n[[stage]]\nid = \"again\"\nkind = \"publish\"\n"),
+                "optional publish",
+            ),
         ];
         for (text, want) in cases {
             let err = load(&text, 40).unwrap_err();

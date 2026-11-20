@@ -3,6 +3,7 @@
 
 pub mod build;
 pub mod learn;
+pub mod publish;
 pub mod read;
 pub mod review;
 pub mod vars;
@@ -20,6 +21,8 @@ pub fn step(state: &RunState, ev: &Event) -> (RunState, Vec<Command>) {
         Event::Started(input) => read::start(&mut s, input, &mut out),
         Event::RiskUpdated(r) => s.risk = r.clone(),
         Event::KernelEscalations(e) => s.kernel_escalations = e.clone(),
+        Event::Published { url } => publish::on_published(&mut s, url, &mut out),
+        Event::PublishRefused { why } => publish::on_refused(&mut s, why, &mut out),
         Event::LlmDone {
             label,
             reply,
