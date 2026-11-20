@@ -80,6 +80,33 @@ that stays yours. A release that is stuck is listed in the shift report; after y
 `wg shift retry-release --repo <owner/repo> --issue <n>` puts it back for the next shift. A stage of an existing kind is TOML plus a prompt
 file (both compiled in by `wg/build.rs`); a new kind is a Rust change.
 
+**Self-improvement, shadow first (Phase 5).** The factory may improve itself, but only through
+the editable allowlist in `config/protected.toml` (prompts, the dev, qa and release pipelines,
+docs, and the planning, allocation, learning and engine code of the `no_std`, zero-dependency
+`wg-factory` crate); everything else, including any file that does not exist yet, is protected.
+Label an issue in pxm-0/workgraph `wg:self` yourself and, with `[self_improve] enabled = true`
+and a `[[repo]]` for it with `pipelines = ["self"]`, `always_tainted = true` and a
+`[repo.sandbox]`, a shift takes at most one (within `[limits].max_self_prs_per_day` and
+`max_self_prs_per_week`, and at most 3 open) through `pipelines/self.toml` on a `wg-self/*`
+branch, every check in the sandbox, and opens a ready PR labelled `wg:self`. A plan or a change
+that names a protected path never gets built or pushed. `wg self gate --pr N`, run by the
+installed base binary after CI, then decides it: factory authorship from the hash-chained
+self-ledger, a local rename-free diff checked on every side, the caps, `lint-editable`, the
+head's prompts and pipelines loaded by the base kernel, the required GitHub Actions check-runs
+(`ci.yml` test, coverage, no-std-build and `self-gate.yml` protected-paths, lint-editable,
+replay-eval), the staged live eval when prompts or pipelines change, and the rate rules. Editable
+Rust is held for you (D2). Merging ships off: the gate labels a PR it would merge
+`wg:self-shadow`, you merge or close it by hand, and after 5 shadow decisions
+`wg self resume --enable-merge` is your switch. A merge is a squash pinned with
+`--match-head-commit`; any revert you make of one pauses the lane. `wg self install --sha S`
+installs a main SHA only from its CI artifact (sha256 and head checked, memory snapshotted); the
+first shift on it is the canary, and an unhealthy one rolls back (`current` flips back, memory is
+restored, the SHA is denylisted, a revert PR opens, the lane pauses). `wg eval replay` replays
+`eval/replay/` through the engine; `wg eval capture --pr <url>` turns a merged PR into a fixture
+branch on the private pxm-0/workgraph-eval (never its main). `wg self status`, `pause` and
+`rollback` are yours; there are no dollar caps, only run counts, and every eval's spend is in
+the self-ledger and the shift report.
+
 ## Memory
 
 One file per repo, `.claude/work-memory.json`:

@@ -2466,6 +2466,33 @@ ready-to-release and deploys by hand.
 - a rollback drill passes: a bad SHA is installed, the canary fails, the symlink reverts, a revert
   PR opens and the lane pauses.
 
+*As built* (PR for Phase 5): the kernel module is `wg/src/selfimprove/` (`protected`, `lint`,
+`ledger`, `state`, `gate` with `diff`, `rate` and `github`, `replay` and `replay_check`,
+`eval_live` and `eval_store`, `capture`, `install`, `canary`, `rollback`), the CLI is
+`wg/src/cli/self_.rs`, and the lane is `wg/src/shift/selflane.rs` and `selfupdate.rs`.
+Deviations, each on the safe side:
+- `self.toml` runs the dev stages (read with `self-plan`, challenge, escalate, baseline, build,
+  review with `self-review`, learn) and then the non-draft `wg:self` publish, because the engine's
+  dev part is a fixed stage set. `haruspex = false` (accepted only for the compiled `self.toml`)
+  means no human gate exists in the lane and none is pretended: the kernel still keeps the
+  Haruspex task locally for its gate set and contract snapshot, and `.haruspex/**` (now in
+  `never_editable`) and the init-written AGENTS.md and CLAUDE.md never ship in a self PR.
+- A self plan naming a protected path ends the task before any edit, and publish checks the
+  change set again against the compiled list (the Workers' write roots are their units' files, so
+  this is what keeps protected changes from being produced).
+- Missing required check-runs mean "CI has not reported": the PR waits (`pending`) rather than
+  failing, and a run from another app, workflow or head never counts.
+- Tier B: the staged evaluation, its pass rule (the cost ratio compares paired first runs; a
+  stage-2 retry is recorded, not counted) and the store pin are implemented, but stage 1 runs each
+  fixture's whole dev chain per arm, not only the stages a changed prompt uses. Until the owner
+  seeds the store and pins it in `eval/manifest.toml` the eval is unavailable, so every prompt or
+  pipeline PR is held ("eval unavailable"); only docs-only self PRs can reach shadow or merge.
+- Created issues (factory proposals) are excluded from intake for good, whatever their labels; to
+  act on one the owner files a `wg:self` issue of their own.
+- Install requires the `ci.yml` checks (self-gate runs on PRs only) and the release build of a
+  push to main, which uploads `wg`, `wg.sha256` and `head_sha` per target. Self-update happens only
+  when the shift runs the installed `current` binary.
+
 ### Phase 6: hardening (optional, each needing an owner decision)
 
 - An egress allowlist proxy, which any repo needs before it may set `deps_image = false` (§8.3).
