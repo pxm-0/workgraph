@@ -6,6 +6,7 @@ pub mod learn;
 pub mod publish;
 pub mod read;
 pub mod review;
+pub mod stages;
 pub mod vars;
 
 use crate::api::{Command, Effort, Event, LlmCall, Role, SchemaId, Tier};
@@ -23,6 +24,10 @@ pub fn step(state: &RunState, ev: &Event) -> (RunState, Vec<Command>) {
         Event::KernelEscalations(e) => s.kernel_escalations = e.clone(),
         Event::Published { url } => publish::on_published(&mut s, url, &mut out),
         Event::PublishRefused { why } => publish::on_refused(&mut s, why, &mut out),
+        Event::GateDone { label, blockers } => stages::on_gate(&mut s, label, blockers, &mut out),
+        Event::SandboxDone { label, results } => {
+            stages::on_sandbox(&mut s, label, results, &mut out)
+        }
         Event::LlmDone {
             label,
             reply,
@@ -85,6 +90,9 @@ fn answer(s: &mut RunState, label: &str, a: Answer, out: &mut Vec<Command>) {
         Phase::Reviewing { round } => review::on_review(s, round, &answers[0].1, out),
         Phase::ReviewFixing { round } => review::on_fix(s, round, &answers, out),
         Phase::Learning => learn::on_learn(s, &answers[0].1, out),
+        Phase::StageFixing { round } => stages::on_checks_fixed(s, round, &answers, out),
+        Phase::Agent { run } => stages::on_agent(s, run, &answers[0].1, out),
+        Phase::AgentFixing => stages::on_agent_fixed(s, &answers, out),
         other => out.push(Command::Log(alloc::format!(
             "ignored LLM answers in phase {other:?}"
         ))),

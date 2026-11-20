@@ -1,7 +1,7 @@
-//! Publish (design §6.1, Phase 2): a run that is ready for review asks the kernel for a draft PR,
-//! then finishes with the kernel's answer. The kernel checks every invariant; this only asks.
+//! Publish (design §6.1): the `publish` stage asks the kernel for a draft PR; the kernel's answer
+//! moves the chain on, or leaves the run stuck. The kernel checks every invariant; this only asks.
 
-use crate::api::{Command, Outcome, Status};
+use crate::api::Command;
 use crate::model::{Phase, RunState};
 use alloc::format;
 use alloc::string::String;
@@ -30,86 +30,50 @@ pub fn title(name: &str) -> String {
     )
 }
 
-/// Finishes now, or first asks the kernel to publish a run that is ready for review.
-pub fn finish_or_publish(s: &mut RunState, o: Outcome, out: &mut Vec<Command>) {
-    let publish = s.pipeline.as_ref().is_some_and(|p| p.publish.is_some());
-    if publish && o.status == Status::ReadyForReview {
-        s.phase = Phase::Publishing;
-        s.finished = Some(o);
-        out.push(Command::Publish {
-            title: title(&s.title),
-        });
-        return;
-    }
-    s.phase = Phase::Done;
-    out.push(Command::Finish(o));
-}
-
-fn held(s: &mut RunState, out: &mut Vec<Command>, what: &str) -> Option<Outcome> {
+fn held(s: &mut RunState, out: &mut Vec<Command>, what: &str) -> bool {
     if s.phase != Phase::Publishing {
         out.push(Command::Log(format!(
             "ignored {what}: no publish was requested"
         )));
-        return None;
+        return false;
     }
-    s.phase = Phase::Done;
-    s.finished.take()
+    true
 }
 
 pub fn on_published(s: &mut RunState, url: &str, out: &mut Vec<Command>) {
-    if let Some(o) = held(s, out, "a published PR") {
+    if held(s, out, "a published PR") {
         out.push(Command::Log(format!("draft PR: {url}")));
-        out.push(Command::Finish(o));
+        let at = s.stage_at.map_or(s.stages.len(), |i| i + 1);
+        super::stages::next(s, at, out);
     }
 }
 
 /// A refused publish leaves the run stuck, with the kernel's reason as its note.
 pub fn on_refused(s: &mut RunState, why: &str, out: &mut Vec<Command>) {
-    if let Some(o) = held(s, out, "a publish refusal") {
-        out.push(Command::Finish(Outcome {
-            status: Status::Stuck,
-            note: Some(format!("publish refused: {why}")),
-            ..o
-        }));
+    if held(s, out, "a publish refusal") {
+        s.phase = Phase::Done;
+        let o = super::stages::settled(s, Some(format!("publish refused: {why}")), Vec::new());
+        out.push(Command::Finish(o));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::{LlmStage, PipelineDef, PublishDef, RulesReport, Tier};
+    use crate::api::{Outcome, PublishDef, RulesReport, StageDef, StageKind, Status};
     use alloc::vec;
 
-    fn stage() -> LlmStage {
-        LlmStage {
-            tier: Tier::Opus,
-            effort: None,
-            prompt: String::from("p"),
-            max_turns: 1,
-            timeout_secs: 1,
-        }
-    }
-
-    fn state(publish: bool) -> RunState {
+    fn state() -> RunState {
         RunState {
             title: String::from("Add things"),
-            pipeline: Some(PipelineDef {
-                read: stage(),
-                challenge: stage(),
-                max_units: 5,
-                max_fix_rounds: 3,
-                build_max_turns: 80,
-                build_timeout_secs: 1800,
-                worker_prompt: String::from("work"),
-                fix_prompt: String::from("fix"),
-                review: stage(),
-                review_max_fix_rounds: 1,
-                learn: stage(),
-                publish: publish.then(|| PublishDef {
+            stages: vec![StageDef {
+                id: String::from("publish"),
+                label: String::from("publish"),
+                kind: StageKind::Publish(PublishDef {
                     draft: true,
                     labels: vec![],
                 }),
-            }),
+            }],
             ..RunState::default()
         }
     }
@@ -134,9 +98,9 @@ mod tests {
 
     #[test]
     fn a_ready_run_publishes_then_finishes_with_the_kernels_answer() {
-        let mut s = state(true);
+        let mut s = state();
         let mut out = Vec::new();
-        finish_or_publish(&mut s, outcome(Status::ReadyForReview), &mut out);
+        super::super::stages::begin(&mut s, outcome(Status::ReadyForReview), &mut out);
         assert_eq!(
             out,
             vec![Command::Publish {
@@ -150,8 +114,8 @@ mod tests {
         );
         assert_eq!(s.phase, Phase::Done);
 
-        let mut s = state(true);
-        finish_or_publish(&mut s, outcome(Status::ReadyForReview), &mut Vec::new());
+        let mut s = state();
+        super::super::stages::begin(&mut s, outcome(Status::ReadyForReview), &mut Vec::new());
         let mut refused = Vec::new();
         on_refused(&mut s, "no review", &mut refused);
         assert!(
@@ -167,11 +131,14 @@ mod tests {
     }
 
     #[test]
-    fn stuck_runs_and_runs_without_a_publish_stage_finish_at_once() {
-        for (publish, status) in [(true, Status::Stuck), (false, Status::ReadyForReview)] {
-            let mut s = state(publish);
+    fn stuck_runs_and_runs_without_later_stages_finish_at_once() {
+        for (stages, status) in [(true, Status::Stuck), (false, Status::ReadyForReview)] {
+            let mut s = state();
+            if !stages {
+                s.stages.clear();
+            }
             let mut out = Vec::new();
-            finish_or_publish(&mut s, outcome(status), &mut out);
+            super::super::stages::begin(&mut s, outcome(status), &mut out);
             assert!(matches!(&out[..], [Command::Finish(_)]));
         }
     }

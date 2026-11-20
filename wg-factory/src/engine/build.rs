@@ -25,6 +25,8 @@ pub fn on_checks(
         Phase::Baseline => on_baseline(s, results, changed, out),
         Phase::Checking { layer, round } => on_layer_check(s, layer, round, results, changed, out),
         Phase::ReviewChecking { round } => review::on_recheck(s, round, results, changed, out),
+        Phase::StageChecking { round } => super::stages::on_checks(s, round, results, changed, out),
+        Phase::AgentChecking => super::stages::on_agent_recheck(s, results, out),
         other => out.push(Command::Log(format!(
             "ignored check results in phase {other:?}"
         ))),
@@ -236,29 +238,18 @@ fn on_layer_check(
             who.join(", ")
         )));
         let problem = check_problem(&failed);
-        let pipeline = s.pipeline().clone();
         s.phase = Phase::Fixing { layer, round };
         s.layer.culprits = culprits.clone();
         s.layer.failed = failed;
-        for u in &culprits {
-            let vars = fix_vars(s, u, &problem, round, max);
-            call(
-                s,
-                CallSpec {
-                    label: format!("fix:{}#{round}", u.id),
-                    role: Role::Fixer,
-                    unit: Some(&u.id),
-                    tier: fix_tier(u.tier, round),
-                    effort: (round == max).then_some(Effort::High),
-                    template: &pipeline.fix_prompt,
-                    vars,
-                    schema: SchemaId::Work,
-                    max_turns: pipeline.build_max_turns,
-                    timeout_secs: pipeline.build_timeout_secs,
-                },
-                out,
-            );
-        }
+        fix_calls(
+            s,
+            &culprits,
+            &problem,
+            (round, max),
+            true,
+            &|u| format!("fix:{u}#{round}"),
+            out,
+        );
         return;
     }
     s.changed = changed.to_vec();
@@ -305,11 +296,61 @@ pub fn on_fix(
     answers: &[(String, Answer)],
     out: &mut Vec<Command>,
 ) {
+    record_fixes(s, format!("L{}", layer + 1), round, answers, &|u| {
+        format!("fix:{u}#{round}")
+    });
+    s.phase = Phase::Checking { layer, round };
+    let gate = s.gate.clone();
+    checks(s, format!("check:L{}", layer + 1), gate, out);
+}
+
+/// The build fix loop's calls (design §6.4 step 5), shared by every fix round of the chain: one
+/// Fixer per culprit at its fix tier, with the dev pipeline's fix prompt and limits. `(round, max)`
+/// is the round and the stage's rounds; `high_last` gives the last round high effort.
+pub fn fix_calls(
+    s: &mut RunState,
+    culprits: &[Unit],
+    problem: &str,
+    (round, max): (u32, u32),
+    high_last: bool,
+    label: &dyn Fn(&str) -> String,
+    out: &mut Vec<Command>,
+) {
+    let pipeline = s.pipeline().clone();
+    for u in culprits {
+        let vars = fix_vars(s, u, problem, round, max);
+        call(
+            s,
+            CallSpec {
+                label: label(&u.id),
+                role: Role::Fixer,
+                unit: Some(&u.id),
+                tier: fix_tier(u.tier, round),
+                effort: (high_last && round == max).then_some(Effort::High),
+                template: &pipeline.fix_prompt,
+                vars,
+                schema: SchemaId::Work,
+                max_turns: pipeline.build_max_turns,
+                timeout_secs: pipeline.build_timeout_secs,
+            },
+            out,
+        );
+    }
+}
+
+/// Records a fix round over failed checks: a fixer that proves innocence clears its unit, and the
+/// failures' signatures are kept for learn and for the fix record.
+pub fn record_fixes(
+    s: &mut RunState,
+    layer: String,
+    round: u32,
+    answers: &[(String, Answer)],
+    label: &dyn Fn(&str) -> String,
+) {
     let culprits = s.layer.culprits.clone();
     let mut summaries = Vec::new();
     for u in &culprits {
-        let a = answer_for(answers, &format!("fix:{}#{round}", u.id));
-        // A fixer that proves innocence clears its unit.
+        let a = answer_for(answers, &label(&u.id));
         let innocent = matches!(a, Some(Answer::Reply(Reply::Work(w), _)) if w.blocked.is_some());
         if !innocent {
             add(&mut s.layer.needs_fix, &u.id);
@@ -331,15 +372,12 @@ pub fn on_fix(
         s.layer.sigs.push(f.sig.clone());
     }
     s.fixes.push(FixRecord {
-        layer: format!("L{}", layer + 1),
+        layer,
         round,
         units: culprits.iter().map(|u| u.id.clone()).collect(),
         failed,
         fix_summaries: summaries,
     });
-    s.phase = Phase::Checking { layer, round };
-    let gate = s.gate.clone();
-    checks(s, format!("check:L{}", layer + 1), gate, out);
 }
 
 /// What a fixer said, for the learn evidence and the review-fix record.

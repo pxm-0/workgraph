@@ -64,6 +64,10 @@ pub enum Role {
     Fixer,
     Reviewer,
     Learner,
+    /// A QA `agent` stage: negative and recovery paths, read-only but for `<run>/tmp` (Phase 4).
+    QaExplorer,
+    /// A release `agent` stage: notes, and the release plan in the Haruspex task (Phase 4).
+    ReleaseWriter,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,6 +77,9 @@ pub enum SchemaId {
     Work,
     Review,
     Learn,
+    Verdict,
+    ReleaseNotes,
+    ReleasePlan,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -231,6 +238,27 @@ pub struct Learn {
     pub proposals: Vec<Proposal>,
 }
 
+/// A QA explorer's verdict: whether the change holds up, and what it found.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Verdict {
+    pub passed: bool,
+    pub findings: Vec<Finding>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReleaseNotes {
+    pub summary: String,
+    pub changes: Vec<String>,
+    pub breaking: bool,
+}
+
+/// The plan itself is written into the Haruspex task's `release_plan`; this is the writer's word on it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReleasePlan {
+    pub ready: bool,
+    pub summary: String,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Reply {
     Reading(Reading),
@@ -238,6 +266,31 @@ pub enum Reply {
     Work(Work),
     Review(Review),
     Learn(Learn),
+    Verdict(Verdict),
+    ReleaseNotes(ReleaseNotes),
+    ReleasePlan(ReleasePlan),
+}
+
+impl Reply {
+    /// The boolean field an `agent` stage's gate reads; `None` when the reply has no such field.
+    pub fn flag(&self, field: &str) -> Option<bool> {
+        match (self, field) {
+            (Reply::Review(r), "passed") => Some(r.passed),
+            (Reply::Verdict(v), "passed") => Some(v.passed),
+            (Reply::ReleaseNotes(n), "breaking") => Some(n.breaking),
+            (Reply::ReleasePlan(p), "ready") => Some(p.ready),
+            _ => None,
+        }
+    }
+
+    /// Findings a fix round can blame (a verdict's), else none.
+    pub fn findings(&self) -> &[Finding] {
+        match self {
+            Reply::Verdict(v) => &v.findings,
+            Reply::Review(r) => &r.findings,
+            _ => &[],
+        }
+    }
 }
 
 /// A learned rule; `a / (a + b)` is its weight.
@@ -287,8 +340,84 @@ pub struct PipelineDef {
     pub review: LlmStage,
     pub review_max_fix_rounds: u32,
     pub learn: LlmStage,
-    /// The `publish` stage (Phase 2): present in a shift, absent in place, where the skill commits.
-    pub publish: Option<PublishDef>,
+}
+
+/// A repo's assembly line (design §6.2): the dev stages, then every later stage in chain order. The
+/// release line has no dev stages. In place the chain is dev only and never publishes.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Chain {
+    pub dev: Option<PipelineDef>,
+    pub stages: Vec<StageDef>,
+}
+
+impl Chain {
+    pub fn publish(&self) -> Option<&PublishDef> {
+        self.stages.iter().find_map(|s| match &s.kind {
+            StageKind::Publish(p) => Some(p),
+            _ => None,
+        })
+    }
+}
+
+/// One stage after the dev stages. `label` is its id without hyphens, the prefix of its calls'
+/// labels; the kernel keeps it unique and apart from the dev labels.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StageDef {
+    pub id: String,
+    pub label: String,
+    pub kind: StageKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OnFail {
+    Stop,
+    /// One blamed fix round through the build fix loop, then the stage runs again.
+    Fix,
+}
+
+/// `field == equals` on the reply.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Gate {
+    pub field: String,
+    pub equals: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum StageKind {
+    /// The gate checks plus a named check set (`names`).
+    Checks {
+        names: Vec<String>,
+        on_fail: OnFail,
+        max_fix_rounds: u32,
+    },
+    Agent {
+        role: Role,
+        llm: LlmStage,
+        schema: SchemaId,
+        gate: Option<Gate>,
+        on_fail: OnFail,
+    },
+    /// A re-review: skipped when nothing changed since the last passing review.
+    Review {
+        llm: LlmStage,
+        max_fix_rounds: u32,
+    },
+    /// Named steps in the sim sandbox; `always` or only when the task is tainted.
+    Sandbox {
+        steps_from: String,
+        always: bool,
+    },
+    /// A deterministic Haruspex gate whose only blockers may be `expect_only`.
+    HaruspexGate {
+        gate: String,
+        expect_only: Vec<String>,
+    },
+    /// Terminal: the run waits for the owner.
+    Human {
+        gate: String,
+        ask: String,
+    },
+    Publish(PublishDef),
 }
 
 /// The publish stage: a draft PR with these labels. The kernel checks every invariant first.
@@ -327,7 +456,7 @@ pub struct RunInput {
     pub memory: Memory,
     /// False when there was no recall or the memory file is corrupt: the run then never saves.
     pub can_save: bool,
-    pub pipeline: PipelineDef,
+    pub chain: Chain,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -397,6 +526,16 @@ pub enum Event {
     /// The kernel refused to publish: an invariant failed, or the push or PR failed.
     PublishRefused {
         why: String,
+    },
+    /// A Haruspex gate's blockers, evaluated by the kernel.
+    GateDone {
+        label: String,
+        blockers: Vec<String>,
+    },
+    /// Sandbox steps ran; one outcome per step.
+    SandboxDone {
+        label: String,
+        results: Vec<CheckOutcome>,
     },
 }
 
@@ -468,6 +607,21 @@ pub enum Command {
     /// Commit, push `wg/*` and open a draft PR; the kernel checks every invariant (design §4.1).
     Publish {
         title: String,
+    },
+    /// Evaluate a Haruspex gate (`--json` only, never `--record`).
+    Gate {
+        label: String,
+        gate: String,
+    },
+    /// Run a configured step set in the sim sandbox, never on the Mac.
+    Sandbox {
+        label: String,
+        steps_from: String,
+    },
+    /// Terminal: the run stops for the owner at a human gate. Nothing is approved.
+    Human {
+        gate: String,
+        ask: String,
     },
     /// Terminal.
     Finish(Outcome),

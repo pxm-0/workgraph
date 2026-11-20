@@ -21,7 +21,16 @@ pub fn start(s: &mut RunState, input: &RunInput, out: &mut Vec<Command>) {
     s.user_changes_before = input.user_changes_before.clone();
     s.memory = input.memory.clone();
     s.can_save = input.can_save;
-    s.pipeline = Some(input.pipeline.clone());
+    s.pipeline = input.chain.dev.clone();
+    s.stages = input.chain.stages.clone();
+    if s.pipeline.is_none() {
+        // The release line: no dev stages, straight to the later ones.
+        let mut o = learn::failed(s, String::new());
+        o.note = None;
+        o.status = crate::api::Status::ReadyForReview;
+        super::stages::begin(s, o, out);
+        return;
+    }
     if !input.can_save {
         out.push(Command::Log(String::from(
             "memory cannot be saved this run (no recall, or the file is not valid); running without learning",

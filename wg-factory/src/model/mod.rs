@@ -1,8 +1,8 @@
 //! The factory's run state: plain owned values, replaced (never shared) on every step.
 
 use crate::api::{
-    Allocation, Challenge, CheckOutcome, Escalation, Finding, LlmFailure, Memory, PipelineDef,
-    Proposal, Reading, Reply, Review, RiskView, Size, Tier, UnitNote,
+    Allocation, Challenge, CheckOutcome, Escalation, Finding, LlmFailure, LlmStage, Memory,
+    PipelineDef, Proposal, Reading, Reply, Review, RiskView, Size, StageDef, Tier, UnitNote,
 };
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -92,9 +92,35 @@ pub enum Phase {
         round: u32,
     },
     Learning,
+    /// A `checks` stage: its check run (round 0) or the recheck after fix round `round`.
+    StageChecking {
+        round: u32,
+    },
+    StageFixing {
+        round: u32,
+    },
+    /// An `agent` stage's call: run 1, or run 2 after its fix round.
+    Agent {
+        run: u32,
+    },
+    AgentFixing,
+    AgentChecking,
+    Gating,
+    Sandboxing,
     /// Waiting for the kernel's answer to `Publish`.
     Publishing,
     Done,
+}
+
+/// The review in progress: dev's `review` stage, or a later re-review stage.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReviewCfg {
+    /// `review#<n>` calls and `check:review<n>` rechecks.
+    pub prefix: String,
+    /// `fix:<unit>#r<n>` fix calls.
+    pub fix_prefix: String,
+    pub llm: LlmStage,
+    pub max_fix_rounds: u32,
 }
 
 /// The current layer's progress through work, checks and fix rounds.
@@ -121,6 +147,14 @@ pub struct RunState {
     pub memory: Memory,
     pub can_save: bool,
     pub pipeline: Option<PipelineDef>,
+    /// The stages after dev, in chain order, and the one running (Phase 4).
+    pub stages: Vec<StageDef>,
+    pub stage_at: Option<usize>,
+    /// A fix changed the tree after the last passing review: a re-review must run.
+    pub dirty_since_review: bool,
+    pub reviewing: Option<ReviewCfg>,
+    /// An agent stage's findings, handed to its fixers and to its second run.
+    pub agent_problem: String,
     pub in_play: Vec<String>,
     pub probed: Vec<String>,
     pub reading: Option<Reading>,
