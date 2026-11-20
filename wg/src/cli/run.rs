@@ -135,7 +135,10 @@ pub fn run(args: &[String]) -> Result<Value, String> {
     let ctx = RunCtx {
         ports: Ports {
             proc: &RealProc,
-            checks: &ShellChecks { root: repo.clone() },
+            checks: &ShellChecks {
+                root: repo.clone(),
+                prefix: None,
+            },
             repo: &GitRepo { root: repo.clone() },
             hx: &hx,
         },
@@ -150,13 +153,14 @@ pub fn run(args: &[String]) -> Result<Value, String> {
         haruspex_cli: hx.cli.to_string_lossy().into_owned(),
         plugins: crate::claude::auth::plugin_profile(&dirs.home, &cfg.keep_plugins),
         user: std::env::var("USER").unwrap_or_default(),
+        replay: crate::claude::replay::Replay::none(),
         shift: None,
         run_dir: run_dir.clone(),
         dirs: dirs.clone(),
     };
     ctx.journal.append(
         "run_started",
-        json!({ "repo": repo, "slug": slug, "binary": env!("CARGO_PKG_VERSION"),
+        json!({ "repo": repo, "slug": slug, "binary": crate::claude::replay::binary_hash(), "version": env!("CARGO_PKG_VERSION"),
                 "assets": crate::assets::hash(), "pipeline": "dev", "memory_import": imported }),
     )?;
     let start = Start {

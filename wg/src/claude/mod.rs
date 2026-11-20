@@ -5,4 +5,5 @@ pub mod auth;
 pub mod envelope;
 pub mod policy;
 pub mod providers;
+pub mod replay;
 pub mod runner;

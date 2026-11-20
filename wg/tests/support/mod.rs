@@ -441,6 +441,7 @@ pub fn run_with(o: Opts, step: Step) -> Out {
         haruspex_cli: CLI.into(),
         plugins: vec![],
         user: "tester".into(),
+        replay: wg::claude::replay::Replay::none(),
         shift: o.shift.then(|| {
             let steps = std::sync::atomic::AtomicUsize::new(0);
             let stop = o.stop;

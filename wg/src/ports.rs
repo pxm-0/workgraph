@@ -38,9 +38,21 @@ pub struct Ports<'a> {
     pub hx: &'a dyn Haruspex,
 }
 
-/// Checks through `sh -c` in the repo root with the scrubbed environment.
+/// Checks through `sh -c` in the repo root with the scrubbed environment. In a shift, `prefix` is
+/// the repo's `factory_compose`, so the approved `factory` string runs in the factory's own compose
+/// project (design §7.1, §9.3).
 pub struct ShellChecks {
     pub root: PathBuf,
+    pub prefix: Option<String>,
+}
+
+impl ShellChecks {
+    pub fn command(&self, cmd: &str) -> String {
+        match &self.prefix {
+            Some(p) => format!("{p} {cmd}"),
+            None => cmd.to_string(),
+        }
+    }
 }
 
 impl CheckExec for ShellChecks {
@@ -49,7 +61,7 @@ impl CheckExec for ShellChecks {
             return Err("/bin/sh is missing, so no check can run".into());
         }
         Ok(crate::exec::run::run_shell_in(
-            cmd,
+            &self.command(cmd),
             &self.root,
             &crate::exec::env::scrubbed(),
             timeout,

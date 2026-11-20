@@ -89,7 +89,7 @@ pub fn redact(msg: &str) -> String {
     out
 }
 
-fn file_stem(seq: u64, label: &str) -> String {
+pub fn file_stem(seq: u64, label: &str) -> String {
     let h = format!("{:x}", Sha256::digest(label.as_bytes()));
     format!("{seq:04}-{}", &h[..12])
 }
@@ -236,6 +236,59 @@ fn call_inner(ctx: &RunCtx, limited: &Mutex<Vec<String>>, req: &Request) -> Resu
             .map_err(|_| "the provider lock is poisoned".to_string())
     };
     loop {
+        if let Some(rec) = ctx.replay.take(&label) {
+            ctx.journal.append(
+                "llm_replayed",
+                json!({ "label": label, "from": ctx.replay.from, "provider": rec.provider }),
+            )?;
+            let first_party = ctx
+                .cfg
+                .auth
+                .get(&rec.provider)
+                .is_some_and(|p| p.first_party());
+            let model_id = ctx
+                .cfg
+                .auth
+                .get(&rec.provider)
+                .map(|p| p.model(req.tier).to_string());
+            let (env, parsed) = match classify(Some(0), false, &rec.stdout) {
+                Ok(env) => {
+                    let p = untrusted::parse(
+                        req.schema,
+                        env.structured.as_ref().expect("classify checked it"),
+                        &req.parse,
+                    );
+                    (env, p.map_err(|m| (LlmFailure::Invalid, m)))
+                }
+                Err(f) => (f.envelope.clone(), Err((f.class, f.detail))),
+            };
+            match parsed {
+                Ok(reply) => {
+                    let counts = first_party
+                        && model_id
+                            .zip(env.model_used.as_deref())
+                            .is_some_and(|(m, u)| same_model(&m, u));
+                    return Ok(Answer {
+                        reply: Ok(reply),
+                        cost_micros: env.cost_micros,
+                        counts_for_tier: counts,
+                        incident: None,
+                        capped: false,
+                    });
+                }
+                Err((LlmFailure::Invalid, msg)) if retries_invalid(req.role) && !retried => {
+                    retried = true;
+                    prompt = format!(
+                        "{}\n\nYour previous reply failed validation: {}",
+                        req.prompt,
+                        redact(&msg)
+                    );
+                    label = format!("{}!retry", req.label);
+                    continue;
+                }
+                Err((why, _)) => return Ok(failed(why)),
+            }
+        }
         let provider = {
             let l = lock()?;
             match ctx.cfg.auth.pick(req.stage, &l) {
