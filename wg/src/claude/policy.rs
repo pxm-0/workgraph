@@ -2,7 +2,7 @@
 //! The factory names a role and a unit; it never carries a tool policy or a write root.
 
 use crate::guard::bash::BashRules;
-use crate::guard::hook::Manifest;
+use crate::guard::hook::{Manifest, SandboxGrant};
 use std::path::Path;
 use wg_factory::api::Role;
 
@@ -17,6 +17,9 @@ pub struct Ctx<'a> {
     /// Owner-approved check commands for this repo (project and factory strings).
     pub approved: &'a [String],
     pub secret_roots: Vec<String>,
+    /// Risky or tainted work (Phase 3): the absolute `wg` and what its sandbox exec may do. Bash is
+    /// then only `wg sandbox exec` and `wg sandbox poll` (design §5.2).
+    pub sandbox: Option<(String, SandboxGrant)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -136,16 +139,36 @@ pub fn policy(role: Role, unit_files: &[String], c: &Ctx) -> Policy {
             skills.push(HX_SKILL);
         }
         Role::Worker | Role::Fixer => {
-            bash.prefixes = c.approved.to_vec();
             write_roots.extend(unit_files.iter().map(|f| match f.strip_suffix('/') {
                 Some(dir) => format!("{}/", wt(dir)),
                 None => wt(f),
             }));
-            write_roots.push(tmp_dir.clone());
+            match &c.sandbox {
+                Some((wg, g)) => {
+                    let unit = g.unit.as_deref().unwrap_or("");
+                    bash.prefixes = vec![
+                        format!("{wg} sandbox exec --unit {unit}"),
+                        format!("{wg} sandbox poll --job"),
+                    ];
+                }
+                None => {
+                    bash.prefixes = c.approved.to_vec();
+                    write_roots.push(tmp_dir.clone());
+                }
+            }
             skills.extend(["mattpocock-skills:tdd", "mattpocock-skills:diagnosing-bugs"]);
         }
         Role::Reviewer => {
-            bash.prefixes = c.approved.to_vec();
+            bash.prefixes = match &c.sandbox {
+                Some((wg, g)) => vec![
+                    format!(
+                        "{wg} sandbox exec --task {}",
+                        g.task.as_deref().unwrap_or("")
+                    ),
+                    format!("{wg} sandbox poll --job"),
+                ],
+                None => c.approved.to_vec(),
+            };
             bash.prefixes.push("git diff".into());
             bash.exact = vec!["git status".into()];
             write_roots.extend(task_file.clone());
@@ -179,6 +202,7 @@ pub fn policy(role: Role, unit_files: &[String], c: &Ctx) -> Policy {
             tools: tools.iter().map(|t| t.to_string()).collect(),
             skills: skills.iter().map(|s| s.to_string()).collect(),
             bash,
+            sandbox: c.sandbox.as_ref().map(|(_, g)| g.clone()),
         },
     }
 }
@@ -196,7 +220,59 @@ mod tests {
             initializing: true,
             approved,
             secret_roots: vec!["/home/.workgraph".into()],
+            sandbox: None,
         }
+    }
+
+    #[test]
+    fn risky_and_tainted_work_gets_the_sandbox_only() {
+        let approved = vec!["npm test".to_string()];
+        let grant = |unit: Option<&str>, task: Option<&str>| SandboxGrant {
+            repo: "o/r".into(),
+            run: "r-1".into(),
+            unit: unit.map(String::from),
+            task: task.map(String::from),
+            files: vec!["db/".into()],
+        };
+        let c = Ctx {
+            sandbox: Some(("/opt/wg".into(), grant(Some("U2"), None))),
+            ..ctx(&approved)
+        };
+        let w = policy(Role::Fixer, &["db/".into()], &c);
+        assert_eq!(
+            w.manifest.bash.prefixes,
+            [
+                "/opt/wg sandbox exec --unit U2",
+                "/opt/wg sandbox poll --job"
+            ]
+        );
+        assert_eq!(
+            w.manifest.write_roots,
+            ["/r/db/"],
+            "no run tmp for a risky unit"
+        );
+        assert!(w
+            .allowed
+            .contains(&"Bash(/opt/wg sandbox exec --unit U2:*)".to_string()));
+        assert!(
+            !w.allowed.iter().any(|a| a.contains("npm test")),
+            "no host check"
+        );
+        assert_eq!(w.manifest.sandbox.unwrap().unit.as_deref(), Some("U2"));
+        let c = Ctx {
+            sandbox: Some(("/opt/wg".into(), grant(None, Some("T-001")))),
+            ..ctx(&approved)
+        };
+        let r = policy(Role::Reviewer, &[], &c);
+        assert_eq!(
+            r.manifest.bash.prefixes,
+            [
+                "/opt/wg sandbox exec --task T-001",
+                "/opt/wg sandbox poll --job",
+                "git diff"
+            ]
+        );
+        assert!(!r.allowed.iter().any(|a| a.contains("npm test")));
     }
 
     #[test]

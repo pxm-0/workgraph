@@ -2,7 +2,7 @@
 //! with the 0600 key `~/.workgraph/key`. Reloaded only by `finalize_run`, which re-checks the tree.
 
 use crate::haruspex::contract::Contract;
-use crate::tokens::{CheckResult, ReviewPass};
+use crate::tokens::{CheckResult, ReviewPass, SandboxRun};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -26,6 +26,13 @@ pub struct RunMeta {
     pub approvals: Value,
     pub open_escalations: Vec<String>,
     pub decided: Vec<String>,
+    /// A risky unit was built (or the repo is always tainted): checks and verify belong to the
+    /// sandbox, never the Mac (design §8.1, §9.5).
+    #[serde(default)]
+    pub tainted: bool,
+    /// Risky units and why, for the PR, the summary and the labels.
+    #[serde(default)]
+    pub risky: Vec<(String, String)>,
 }
 
 pub fn random_hex(bytes: usize) -> Result<String, String> {
@@ -93,13 +100,21 @@ pub fn save(
     meta: &RunMeta,
     checks: &[CheckResult],
     review: Option<&ReviewPass>,
+    sandbox: &[SandboxRun],
 ) -> Result<(), String> {
     let mut lines = vec![line(key, json!({ "kind": "meta", "meta": meta }))];
     for c in checks {
         lines.push(line(
             key,
             json!({ "kind": "check", "name": c.name(), "command": c.command(), "exit": c.exit_code(),
-                    "tail": c.output_tail(), "tree": c.tree(), "nonce": c.nonce() }),
+                    "tail": c.output_tail(), "tree": c.tree(), "nonce": c.nonce(), "target": c.target().name() }),
+        ));
+    }
+    for r in sandbox {
+        lines.push(line(
+            key,
+            json!({ "kind": "sandbox", "job": r.job(), "nonce": r.nonce(), "label": r.label(), "tree": r.tree(),
+                    "image": r.image(), "steps": r.steps(), "clean": r.clean() }),
         ));
     }
     if let Some(r) = review {
@@ -114,7 +129,12 @@ pub fn save(
     std::fs::rename(&tmp, path).map_err(|e| format!("cannot replace {}: {e}", path.display()))
 }
 
-pub type Loaded = (RunMeta, Vec<CheckResult>, Option<ReviewPass>);
+pub type Loaded = (
+    RunMeta,
+    Vec<CheckResult>,
+    Option<ReviewPass>,
+    Vec<SandboxRun>,
+);
 
 /// Every line's MAC must verify, or nothing loads.
 pub fn load(path: &Path, key: &[u8]) -> Result<Loaded, String> {
@@ -123,6 +143,7 @@ pub fn load(path: &Path, key: &[u8]) -> Result<Loaded, String> {
     let mut meta = None;
     let mut checks = Vec::new();
     let mut review = None;
+    let mut sandbox = Vec::new();
     let s = |v: &Value| v.as_str().unwrap_or("").to_string();
     for l in text.lines() {
         let outer: Value =
@@ -139,14 +160,34 @@ pub fn load(path: &Path, key: &[u8]) -> Result<Loaded, String> {
                         .map_err(|e| format!("bad run meta: {e}"))?,
                 )
             }
-            Some("check") => checks.push(CheckResult::new(
-                &s(&v["name"]),
-                &s(&v["command"]),
-                v["exit"].as_i64().ok_or("a check token has no exit code")?,
-                &s(&v["tail"]),
-                &s(&v["tree"]),
-                &s(&v["nonce"]),
-            )),
+            Some("check") => {
+                let make = if v["target"] == "sim_sandbox" {
+                    CheckResult::in_sandbox
+                } else {
+                    CheckResult::new
+                };
+                checks.push(make(
+                    &s(&v["name"]),
+                    &s(&v["command"]),
+                    v["exit"].as_i64().ok_or("a check token has no exit code")?,
+                    &s(&v["tail"]),
+                    &s(&v["tree"]),
+                    &s(&v["nonce"]),
+                ))
+            }
+            Some("sandbox") => {
+                let steps: Vec<(String, i64)> = serde_json::from_value(v["steps"].clone())
+                    .map_err(|e| format!("bad sandbox token: {e}"))?;
+                sandbox.push(SandboxRun::restore(
+                    &s(&v["job"]),
+                    &s(&v["nonce"]),
+                    &s(&v["label"]),
+                    &s(&v["tree"]),
+                    &s(&v["image"]),
+                    steps,
+                    v["clean"] == true,
+                ))
+            }
             Some("review") => {
                 review = Some(ReviewPass::new(
                     &s(&v["task"]),
@@ -157,7 +198,12 @@ pub fn load(path: &Path, key: &[u8]) -> Result<Loaded, String> {
             _ => return Err("unknown token kind".into()),
         }
     }
-    Ok((meta.ok_or("the tokens hold no run meta")?, checks, review))
+    Ok((
+        meta.ok_or("the tokens hold no run meta")?,
+        checks,
+        review,
+        sandbox,
+    ))
 }
 
 #[cfg(test)]
@@ -190,11 +236,39 @@ mod tests {
             ..RunMeta::default()
         };
         let c = CheckResult::new("test", "npm test", 0, "ok", "tree1", "check:L1");
+        let sc = CheckResult::in_sandbox("test", "npm test", 0, "ok", "tree1", "check:L2");
         let r = ReviewPass::new("T-1", "tree1", "review#1");
+        let job = crate::sandbox::job::JobResult {
+            job: "j-0000000a".into(),
+            nonce: "n".into(),
+            steps: vec![crate::sandbox::job::StepResult {
+                name: "test".into(),
+                exit: 0,
+                timed_out: false,
+                oom: false,
+                tail: String::new(),
+            }],
+            patch: None,
+            cleanup: Default::default(),
+            error: None,
+        };
+        let sb = SandboxRun::new(&job, "check:L2", "tree1", "img@sha256:x");
         let p = dir.join("tokens.jsonl");
-        save(&p, &k, &meta, std::slice::from_ref(&c), Some(&r)).unwrap();
-        let (m2, cs, rv) = load(&p, &k).unwrap();
-        assert_eq!((m2, cs, rv), (meta, vec![c], Some(r)));
+        save(
+            &p,
+            &k,
+            &meta,
+            &[c.clone(), sc.clone()],
+            Some(&r),
+            std::slice::from_ref(&sb),
+        )
+        .unwrap();
+        let (m2, cs, rv, sbs) = load(&p, &k).unwrap();
+        assert_eq!(
+            (m2, cs, rv, sbs),
+            (meta, vec![c, sc.clone()], Some(r), vec![sb])
+        );
+        assert_eq!(sc.target(), crate::tokens::Target::SimSandbox);
         let text = std::fs::read_to_string(&p)
             .unwrap()
             .replace("\\\"exit\\\":0", "\\\"exit\\\":1");

@@ -574,7 +574,7 @@ fn t19_a_fixer_that_proves_its_unit_innocent_keeps_the_failure_off_its_stats() {
 }
 
 #[test]
-fn t20_a_risky_unit_and_everything_depending_on_it_are_skipped() {
+fn t20a_sandbox_unavailable_a_risky_unit_and_its_dependants_are_skipped_with_the_reason() {
     let o = run(Opts {
         units: vec![
             unit("a", json!({ "risky": true, "riskReason": "migration" })),
@@ -595,10 +595,72 @@ fn t20_a_risky_unit_and_everything_depending_on_it_are_skipped() {
         ])
     );
     assert_eq!(ids(&o.result["skipped"]), ["a", "b"]);
-    assert!(o.result["skipped"][0]["why"]
-        .as_str()
-        .unwrap()
-        .contains("risky"));
+    let why = o.result["skipped"][0]["why"].as_str().unwrap();
+    assert!(
+        why.contains("risky") && why.contains("sandbox unavailable"),
+        "{why}"
+    );
+    assert_eq!(o.result["tainted"], false);
+}
+
+#[test]
+fn t20b_sandbox_ready_a_risky_unit_is_built_sandbox_only_and_every_later_check_runs_there() {
+    let o = run(Opts {
+        units: vec![
+            unit(
+                "a",
+                json!({ "risky": true, "riskReason": "migration", "files": ["db/migrations/"] }),
+            ),
+            unit("b", json!({ "dependsOn": ["a"] })),
+            unit("c", json!({})),
+        ],
+        sandbox: Some(SandboxSpec::default()),
+        config_extra: sandbox_repo(),
+        ..Opts::default()
+    });
+    for want in ["work:a", "work:b", "work:c", "review#1"] {
+        assert!(o.calls.iter().any(|c| c == want), "{want} in {:?}", o.calls);
+    }
+    assert_eq!(o.result["skipped"], json!([]));
+    assert_eq!(o.result["tainted"], true);
+    assert_eq!(o.result["riskyBuilt"][0]["label"], "risky:migration");
+    let wg = "/opt/wg/bin/wg";
+    let allowed = |label: &str| o.call(label).argv.join(" ");
+    assert!(allowed("work:a").contains(&format!("Bash({wg} sandbox exec --unit a:*)")));
+    assert!(
+        !allowed("work:a").contains("Bash(npm test:*)"),
+        "no host check for a risky worker"
+    );
+    assert!(
+        !allowed("work:c").contains("Bash(npm test:*)"),
+        "the task is tainted: no host checks at all"
+    );
+    assert!(allowed("review#1").contains(&format!("Bash({wg} sandbox exec --task T-001:*)")));
+    let runs: Vec<(String, String)> = o
+        .journal
+        .iter()
+        .filter(|e| e["kind"] == "checks_run")
+        .map(|e| {
+            (
+                e["label"].as_str().unwrap().to_string(),
+                e["target"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        runs[0],
+        ("check:baseline".into(), "host".into()),
+        "before any risky build"
+    );
+    assert!(
+        runs.len() > 1 && runs[1..].iter().all(|(_, t)| t == "sim_sandbox"),
+        "{runs:?}"
+    );
+    assert_eq!(
+        o.result["sandboxRuns"].as_array().unwrap().len(),
+        runs.len() - 1
+    );
+    assert_eq!(o.result["verified"], true);
 }
 
 #[test]

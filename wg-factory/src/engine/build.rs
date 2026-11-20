@@ -83,13 +83,14 @@ pub fn start_layer(s: &mut RunState, from: usize, out: &mut Vec<Command>) {
                 Some(String::from(
                     "run stopped after an earlier layer failed its checks",
                 ))
-            } else if u.risky || kernel_risky.is_some() {
+            } else if (u.risky || kernel_risky.is_some()) && !s.risk.sandbox_ready {
+                // Phase 3: a ready sandbox runs it (the kernel applies the sandbox-only policy).
                 let reason = u
                     .risk_reason
                     .clone()
                     .or_else(|| kernel_risky.map(|(_, r)| r.clone()))
                     .unwrap_or_else(|| String::from("hard to undo"));
-                Some(format!("risky, yours to do: {reason}"))
+                Some(format!("risky, sandbox unavailable, yours to do: {reason}"))
             } else {
                 dep.map(|d| format!("depends on {d}, which did not finish"))
             };

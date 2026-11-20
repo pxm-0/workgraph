@@ -125,6 +125,14 @@ pub fn run(args: &[String]) -> Result<Value, String> {
     }
     let hx = PinnedHaruspex::new(&pin, &repo, &[dirs.work(), dirs.state()])?;
     let slug = git::slug(&repo);
+    let sandbox = crate::sandbox::client::SimSandbox {
+        cfg: cfg.clone(),
+        repo: cfg
+            .repo(&git::repo_name(&slug))
+            .and_then(|r| r.sandbox.clone()),
+        root: repo.clone(),
+        status: Default::default(),
+    };
     let memory_path = dirs.memory(&slug);
     let imported = memory_store::import(&repo.join(".claude/work-memory.json"), &memory_path)?;
     let _lock = memory_store::Lock::take(&memory_path)?;
@@ -141,6 +149,7 @@ pub fn run(args: &[String]) -> Result<Value, String> {
             },
             repo: &GitRepo { root: repo.clone() },
             hx: &hx,
+            sandbox: &sandbox,
         },
         cfg: &cfg,
         run_id: run_id.clone(),
@@ -205,6 +214,8 @@ pub fn persist(ctx: &RunCtx, dirs: &Dirs, ran: &driver::Ran) -> Result<(), Strin
         approvals: k.approvals.clone(),
         open_escalations: k.open().iter().map(|e| e.id.clone()).collect(),
         decided: k.decided.clone(),
+        tainted: k.tainted,
+        risky: k.risky.clone(),
     };
     let key = tokens_store::key(&dirs.key())?;
     tokens_store::save(
@@ -213,6 +224,7 @@ pub fn persist(ctx: &RunCtx, dirs: &Dirs, ran: &driver::Ran) -> Result<(), Strin
         &meta,
         &k.checks,
         k.review_pass.as_ref(),
+        &k.sandbox_runs,
     )
 }
 

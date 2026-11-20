@@ -3,7 +3,7 @@
 //! exists for the branch is returned, so a resume never opens a second one. Only planned, non-risky
 //! files are ever pushed, and the PR is always a draft: making it ready is `wg approve`'s (§9.5).
 
-use super::kernel::{classify, Kernel};
+use super::kernel::Kernel;
 use super::RunCtx;
 use crate::haruspex::{contract, tamper};
 use wg_factory::api::PublishDef;
@@ -74,19 +74,80 @@ pub fn refusal(ctx: &RunCtx, k: &Kernel, title: &str) -> Result<Option<String>, 
     Ok(None)
 }
 
-/// Why the changed set may not be pushed: a risky path (design §8.2; Phase 2 skips risky units, so
-/// such a file can only come from a check run or a stray write), or a file no unit planned.
+/// Why the changed set may not be pushed: a risky path outside a sandboxed risky unit (design §8.2),
+/// or a file no unit planned.
 pub fn scope_refusal(k: &Kernel, changed: &[String], initialized: bool) -> Option<String> {
+    // A risky unit's own files may ship once the task is tainted: every check then ran in the
+    // sandbox and the tokens say so (design §8.1).
+    let sandboxed = |f: &str| {
+        k.tainted
+            && k.risky.iter().any(|(id, _)| {
+                k.unit_files(id)
+                    .is_some_and(|files| crate::sandbox::patch::in_unit(f, &files))
+            })
+    };
     let outside_harness: Vec<String> = changed
         .iter()
-        .filter(|f| !f.starts_with(".haruspex/"))
+        .filter(|f| !f.starts_with(".haruspex/") && !sandboxed(f))
         .cloned()
         .collect();
-    if let Some(why) = classify(&outside_harness) {
+    if let Some(why) = crate::risk::paths(&outside_harness) {
         return Some(format!("the change touches {why}"));
     }
     let out = out_of_scope(changed, &k.units(), &[], &[], initialized);
     (!out.is_empty()).then(|| format!("files no unit planned: {}", out.join(", ")))
+}
+
+/// The `risky:<category>` labels of the risky units in this task.
+pub fn risky_labels(k: &Kernel) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (_, why) in k.risky.iter().filter(|(id, _)| k.built_risky.contains(id)) {
+        let l = format!("risky:{}", crate::risk::category(why));
+        if !out.contains(&l) {
+            out.push(l);
+        }
+    }
+    out
+}
+
+/// Risky units and the `SandboxRun` evidence for the PR body.
+fn sandbox_section(ctx: &RunCtx, k: &Kernel) -> String {
+    if !k.tainted {
+        return String::new();
+    }
+    let units: Vec<String> = k
+        .risky
+        .iter()
+        .filter(|(id, _)| k.built_risky.contains(id))
+        .map(|(id, why)| format!("- {id}: {}", crate::ids::one_line(why, 200)))
+        .collect();
+    let runs: Vec<String> = k
+        .sandbox_runs
+        .iter()
+        .map(|r| {
+            let steps: Vec<String> = r
+                .steps()
+                .iter()
+                .map(|(n, e)| format!("{n} exit {e}"))
+                .collect();
+            format!(
+                "- {}: job {} nonce {} at tree {}, image {}: {}; cleanup {}",
+                r.label(),
+                r.job(),
+                r.nonce(),
+                &r.tree()[..r.tree().len().min(12)],
+                r.image(),
+                steps.join(", "),
+                if r.clean() { "clean" } else { "LEFTOVERS" }
+            )
+        })
+        .collect();
+    format!(
+        "\nTainted: every check after the risky build ran in the sandbox on `{}` (rootless podman, no network, no host mounts), never on the Mac. Haruspex verify for this task runs there too.\n\nRisky units:\n{}\n\nSandbox evidence (SandboxRun):\n{}\n",
+        ctx.cfg.sandbox.machine,
+        if units.is_empty() { "- none built (the repo is always tainted)".to_string() } else { units.join("\n") },
+        if runs.is_empty() { "- none".to_string() } else { runs.join("\n") },
+    )
 }
 
 fn body(ctx: &RunCtx, k: &Kernel, issue: u64) -> String {
@@ -105,11 +166,12 @@ fn body(ctx: &RunCtx, k: &Kernel, issue: u64) -> String {
         k.left_out.join(", ")
     };
     format!(
-        "Closes #{issue}\n\nDraft PR by a workgraph shift. Nothing here is approved: the owner approves with `/workgraph:work approve {}#<this PR>`, which records Haruspex verification.\n\n- Haruspex task: {}\n- Gate checks, passing at the current tree: {}\n- Checks already failing before the change: {failing}\n- Independent review (opus): passed\n- Run: {}\n\nCriteria verdicts:\n{review}\n",
+        "Closes #{issue}\n\nDraft PR by a workgraph shift. Nothing here is approved: the owner approves with `/workgraph:work approve {}#<this PR>`, which records Haruspex verification.\n\n- Haruspex task: {}\n- Gate checks, passing at the current tree: {}\n- Checks already failing before the change: {failing}\n- Independent review (opus): passed\n- Run: {}\n\nCriteria verdicts:\n{review}\n{}",
         ctx.repo_name,
         k.task_id(),
         k.gate.join(", "),
         ctx.run_id,
+        sandbox_section(ctx, k),
     )
 }
 
@@ -145,6 +207,11 @@ pub fn publish(ctx: &RunCtx, k: &Kernel, def: &PublishDef, title: &str) -> Resul
     );
     crate::git::commit(&ctx.repo, &files, &message)?;
     crate::git::push_task_branch(&ctx.repo, &sh.branch)?;
+    let mut labels = def.labels.clone();
+    for l in risky_labels(k) {
+        sh.gh.ensure_label(&ctx.repo_name, &l)?;
+        labels.push(l);
+    }
     sh.gh.pr_create(
         &ctx.repo_name,
         &sh.branch,
@@ -152,7 +219,7 @@ pub fn publish(ctx: &RunCtx, k: &Kernel, def: &PublishDef, title: &str) -> Resul
         title,
         &body(ctx, k, sh.issue),
         true,
-        &def.labels,
+        &labels,
     )
 }
 
@@ -202,6 +269,31 @@ mod tests {
             .contains("files no unit planned: Makefile"));
         assert!(scope_refusal(&k, &s(&["CLAUDE.md"]), false).is_some());
         assert_eq!(scope_refusal(&k, &s(&["CLAUDE.md"]), true), None);
+        let mut risky = k.clone();
+        if let Some(r) = risky.reading.as_mut() {
+            r.units[0].files.push("db/migrations/".into());
+        }
+        let mig = s(&["calc.py", "db/migrations/001.sql"]);
+        assert!(
+            scope_refusal(&risky, &mig, false).is_some(),
+            "not tainted: refused"
+        );
+        risky.risky = vec![(
+            "a".into(),
+            "migration: a database migration (db/migrations/)".into(),
+        )];
+        risky.built_risky = vec!["a".into()];
+        risky.tainted = true;
+        assert_eq!(
+            scope_refusal(&risky, &mig, false),
+            None,
+            "a sandboxed risky unit's files ship"
+        );
+        assert!(
+            scope_refusal(&risky, &s(&[".github/x.yml"]), false).is_some(),
+            "other risky paths do not"
+        );
+        assert_eq!(super::risky_labels(&risky), ["risky:migration"]);
     }
 
     #[test]

@@ -239,6 +239,7 @@ pub fn run(dirs: &Dirs, cfg: &Config) -> Result<Value, String> {
         return super::report::write(dirs, &id);
     }
     j.append("preflight", json!({ "ok": true }))?;
+    let sandbox = super::sandbox::start(cfg, &j)?;
     let env = Env {
         dirs,
         cfg,
@@ -246,6 +247,7 @@ pub fn run(dirs: &Dirs, cfg: &Config) -> Result<Value, String> {
         shift_id: &id,
         journal: &j,
         deadline,
+        sandbox: sandbox.status.clone(),
     };
     let mut c = Counters {
         tasks: 0,
@@ -305,6 +307,7 @@ pub fn run(dirs: &Dirs, cfg: &Config) -> Result<Value, String> {
             }
         }
     }
+    super::sandbox::end(cfg, &j, &sandbox)?;
     j.append("shift_finished", json!({ "tasks": c.tasks }))?;
     let out = super::report::write(dirs, &id);
     drop(lock);

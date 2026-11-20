@@ -13,7 +13,8 @@ use wg::config::Config;
 use wg::engine::driver::{self, Ran, Start, Step};
 use wg::engine::RunCtx;
 use wg::journal::Journal;
-use wg::ports::{CheckExec, Haruspex, Ports, Proc, RawOutput, Repo, Spawn};
+use wg::ports::{CheckExec, Haruspex, Ports, Proc, RawOutput, Repo, Sandbox, Spawn};
+use wg::sandbox::job::{Cleanup, JobResult, Step as JobStep, StepResult};
 use wg::state_dirs::Dirs;
 use wg_factory::api::Decision;
 
@@ -81,6 +82,79 @@ pub struct Opts {
     pub max_parallel: usize,
     /// How long each Worker call takes, to observe parallelism.
     pub work_ms: u64,
+    /// The sandbox port: `None` is no sandbox at all.
+    pub sandbox: Option<SandboxSpec>,
+    /// The diff the repo shows after the check with this label ran (the classifier's input).
+    pub diffs: HashMap<&'static str, &'static str>,
+}
+
+/// A fake sim sandbox: ready, or unavailable for a reason; the agent can die at a label.
+#[derive(Clone, Default)]
+pub struct SandboxSpec {
+    pub unavailable: Option<&'static str>,
+    pub dies_at: Option<&'static str>,
+}
+
+/// `[[repo]] o/r` with a `[repo.sandbox]` whose `test` check runs `npm test` in the container.
+pub fn sandbox_repo() -> String {
+    format!(
+        "[[repo]]\nname = \"o/r\"\npath = \"/x\"\n[repo.sandbox]\nimage = \"docker.io/library/node@sha256:{}\"\nchecks = {{ test = \"npm test\" }}\n",
+        "a".repeat(64)
+    )
+}
+
+pub struct FakeSandbox {
+    pub spec: SandboxSpec,
+    pub down: Mutex<Option<String>>,
+    pub checker: Checker,
+    pub seen: Mutex<HashMap<(String, String), u32>>,
+    pub last: Arc<Mutex<String>>,
+}
+
+impl Sandbox for FakeSandbox {
+    fn unavailable(&self) -> Option<String> {
+        self.down.lock().unwrap().clone()
+    }
+    fn run(&self, nonce: &str, steps: Vec<JobStep>) -> Result<JobResult, String> {
+        if let Some(why) = self.unavailable() {
+            return Err(format!("sandbox unavailable: {why}"));
+        }
+        let label = nonce
+            .split_once(':')
+            .map(|(_, l)| l)
+            .unwrap_or(nonce)
+            .to_string();
+        if self.spec.dies_at == Some(label.as_str()) {
+            *self.down.lock().unwrap() = Some("the agent was killed".into());
+            return Err("sandbox unavailable: the sandbox job ended without a result (the agent was stopped)".into());
+        }
+        *self.last.lock().unwrap() = label.clone();
+        let mut out = Vec::new();
+        for st in &steps {
+            let mut seen = self.seen.lock().unwrap();
+            let n = seen.entry((label.clone(), st.cmd.clone())).or_insert(0);
+            *n += 1;
+            let (exit, tail) = match (self.checker)(&label, &st.cmd, *n) {
+                Some(t) => (1, t),
+                None => (0, "ok".to_string()),
+            };
+            out.push(StepResult {
+                name: st.name.clone(),
+                exit,
+                timed_out: false,
+                oom: false,
+                tail,
+            });
+        }
+        Ok(JobResult {
+            job: "j-0000000a".into(),
+            nonce: nonce.into(),
+            steps: out,
+            patch: None,
+            cleanup: Cleanup::default(),
+            error: None,
+        })
+    }
 }
 
 impl Default for Opts {
@@ -115,6 +189,8 @@ impl Default for Opts {
             tree: Arc::new(Mutex::new("tree-1".into())),
             max_parallel: 1,
             work_ms: 0,
+            sandbox: None,
+            diffs: HashMap::new(),
         }
     }
 }
@@ -227,6 +303,7 @@ pub struct FakeRepo {
     pub tree: Arc<Mutex<String>>,
     pub last: Arc<Mutex<String>>,
     pub changed: HashMap<&'static str, Vec<&'static str>>,
+    pub diffs: HashMap<&'static str, &'static str>,
 }
 
 impl Repo for FakeRepo {
@@ -240,6 +317,14 @@ impl Repo for FakeRepo {
     }
     fn tree(&self) -> Result<String, String> {
         Ok(self.tree.lock().unwrap().clone())
+    }
+    fn diff(&self, _files: &[String]) -> Result<String, String> {
+        let l = self.last.lock().unwrap().clone();
+        Ok(self
+            .diffs
+            .get(l.as_str())
+            .map(|d| d.to_string())
+            .unwrap_or_default())
     }
 }
 
@@ -436,10 +521,23 @@ pub fn run_with(o: Opts, step: Step) -> Out {
         last: last.clone(),
         fail_to_start: o.checks_fail_to_start,
     };
+    let sandbox: Box<dyn Sandbox> = match &o.sandbox {
+        Some(spec) => Box::new(FakeSandbox {
+            spec: spec.clone(),
+            down: Mutex::new(spec.unavailable.map(String::from)),
+            checker: o.checker.clone(),
+            seen: Mutex::new(HashMap::new()),
+            last: last.clone(),
+        }),
+        None => Box::new(wg::sandbox::client::NoSandbox(
+            "no sandbox in this test".into(),
+        )),
+    };
     let repo_port = FakeRepo {
         tree: o.tree.clone(),
         last,
         changed: o.changed.clone(),
+        diffs: o.diffs.clone(),
     };
     let hx =
         o.hx.clone()
@@ -455,6 +553,7 @@ pub fn run_with(o: Opts, step: Step) -> Out {
             checks: &checks,
             repo: &repo_port,
             hx: &*hx,
+            sandbox: &*sandbox,
         },
         cfg: &cfg,
         dirs: dirs.clone(),

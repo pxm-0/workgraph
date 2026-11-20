@@ -94,6 +94,11 @@ if args[:2] == ["api", "graphql"]:
     fields = dict(a.split("=", 1) for a in opts("-F"))
     i = issue(f"{fields['owner']}/{fields['name']}", fields["number"])
     save_and_exit("\n".join(json.dumps(e) for e in i.get("edits", [])))
+if args[:2] == ["label", "create"]:
+    names = state.setdefault("labels", {}).setdefault(opt("-R"), [])
+    if args[2] not in names:
+        names.append(args[2])
+    save_and_exit("")
 if args[:2] == ["pr", "list"]:
     repo, branch = opt("-R"), opt("--head")
     save_and_exit([pr_view(p) for p in state.setdefault("prs", []) if p["repo"] == repo and p["headRefName"] == branch])

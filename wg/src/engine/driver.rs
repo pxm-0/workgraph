@@ -13,8 +13,8 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use wg_factory::api::{
-    Command, Decision, Escalation, Event, LlmCall, LlmFailure, Outcome, PipelineDef, Reply,
-    RiskView, Role, RunInput, Tier,
+    Command, Decision, Escalation, Event, LlmCall, LlmFailure, Outcome, PipelineDef, Reply, Role,
+    RunInput, Tier,
 };
 use wg_factory::model::RunState;
 
@@ -81,6 +81,10 @@ pub fn run_task(ctx: &RunCtx, start: Start, step: Step) -> Result<Ran, String> {
         baseline_floor: start.baseline_floor.clone(),
         approvals: ctx.ports.hx.approvals()?,
         managed: ctx.ports.hx.managed_hash()?,
+        tainted: ctx
+            .cfg
+            .repo(&ctx.repo_name)
+            .is_some_and(|r| r.always_tainted),
         ..Kernel::default()
     };
     for w in &start.memory.warnings {
@@ -271,7 +275,20 @@ impl Loop<'_> {
                 return Ok(None);
             }
         };
-        match crate::checks::run(self.ctx, label, &names) {
+        if label != "check:baseline" {
+            if let Some(end) = super::risk::after_layer(self.ctx, &mut self.k)? {
+                return Ok(Some(end));
+            }
+            self.queue
+                .push_back(Event::RiskUpdated(self.k.risk_view(self.ctx)));
+        }
+        match crate::checks::run(self.ctx, label, &names, self.k.tainted) {
+            Err(why) if why.starts_with("sandbox unavailable") => {
+                self.ctx
+                    .journal
+                    .append("parked", json!({ "label": label, "reason": why }))?;
+                return Ok(Some(End::Parked(why)));
+            }
             Err(why) => {
                 self.ctx
                     .journal
@@ -281,7 +298,8 @@ impl Loop<'_> {
                     why,
                 });
             }
-            Ok((results, changed)) => {
+            Ok((results, changed, evidence)) => {
+                self.k.sandbox_runs.extend(evidence);
                 if label == "check:baseline" {
                     self.k.record_baseline(&results);
                     if self.k.gate.is_empty() {
@@ -321,6 +339,14 @@ impl Loop<'_> {
                         "effort": c.effort.map(|e| e.name()), "template": crate::ids::one_line(&c.template, 32) }),
             )?;
             let r = command_check::llm(self.ctx, &self.k, &c, self.max_units);
+            if let (Ok(_), Some(unit)) = (&r, c.unit.as_deref()) {
+                if super::risk::taints(&mut self.k, c.role, unit) {
+                    self.ctx.journal.append(
+                        "risk_updated",
+                        json!({ "tainted": true, "unit": unit, "why": "a risky unit is being built in the sandbox" }),
+                    )?;
+                }
+            }
             if let Err(Refusal {
                 needs_decision: true,
                 why,
@@ -452,11 +478,18 @@ impl Loop<'_> {
                     "gate_evaluated",
                     json!({ "gate": "ready_to_build", "blockers": blockers }),
                 )?;
-                self.queue.push_back(Event::RiskUpdated(RiskView {
-                    risky_units: self.k.risky.clone(),
-                    tainted: false,
-                    sandbox_ready: false,
-                }));
+                let view = self.k.risk_view(self.ctx);
+                self.ctx.journal.append(
+                    "risk_updated",
+                    json!({ "risky": view.risky_units, "tainted": view.tainted, "sandbox_ready": view.sandbox_ready }),
+                )?;
+                if let Some(why) = super::risk::park_before_build(self.ctx, &self.k, &view) {
+                    self.ctx
+                        .journal
+                        .append("parked", json!({ "reason": why }))?;
+                    return Ok(Some(End::Parked(why)));
+                }
+                self.queue.push_back(Event::RiskUpdated(view));
                 self.queue
                     .push_back(Event::KernelEscalations(self.k.kernel_only()));
             }

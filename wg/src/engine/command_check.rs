@@ -6,6 +6,7 @@ use super::kernel::Kernel;
 use super::RunCtx;
 use crate::claude::policy::{policy, Ctx as PolicyCtx};
 use crate::claude::runner::Request;
+use crate::guard::hook::SandboxGrant;
 use crate::untrusted::Ctx as ParseCtx;
 use wg_factory::api::{LlmCall, Role, Tier};
 
@@ -45,6 +46,7 @@ pub fn llm(ctx: &RunCtx, k: &Kernel, c: &LlmCall, max_units: usize) -> Result<Re
     })?;
     let editing = matches!(c.role, Role::Worker | Role::Fixer);
     let mut unit_files: Vec<String> = Vec::new();
+    let mut grant: Option<SandboxGrant> = None;
     if editing {
         let open = k.open();
         if !open.is_empty() {
@@ -69,11 +71,34 @@ pub fn llm(ctx: &RunCtx, k: &Kernel, c: &LlmCall, max_units: usize) -> Result<Re
             .as_ref()
             .and_then(|r| r.units.iter().find(|u| u.id == unit))
             .is_some_and(|u| u.risky);
-        if reading_risky || k.risky.iter().any(|(id, _)| id == unit) {
+        if reading_risky || k.is_risky(unit) || k.tainted {
+            if let Some(why) = k.sandbox_blocker(ctx) {
+                return Err(refuse(format!(
+                    "unit {unit} is risky (or the task is tainted) and runs only in the sandbox, which is unavailable: {why}"
+                )));
+            }
+            grant = Some(SandboxGrant {
+                repo: ctx.repo_name.clone(),
+                run: ctx.run_id.clone(),
+                unit: Some(unit.to_string()),
+                task: None,
+                files: unit_files.clone(),
+            });
+        }
+    }
+    if c.role == Role::Reviewer && k.tainted {
+        if let Some(why) = k.sandbox_blocker(ctx) {
             return Err(refuse(format!(
-                "unit {unit} is risky; risky units run only in the sandbox (Phase 3)"
+                "the task is tainted and its review commands run only in the sandbox, which is unavailable: {why}"
             )));
         }
+        grant = Some(SandboxGrant {
+            repo: ctx.repo_name.clone(),
+            run: ctx.run_id.clone(),
+            unit: None,
+            task: Some(k.task_id()),
+            files: vec![],
+        });
     }
     if c.role == Role::Reviewer && c.tier != Tier::Opus {
         return Err(refuse("a Reviewer call must be opus"));
@@ -107,6 +132,7 @@ pub fn llm(ctx: &RunCtx, k: &Kernel, c: &LlmCall, max_units: usize) -> Result<Re
             initializing: k.initializing,
             approved: &approved,
             secret_roots,
+            sandbox: grant.map(|g| (ctx.wg_exe.to_string_lossy().into_owned(), g)),
         },
     );
     let (turns, secs) = (

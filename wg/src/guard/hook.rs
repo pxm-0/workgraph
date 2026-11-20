@@ -23,6 +23,23 @@ pub struct Manifest {
     pub tools: Vec<String>,
     pub skills: Vec<String>,
     pub bash: BashRules,
+    /// What `wg sandbox exec` may do for this call (risky or tainted work, Phase 3).
+    #[serde(default)]
+    pub sandbox: Option<SandboxGrant>,
+}
+
+/// One call's sandbox grant, read by `wg sandbox exec` from the manifest the kernel wrote.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxGrant {
+    pub repo: String,
+    pub run: String,
+    /// A Worker or Fixer's unit, or (for a tainted Reviewer) none.
+    pub unit: Option<String>,
+    /// A tainted Reviewer's task.
+    pub task: Option<String>,
+    /// The unit's repo-relative files: the only paths a returned patch may change.
+    pub files: Vec<String>,
 }
 
 #[derive(Debug, PartialEq)]
