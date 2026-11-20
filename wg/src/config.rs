@@ -39,6 +39,8 @@ struct File {
     repo: Vec<RepoCfg>,
     #[serde(default)]
     sandbox: crate::sandbox::config::SandboxFile,
+    #[serde(default)]
+    self_improve: crate::selfimprove::config::SelfFile,
 }
 
 /// The pinned Haruspex CLI: absolute path and sha256 (design §9.1).
@@ -64,6 +66,9 @@ struct Tools {
 struct Limits {
     max_calls_per_task: Option<u32>,
     runaway_per_call_usd: Option<u32>,
+    max_eval_runs_per_pr: Option<u32>,
+    max_self_prs_per_day: Option<u32>,
+    max_self_prs_per_week: Option<u32>,
 }
 
 #[derive(Deserialize, Default)]
@@ -100,6 +105,8 @@ pub struct Config {
     pub checks: Vec<CheckEntry>,
     pub shift: Shift,
     pub repos: Vec<RepoCfg>,
+    /// The self lane (Phase 5).
+    pub self_improve: crate::selfimprove::config::SelfCfg,
 }
 
 fn abs_tool(name: &str, v: Option<String>, default: &str) -> Result<String, String> {
@@ -149,6 +156,24 @@ pub fn parse(text: &str) -> Result<Config, String> {
     {
         return Err(format!("[[repo]] {} is listed twice", dup.1.name));
     }
+    let self_improve = crate::selfimprove::config::load(
+        f.self_improve,
+        crate::selfimprove::config::LaneLimits {
+            eval_runs: f.limits.max_eval_runs_per_pr,
+            per_day: f.limits.max_self_prs_per_day,
+            per_week: f.limits.max_self_prs_per_week,
+        },
+    )?;
+    if let Some(r) = f
+        .repo
+        .iter()
+        .find(|r| r.is_self() && r.name != self_improve.repo)
+    {
+        return Err(format!(
+            "[[repo]] {}: only [self_improve].repo may run the self pipeline",
+            r.name
+        ));
+    }
     let lower = |v: Option<u32>, max: u32, what: &str| match v {
         Some(0) => Err(format!("[limits].{what} must be positive")),
         Some(n) => Ok(n.min(max)),
@@ -181,6 +206,7 @@ pub fn parse(text: &str) -> Result<Config, String> {
         checks: f.check,
         shift: crate::shift::config::shift(f.shift, f.intake)?,
         repos: f.repo,
+        self_improve,
     })
 }
 
@@ -262,6 +288,7 @@ mod tests {
             ("[limits]\nmax_calls_per_task = 0\n".into(), "positive"),
             ("[[repo]]\nname = \"o/r\"\npath = \"/a\"\n[[repo]]\nname = \"o/r\"\npath = \"/b\"\n".into(), "twice"),
             ("[[repo]]\nname = \"o\"\npath = \"/a\"\n".into(), "owner/name"),
+            ("[[repo]]\nname = \"o/r\"\npath = \"/a\"\npipelines = [\"self\"]\nalways_tainted = true\n[repo.sandbox]\nimage = \"docker.io/library/rust@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n".into(), "only [self_improve].repo"),
             (
                 "[[check]]\nrepo = \"o/r\"\nname = \"Bad\"\nproject = \"a\"\nfactory = \"a\"\n"
                     .into(),

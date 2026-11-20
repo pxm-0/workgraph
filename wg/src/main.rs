@@ -11,6 +11,8 @@
 //!   wg approval-summary --repo R --pr N
 //!   wg sandbox doctor | reap | setup-print | exec (--unit U [--patch] | --task T) -- CMD... |
 //!     exec --task T --check NAME | poll --job J        wg sandbox-agent ... (linux, on the sim)
+//!   wg self gate --pr N | install --sha S | rollback | pause | resume [--enable-merge] | status
+//!   wg eval replay [--cases D --manifest F] | live --pr N | capture --pr URL [--expect S]
 //!   wg recall | check | save | finalize (legacy, unchanged)
 
 use serde_json::{json, Value};
@@ -50,6 +52,8 @@ fn main() {
         Some("decide") => print(wg::cli::shift::decide(rest)),
         Some("approve") => print(wg::cli::shift::approve(rest)),
         Some("approval-summary") => print(wg::cli::shift::approval_summary(rest)),
+        Some("self") => print(wg::cli::self_::self_(rest)),
+        Some("eval") => print(wg::cli::self_::eval(rest)),
         _ => print(wg::cli::legacy::run(&args)),
     }
 }

@@ -127,6 +127,35 @@ pub fn task_branch(s: &str) -> bool {
         })
 }
 
+/// A self-lane branch: `wg-self/<slug>`, the slug `[a-z0-9-]{1,48}` (design §12.1, §12.5).
+pub fn self_branch(s: &str) -> bool {
+    s.strip_prefix("wg-self/").is_some_and(|slug| {
+        (1..=48).contains(&slug.len())
+            && !slug.starts_with('-')
+            && slug
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    })
+}
+
+/// A fixture branch on the eval repo: `fixture/<n>-<slug>` (design §12.4).
+pub fn fixture_branch(s: &str) -> bool {
+    s.strip_prefix("fixture/")
+        .is_some_and(|rest| task_branch(&format!("wg/{rest}")))
+}
+
+/// Pushes a `fixture/*` branch to the eval remote `url`, never forced: for that remote every other
+/// ref (its `main` included) is refused before git runs (design §12.4, §14 checklist 2).
+pub fn push_fixture(dir: &Path, url: &str, branch: &str) -> Result<(), String> {
+    if !fixture_branch(branch) {
+        return Err(format!(
+            "refused to push {branch:?} to the eval repo: only fixture/<n>-<slug> branches"
+        ));
+    }
+    let spec = format!("refs/heads/{branch}:refs/heads/{branch}");
+    retried(|| git(dir, &["push", "-q", url, &spec], &[])).map(|_| ())
+}
+
 /// Updates the owner's remote-tracking refs only; the checkout is never touched.
 pub fn fetch(repo: &Path) -> Result<(), String> {
     retried(|| git(repo, &["fetch", "-q", "origin"], &[])).map(|_| ())
@@ -146,7 +175,7 @@ pub fn worktree(
     branch: &str,
     base: &str,
 ) -> Result<PathBuf, String> {
-    if !task_branch(branch) {
+    if !task_branch(branch) && !self_branch(branch) {
         return Err(format!("{branch:?} is not a wg/<n>-<slug> branch"));
     }
     let path = root.join(rel);
@@ -254,9 +283,10 @@ pub fn commit(dir: &Path, files: &[String], message: &str) -> Result<bool, Strin
     Ok(true)
 }
 
-/// Pushes a `wg/*` task branch to origin; any other ref is refused before git runs.
+/// Pushes a `wg/*` task branch or a `wg-self/*` branch to origin; any other ref is refused before
+/// git runs.
 pub fn push_task_branch(dir: &Path, branch: &str) -> Result<(), String> {
-    if !task_branch(branch) {
+    if !task_branch(branch) && !self_branch(branch) {
         return Err(format!(
             "refused to push {branch:?}: only wg/<n>-<slug> branches are pushed"
         ));
@@ -374,6 +404,45 @@ mod tests {
             .status()
             .unwrap();
         assert!(ok.success(), "{script}");
+    }
+
+    #[test]
+    fn self_and_fixture_branches_and_the_eval_refspec() {
+        assert!(self_branch("wg-self/12-better-prompt") && self_branch("wg-self/revert-abc123"));
+        for bad in [
+            "wg-self/",
+            "wg-self/A",
+            "wg-self/a/b",
+            "wg-self/-x",
+            "wg/1-x",
+            "main",
+        ] {
+            assert!(!self_branch(bad), "{bad}");
+        }
+        assert!(fixture_branch("fixture/12-add-flag") && !fixture_branch("fixture/main"));
+        let d = std::env::temp_dir().join(format!("wg-git-fixture-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("eval.git")).unwrap();
+        std::fs::create_dir_all(d.join("clone")).unwrap();
+        sh(&d.join("eval.git"), "git init -q --bare -b main");
+        sh(&d.join("clone"), "git init -q -b main && git config user.name t && git config user.email t@x.invalid && echo a > f && git add f && git commit -qm i && git branch fixture/7-x");
+        let url = d.join("eval.git").to_string_lossy().into_owned();
+        let clone = d.join("clone");
+        assert!(push_fixture(&clone, &url, "main")
+            .unwrap_err()
+            .contains("refused"));
+        assert!(push_fixture(&clone, &url, "refs/heads/main").is_err());
+        push_fixture(&clone, &url, "fixture/7-x").unwrap();
+        assert!(
+            git(
+                &d.join("eval.git"),
+                &["rev-parse", "--verify", "-q", "refs/heads/main"],
+                &[]
+            )
+            .is_err(),
+            "main is never pushed"
+        );
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

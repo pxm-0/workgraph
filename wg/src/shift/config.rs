@@ -71,6 +71,13 @@ pub struct RepoCfg {
     pub sandbox: Option<crate::sandbox::config::RepoSandbox>,
 }
 
+impl RepoCfg {
+    /// The self lane (design §12.1): this repo runs the compiled-in self pipeline alone.
+    pub fn is_self(&self) -> bool {
+        self.pipelines == ["self"]
+    }
+}
+
 fn dev_qa() -> Vec<String> {
     vec!["dev".into(), "qa".into()]
 }
@@ -177,7 +184,13 @@ pub fn repo(r: &RepoCfg) -> Result<(), String> {
     if !r.path.starts_with('/') || r.path.contains("/../") || r.path.chars().any(char::is_control) {
         return Err(what("path must be absolute"));
     }
-    if r.pipelines.first().map(String::as_str) != Some("dev")
+    if r.is_self() {
+        if !r.always_tainted || r.release || !r.qa_checks.is_empty() {
+            return Err(what(
+                "the self pipeline runs alone, always tainted (its checks only in the sandbox), with no release line",
+            ));
+        }
+    } else if r.pipelines.first().map(String::as_str) != Some("dev")
         || r.pipelines
             .iter()
             .skip(1)
@@ -299,6 +312,8 @@ mod tests {
             ("factory_compose = \"docker compose -f x.yml\"", "-p <name>"),
             ("install = \"\"", "one line"),
             ("always_tainted = true", "needs a [repo.sandbox]"),
+            ("pipelines = [\"self\"]", "always tainted"),
+            ("pipelines = [\"self\", \"qa\"]", "starts with"),
             ("sandbox = { image = \"node:22\" }", "digest"),
             (
                 "allow_project_config = [{ path = \"x\", sha256 = \"0\" }]",

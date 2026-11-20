@@ -1,0 +1,15 @@
+{
+  "task": "Add sub() beside add().",
+  "checks": { "test": "python3 check.py" },
+  "replies": {
+    "read": { "branch": "work/sub", "taskId": "T-003", "initialized": true, "risk": "low",
+      "checks": [{ "name": "test", "command": "python3 check.py" }],
+      "criteria": [{ "id": "AC-1", "text": "sub(5, 3) is 2" }],
+      "units": [{ "id": "a", "goal": "add sub", "files": ["calc.py", "test_calc.py"], "dependsOn": [],
+                  "criteria": ["AC-1"], "size": "small", "risky": false }],
+      "escalations": [] },
+    "challenge": { "added": [], "assign": [], "escalations": [] }
+  },
+  "failures": { "check:L1": { "test": ["FAIL test_calc.py:4 expected 2, got 8", null] } },
+  "expect": { "status": "ready_for_review" }
+}
