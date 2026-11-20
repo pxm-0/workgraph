@@ -95,11 +95,14 @@ impl PinnedHaruspex {
 }
 
 impl Haruspex for PinnedHaruspex {
-    fn gate_ready_to_build(&self) -> Result<Vec<String>, String> {
+    fn gate(&self, gate: &str) -> Result<Vec<String>, String> {
+        if !["ready-to-build", "ready-to-release"].contains(&gate) {
+            return Err(format!("the kernel evaluates no gate {gate:?}"));
+        }
         self.verify()?;
         let out = Command::new("python3")
             .arg(&self.cli)
-            .args(["gate", "ready-to-build", ".", "--json"])
+            .args(["gate", gate, ".", "--json"])
             .current_dir(&self.repo)
             .env_clear()
             .envs(crate::exec::env::scrubbed())
@@ -107,7 +110,7 @@ impl Haruspex for PinnedHaruspex {
             .map_err(|e| format!("cannot run Haruspex: {e}"))?;
         let v: Value = serde_json::from_slice(&out.stdout).map_err(|_| {
             format!(
-                "the ready-to-build gate printed no JSON: {}",
+                "the {gate} gate printed no JSON: {}",
                 crate::exec::run::tail(&String::from_utf8_lossy(&out.stderr))
             )
         })?;

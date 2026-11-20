@@ -1,5 +1,6 @@
 # The dev pipeline (design §6.2): run.js's control flow, interpreted by wg-factory. The kernel
-# validates every key at load and clamps turns and timeouts to its compiled limits.
+# validates every key at load and clamps turns and timeouts to its compiled limits. A shift's chain
+# goes on to qa.toml, which ends with publish (Phase 4); in place the chain is dev only.
 [pipeline]
 name = "dev"
 haruspex = true
@@ -57,11 +58,3 @@ model = "sonnet"
 prompt = "learn"
 max_turns = 3
 timeout_secs = 600
-
-# Phase 2: a shift publishes a draft PR once every kernel invariant holds. In place (wg run) this
-# stage is skipped and the skill commits through wg finalize --run.
-[[stage]]
-id = "publish"
-kind = "publish"
-draft = true
-labels = ["wg:awaiting-approval"]

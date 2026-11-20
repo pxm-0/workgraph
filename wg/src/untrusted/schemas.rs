@@ -97,6 +97,21 @@ pub fn schema(id: SchemaId) -> Value {
             }),
             &["rules", "proposals"],
         ),
+        SchemaId::Verdict => obj(
+            json!({
+                "passed": b,
+                "findings": list(obj(
+                    json!({ "id": s(), "severity": severity(), "file": s(), "summary": s() }),
+                    &["id", "severity", "summary"],
+                )),
+            }),
+            &["passed", "findings"],
+        ),
+        SchemaId::ReleaseNotes => obj(
+            json!({ "summary": s(), "changes": strs(), "breaking": b }),
+            &["summary", "changes", "breaking"],
+        ),
+        SchemaId::ReleasePlan => obj(json!({ "ready": b, "summary": s() }), &["ready", "summary"]),
     }
 }
 
@@ -136,6 +151,9 @@ mod tests {
             SchemaId::Work,
             SchemaId::Review,
             SchemaId::Learn,
+            SchemaId::Verdict,
+            SchemaId::ReleaseNotes,
+            SchemaId::ReleasePlan,
         ] {
             let v = example(&schema(id));
             if let Err(e) = parse(id, &v, &ctx) {

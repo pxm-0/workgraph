@@ -13,7 +13,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use wg_factory::api::{
-    Command, Decision, Escalation, Event, LlmCall, LlmFailure, Outcome, PipelineDef, Reply, Role,
+    Chain, Command, Decision, Escalation, Event, LlmCall, LlmFailure, Outcome, Reply, Role,
     RunInput, Tier,
 };
 use wg_factory::model::RunState;
@@ -29,7 +29,9 @@ pub struct Start {
     pub user_changes_before: Vec<String>,
     pub memory: Loaded,
     pub memory_path: PathBuf,
-    pub pipeline: PipelineDef,
+    /// The repo's chain: dev and its later stages (a shift), dev alone (in place), or the release
+    /// line alone.
+    pub chain: Chain,
     pub start_branch: String,
     pub initializing: bool,
     /// Checks that failed at the first clean baseline of this task (a rerun on a kept worktree):
@@ -48,6 +50,11 @@ pub enum End {
     Incident(String),
     Parked(String),
     Failed(String),
+    /// A human stage: the run waits for the owner at `gate` (Phase 4). Nothing was approved.
+    AwaitingOwner {
+        gate: String,
+        ask: String,
+    },
 }
 
 pub struct Ran {
@@ -72,10 +79,12 @@ struct Loop<'a> {
     rejected: Vec<(String, String)>,
     publish: Option<wg_factory::api::PublishDef>,
     published: Option<String>,
+    /// The chain's later stages: a gate, sandbox or human command runs only if one declares it.
+    stages: Vec<wg_factory::api::StageKind>,
 }
 
 pub fn run_task(ctx: &RunCtx, start: Start, step: Step) -> Result<Ran, String> {
-    let k = Kernel {
+    let mut k = Kernel {
         decided: start.decisions.iter().map(|d| d.id.clone()).collect(),
         resume_task: start.resume_task.clone(),
         user_changes: start.user_changes_before.clone(),
@@ -91,6 +100,12 @@ pub fn run_task(ctx: &RunCtx, start: Start, step: Step) -> Result<Ran, String> {
                 .is_some_and(|r| r.always_tainted),
         ..Kernel::default()
     };
+    // The release line has no Reading: the contract it may not weaken is the task as merged.
+    if start.chain.dev.is_none() {
+        if let Some(t) = &start.resume_task {
+            k.contract = Some(crate::haruspex::contract::snapshot(&ctx.ports.hx.task(t)?));
+        }
+    }
     for w in &start.memory.warnings {
         ctx.journal.append("warning", json!({ "warning": w }))?;
     }
@@ -103,21 +118,22 @@ pub fn run_task(ctx: &RunCtx, start: Start, step: Step) -> Result<Ran, String> {
         user_changes_before: start.user_changes_before.clone(),
         memory: start.memory.memory.clone(),
         can_save: start.memory.can_save,
-        pipeline: start.pipeline.clone(),
+        chain: start.chain.clone(),
     };
     let mut l = Loop {
         ctx,
         k,
         limited: Mutex::new(Vec::new()),
         queue: VecDeque::from([Event::Started(input)]),
-        max_units: start.pipeline.max_units as usize,
+        max_units: start.chain.dev.as_ref().map_or(0, |d| d.max_units as usize),
         memory_path: start.memory_path,
         raw_models: start.memory.raw_models,
         can_save: start.memory.can_save,
         memory_saved: false,
         rejected: Vec::new(),
-        publish: start.pipeline.publish.clone(),
+        publish: start.chain.publish().cloned(),
         published: None,
+        stages: start.chain.stages.iter().map(|s| s.kind.clone()).collect(),
     };
     let mut state = RunState::default();
     let end = loop {
@@ -161,6 +177,8 @@ fn event_name(ev: &Event) -> String {
         Event::KernelEscalations(e) => format!("kernel_escalations {}", e.len()),
         Event::Published { .. } => "published".into(),
         Event::PublishRefused { .. } => "publish_refused".into(),
+        Event::GateDone { label, .. } => format!("gate_done {label}"),
+        Event::SandboxDone { label, .. } => format!("sandbox_done {label}"),
     }
 }
 
@@ -193,8 +211,34 @@ impl Loop<'_> {
         self.flush(batch)
     }
 
+    /// Whether the chain declares the stage a gate, sandbox or human command stands for.
+    fn declared(&self, cmd: &Command) -> bool {
+        use wg_factory::api::StageKind as K;
+        self.stages.iter().any(|k| match (cmd, k) {
+            (Command::Gate { gate, .. }, K::HaruspexGate { gate: g, .. }) => gate == g,
+            (Command::Sandbox { steps_from, .. }, K::Sandbox { steps_from: f, .. }) => {
+                steps_from == f
+            }
+            (Command::Human { gate, .. }, K::Human { gate: g, .. }) => gate == g,
+            _ => false,
+        })
+    }
+
     fn one(&mut self, cmd: Command) -> Result<Option<End>, String> {
         let j = &self.ctx.journal;
+        if matches!(
+            cmd,
+            Command::Gate { .. } | Command::Sandbox { .. } | Command::Human { .. }
+        ) && !self.declared(&cmd)
+        {
+            j.append(
+                "warning",
+                json!({ "refused": "a gate, sandbox or human command the chain declares no stage for" }),
+            )?;
+            return Ok(Some(End::Failed(
+                "refused: the factory asked for a stage this chain does not have".into(),
+            )));
+        }
         match cmd {
             Command::Llm(_) => unreachable!("batched by execute"),
             Command::Checks { label, names } => {
@@ -261,12 +305,47 @@ impl Loop<'_> {
                 }
                 Ok(None)
             }
+            Command::Gate { label, gate } => {
+                j.append("command", json!({ "label": label, "what": "gate" }))?;
+                if let Err(r) = command_check::gate(&label, &gate) {
+                    j.append("warning", json!({ "refused": r.why }))?;
+                    return Ok(Some(End::Failed(format!("gate refused: {}", r.why))));
+                }
+                let blockers = self.ctx.ports.hx.gate(&gate)?;
+                j.append(
+                    "gate_evaluated",
+                    json!({ "gate": gate, "label": label, "blockers": blockers }),
+                )?;
+                self.queue.push_back(Event::GateDone { label, blockers });
+                Ok(None)
+            }
+            Command::Sandbox { label, steps_from } => {
+                j.append("command", json!({ "label": label, "what": "sandbox" }))?;
+                super::stage_exec::sandbox(
+                    self.ctx,
+                    &mut self.k,
+                    &mut self.queue,
+                    label,
+                    &steps_from,
+                )
+            }
+            Command::Human { gate, ask } => {
+                if !crate::pipelines::GATES.contains(&gate.as_str()) {
+                    return Ok(Some(End::Failed(
+                        "a human stage names an unknown gate".into(),
+                    )));
+                }
+                let ask = crate::ids::one_line(&ask, 300);
+                j.append("parked", json!({ "human": gate, "ask": ask }))?;
+                Ok(Some(End::AwaitingOwner { gate, ask }))
+            }
             Command::Finish(o) => Ok(Some(End::Finish(o))),
         }
     }
 
     fn checks(&mut self, label: &str, names: &[String]) -> Result<Option<End>, String> {
-        let names = match command_check::checks(&self.k, label, names) {
+        let qa = command_check::qa_set(self.ctx);
+        let names = match command_check::checks(&self.k, label, names, &qa) {
             Ok(n) => n,
             Err(r) => {
                 self.ctx
@@ -522,6 +601,7 @@ impl Loop<'_> {
                 self.k.challenge_escalations = ch.escalations.clone();
                 self.k.challenge_added = ch.added.clone();
             }
+            (Role::ReleaseWriter, Ok(reply)) => super::stage_exec::release_reply(self.ctx, reply)?,
             (Role::Reviewer, Ok(Reply::Review(rv))) => {
                 self.k.review = Some(rv.clone());
                 if rv.passed && c.tier == Tier::Opus {

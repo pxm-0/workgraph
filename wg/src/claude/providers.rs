@@ -80,7 +80,16 @@ pub struct Auth {
     pub providers: Vec<Provider>,
 }
 
-const STAGES: [&str; 6] = ["read", "challenge", "work", "fix", "review", "learn"];
+const STAGES: [&str; 8] = [
+    "read",
+    "challenge",
+    "work",
+    "fix",
+    "review",
+    "learn",
+    "qa",
+    "release",
+];
 
 fn name_ok(s: &str) -> bool {
     (1..=32).contains(&s.len())

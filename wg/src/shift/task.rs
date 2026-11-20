@@ -4,16 +4,13 @@
 use super::config::{RepoCfg, PROJECT_CONFIG};
 use super::intake::{self, IN_SHIFT};
 use super::record::{self, TaskRecord};
-use crate::budget::Ledger;
+use super::runctx;
 use crate::claude::replay::Replay;
 use crate::config::Config;
 use crate::engine::driver::{self, End, Start};
-use crate::engine::{RunCtx, ShiftCtx};
 use crate::gh::Gh;
-use crate::haruspex::cli::PinnedHaruspex;
 use crate::journal::{now, Journal};
-use crate::ports::{GitRepo, Ports, RealProc, ShellChecks};
-use crate::state_dirs::{private_dir, Dirs};
+use crate::state_dirs::Dirs;
 use crate::untrusted::issue::{self, Issue};
 use crate::{git, memory_store, tokens_store};
 use serde_json::{json, Value};
@@ -372,107 +369,44 @@ fn run(
     baseline_floor: Option<Vec<String>>,
     tainted_earlier: bool,
 ) -> Result<(Done, TaskRecord), String> {
-    let dirs = e.dirs;
-    let run_dir = dirs.run(run_id);
-    for d in [
-        run_dir.join("logs"),
-        run_dir.join("guard"),
-        dirs.run_tmp(run_id),
-    ] {
-        private_dir(&d)?;
-    }
-    let pin = e.cfg.haruspex.clone().ok_or("no Haruspex CLI is pinned")?;
-    let hx = PinnedHaruspex::new(&pin, worktree, &[dirs.work(), dirs.state()])?;
     let slug = record::slug(&repo.name);
-    let memory_path = dirs.memory(&slug);
+    let memory_path = e.dirs.memory(&slug);
     let _lock = memory_store::Lock::take(&memory_path)?;
-    let pipeline = crate::pipelines::load(crate::assets::DEV_PIPELINE, e.cfg.max_calls_per_task)?;
-    let stop_file = dirs.stop_file();
-    let deadline = e.deadline;
-    let sandbox = crate::sandbox::client::SimSandbox {
-        cfg: e.cfg.clone(),
-        repo: repo.sandbox.clone(),
-        root: worktree.to_path_buf(),
-        status: e.sandbox.clone(),
-    };
-    let ctx = RunCtx {
-        ports: Ports {
-            proc: &RealProc,
-            checks: &ShellChecks {
-                root: worktree.to_path_buf(),
-                prefix: repo.factory_compose.clone(),
-            },
-            repo: &GitRepo {
-                root: worktree.to_path_buf(),
-            },
-            hx: &hx,
-            sandbox: &sandbox,
-        },
-        cfg: e.cfg,
-        dirs: dirs.clone(),
-        run_id: run_id.to_string(),
-        run_dir: run_dir.clone(),
-        run_tmp: dirs.run_tmp(run_id),
-        repo: worktree.to_path_buf(),
-        repo_name: repo.name.clone(),
-        journal: Journal::open(&run_dir.join("journal.jsonl"), run_id)?,
-        ledger: Ledger::new(&dirs.ledger(), run_id, e.cfg.max_calls_per_task),
-        wg_exe: std::env::current_exe().map_err(|e| format!("cannot find wg itself: {e}"))?,
-        haruspex_cli: hx.cli.to_string_lossy().into_owned(),
-        plugins: crate::claude::auth::plugin_profile(&dirs.home, &e.cfg.keep_plugins),
-        user: std::env::var("USER").unwrap_or_default(),
-        replay,
-        shift: Some(ShiftCtx {
-            gh: e.gh.clone(),
-            issue: i.number,
-            branch: rec.branch.clone(),
-            base: repo.default_branch.clone(),
-            attribution: e.cfg.shift.attribution.clone(),
-            shift_id: e.shift_id.to_string(),
-            max_parallel: e.cfg.shift.max_parallel_units as usize,
-            stop: Box::new(move || stop_reason(&stop_file, deadline)),
-        }),
-    };
-    ctx.journal.append(
-        "run_started",
-        json!({ "repo": worktree, "slug": slug, "binary": crate::claude::replay::binary_hash(),
-                "version": env!("CARGO_PKG_VERSION"), "assets": crate::assets::hash(), "pipeline": "dev",
-                "shift": e.shift_id, "task": format!("{}#{}", repo.name, i.number),
-                "replay_from": ctx.replay.from, "replayable": ctx.replay.len() }),
+    let chain = shift_chain(e.cfg, repo)?;
+    let decisions_path = e.dirs.decisions(&slug, i.number);
+    let decisions = crate::cli::run::decisions(
+        decisions_path
+            .exists()
+            .then(|| decisions_path.to_string_lossy().into_owned())
+            .as_deref(),
     )?;
-    let decisions_path = dirs.decisions(&slug, i.number);
-    let decisions_path = decisions_path.to_string_lossy();
-    let start = Start {
-        task: issue::fenced(i),
-        title: i.title.clone(),
-        decisions: crate::cli::run::decisions(
-            Path::new(decisions_path.as_ref())
-                .exists()
-                .then_some(decisions_path.as_ref()),
-        )?,
-        resume_task: rec.task_id.clone(),
-        initialized_earlier: rec.initialized,
-        // The owner's checkout is never touched, so nothing in the worktree is the owner's work.
-        user_changes_before: vec![],
-        memory: memory_store::load(&memory_path),
-        memory_path,
-        pipeline,
-        start_branch: rec.branch.clone(),
-        initializing: !worktree.join(".haruspex").exists(),
-        baseline_floor,
-        tainted_earlier,
+    let place = runctx::Place {
+        issue: i.number,
+        branch: rec.branch.clone(),
+        pipeline: repo.pipelines.join("+"),
     };
-    let ran = driver::run_task(&ctx, start, &wg_factory::engine::step)?;
-    crate::cli::run::persist(&ctx, dirs, &ran)?;
-    let out = crate::report::output(&ctx, &ran)?;
-    std::fs::write(run_dir.join("output.json"), out.to_string())
-        .map_err(|e| format!("cannot write the run output: {e}"))?;
-    std::fs::write(run_dir.join("report.md"), crate::report::markdown(&out))
-        .map_err(|e| format!("cannot write the report: {e}"))?;
-    ctx.journal.append(
-        "run_finished",
-        json!({ "status": out["status"], "pr": ran.published }),
-    )?;
+    let (ran, out) = runctx::with_ctx(e, repo, worktree, run_id, replay, &place, |ctx| {
+        let start = Start {
+            task: issue::fenced(i),
+            title: i.title.clone(),
+            decisions,
+            resume_task: rec.task_id.clone(),
+            initialized_earlier: rec.initialized,
+            // The owner's checkout is never touched, so nothing in the worktree is the owner's work.
+            user_changes_before: vec![],
+            memory: memory_store::load(&memory_path),
+            memory_path: memory_path.clone(),
+            chain,
+            start_branch: rec.branch.clone(),
+            initializing: !worktree.join(".haruspex").exists(),
+            baseline_floor,
+            tainted_earlier,
+        };
+        runctx::finish(
+            ctx,
+            driver::run_task(ctx, start, &wg_factory::engine::step)?,
+        )
+    })?;
     let task_id = Some(ran.kernel.task_id())
         .filter(|t| !t.is_empty())
         .or(rec.task_id.clone());
@@ -482,6 +416,23 @@ fn run(
         ..rec
     };
     Ok((outcome(&ran, &out, run_id), rec))
+}
+
+/// A shift task's chain: the repo's pipelines, which must publish (design §6.2, Phase 4).
+pub fn shift_chain(cfg: &Config, repo: &RepoCfg) -> Result<wg_factory::api::Chain, String> {
+    let chain = crate::pipelines::chain(
+        &crate::assets::Assets::compiled(),
+        &repo.pipelines,
+        &crate::pipelines::RepoView::of(repo),
+        cfg.max_calls_per_task,
+    )?;
+    if chain.publish().is_none() {
+        return Err(format!(
+            "the chain {} has no publish stage, so a shift could never open a PR",
+            repo.pipelines.join("+")
+        ));
+    }
+    Ok(chain)
 }
 
 /// Failing check tails from the kernel's own results, for a stuck comment.
@@ -523,6 +474,8 @@ fn outcome(ran: &driver::Ran, out: &Value, run_id: &str) -> Done {
             ..done(Kind::Parked, run, why.clone())
         },
         End::Failed(why) => done(Kind::Stuck, run, format!("{why}\n\n{}", tails(ran))),
+        // A dev chain has no human stage; the release line reads its own outcome (release.rs).
+        End::AwaitingOwner { ask, .. } => done(Kind::Stuck, run, ask.clone()),
         End::Finish(_) => {
             let status = out["status"].as_str().unwrap_or("");
             let why = if note.is_empty() {

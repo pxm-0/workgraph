@@ -24,8 +24,11 @@ pub trait Repo: Sync {
 
 /// What the kernel asks of Haruspex: deterministic reads and the ready-to-build gate.
 pub trait Haruspex: Sync {
-    /// The blockers of `gate ready-to-build . --json`.
-    fn gate_ready_to_build(&self) -> Result<Vec<String>, String>;
+    /// The blockers of `gate <gate> . --json` (`ready-to-build`, or a stage's `ready-to-release`).
+    fn gate(&self, gate: &str) -> Result<Vec<String>, String>;
+    fn gate_ready_to_build(&self) -> Result<Vec<String>, String> {
+        self.gate("ready-to-build")
+    }
     fn task(&self, id: &str) -> Result<Value, String>;
     fn approvals(&self) -> Result<Value, String>;
     fn project_commands(&self) -> Result<BTreeMap<String, String>, String>;

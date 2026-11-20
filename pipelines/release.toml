@@ -1,0 +1,46 @@
+# The release line (design §6.2, §7.3 step 10, Phase 4): only for tasks the owner verified
+# (`wg approve` passed), after their PR merged, in a worktree recreated from the merge commit. It
+# prepares a release and stops at the owner's ready-to-release gate: it never records a deployment
+# and never deploys. Its only execution is the rehearsal, in the sim sandbox (no network).
+[pipeline]
+name = "release"
+
+[[stage]]
+id = "notes"
+kind = "agent"
+role = "release-writer"
+model = "haiku"
+prompt = "release-notes"
+schema = "release-notes"
+max_turns = 20
+timeout_secs = 900
+
+[[stage]]
+id = "plan"
+kind = "agent"
+role = "release-writer"
+model = "opus"
+effort = "high"
+prompt = "release-plan"      # deployment, rollback, smoke, monitoring and ownership records in the Haruspex task
+schema = "release-plan"
+gate = { field = "ready", equals = true }
+max_turns = 40
+timeout_secs = 900
+
+[[stage]]
+id = "rehearse"
+kind = "sandbox"
+steps_from = "release_rehearsal"   # factory.toml [repo.sandbox], e.g. migrate up, down, up against the pod's Postgres
+when = "always"
+
+[[stage]]
+id = "gate"
+kind = "haruspex_gate"
+gate = "ready-to-release"
+expect_only = ["Human approval for ready_to_release is pending."]
+
+[[stage]]
+id = "owner"
+kind = "human"
+gate = "ready-to-release"    # parks; the factory never runs `record deployment` and never deploys
+ask = "Review the release plan and record ready-to-release yourself; deploy by hand."

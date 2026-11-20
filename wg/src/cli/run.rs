@@ -106,11 +106,14 @@ pub fn run(args: &[String]) -> Result<Value, String> {
         .haruspex
         .clone()
         .ok_or("no Haruspex CLI is pinned: run wg config pin-haruspex --cli <absolute path>")?;
-    // In place the skill commits through wg finalize --run, so the publish stage is skipped.
-    let pipeline = wg_factory::api::PipelineDef {
-        publish: None,
-        ..crate::pipelines::load(crate::assets::DEV_PIPELINE, cfg.max_calls_per_task)?
-    };
+    // In place the chain is dev only: the skill commits through wg finalize --run, no publish.
+    let assets = crate::assets::Assets::compiled();
+    let chain = crate::pipelines::chain(
+        &assets,
+        &["dev".to_string()],
+        &crate::pipelines::RepoView::default(),
+        cfg.max_calls_per_task,
+    )?;
     let repo = repo_root()?;
     let run_dir = dirs.run(&run_id);
     if run_dir.exists() {
@@ -163,6 +166,7 @@ pub fn run(args: &[String]) -> Result<Value, String> {
         plugins: crate::claude::auth::plugin_profile(&dirs.home, &cfg.keep_plugins),
         user: std::env::var("USER").unwrap_or_default(),
         replay: crate::claude::replay::Replay::none(),
+        assets: assets.clone(),
         shift: None,
         run_dir: run_dir.clone(),
         dirs: dirs.clone(),
@@ -170,7 +174,7 @@ pub fn run(args: &[String]) -> Result<Value, String> {
     ctx.journal.append(
         "run_started",
         json!({ "repo": repo, "slug": slug, "binary": crate::claude::replay::binary_hash(), "version": env!("CARGO_PKG_VERSION"),
-                "assets": crate::assets::hash(), "pipeline": "dev", "memory_import": imported }),
+                "assets": assets.hash(), "pipeline": "dev", "memory_import": imported }),
     )?;
     let start = Start {
         title: task.lines().next().unwrap_or_default().to_string(),
@@ -181,7 +185,7 @@ pub fn run(args: &[String]) -> Result<Value, String> {
         user_changes_before: user_changes,
         memory: memory_store::load(&memory_path),
         memory_path,
-        pipeline,
+        chain,
         start_branch: git::branch(&repo)?,
         initializing: !repo.join(".haruspex").exists(),
         baseline_floor: None,
