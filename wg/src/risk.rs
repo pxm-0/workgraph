@@ -78,7 +78,7 @@ pub fn paths(files: &[String]) -> Option<String> {
 /// Content rules on one added line (design §8.2's diff rules, without a regex engine).
 fn line(l: &str) -> Option<(&'static str, &'static str)> {
     let lower = l.to_lowercase();
-    if ["DROP ", "TRUNCATE", "DELETE FROM"]
+    if ["DROP", "TRUNCATE", "DELETE FROM"]
         .iter()
         .any(|k| l.contains(k))
         || ["drop table", "truncate table", "delete from"]
@@ -88,7 +88,7 @@ fn line(l: &str) -> Option<(&'static str, &'static str)> {
         return Some(("migration", "destructive SQL"));
     }
     if lower.contains("rm -rf")
-        || ["unlink(", "rmtree", "fs.rm"]
+        || ["unlink", "rmtree", "fs.rm"]
             .iter()
             .any(|k| lower.contains(k))
     {
@@ -171,6 +171,9 @@ mod tests {
             ("+execSync('rm -rf build')", Some("deletes")),
             ("+shutil.rmtree(path)", Some("deletes")),
             ("+await fs.rm(dir, { recursive: true })", Some("deletes")),
+            ("+fs.unlinkSync(p)", Some("deletes")),
+            ("+os.unlink (p)", Some("deletes")),
+            ("+db.exec(\"DROP\"", Some("migration")),
             ("+const s = require('stripe')", Some("payments")),
             ("+import jwt from 'jsonwebtoken'", Some("auth")),
             ("+req.session.user = u", Some("auth")),
