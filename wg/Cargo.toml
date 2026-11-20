@@ -1,6 +1,6 @@
 [package]
 name = "wg"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "The workgraph kernel: every effect of the factory, plus the legacy recall, check, save and finalize"
 publish = false
