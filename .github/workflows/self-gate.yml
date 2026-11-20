@@ -14,8 +14,10 @@ env:
   HEAD: ${{ github.event.pull_request.head.sha }}
 
 jobs:
-  # Self PRs only: the owner's own PRs change protected paths by design. A skipped job counts as
-  # passing for branch protection, and the self gate itself demands `success` on a wg-self/* head.
+  # Self PRs only (wg-self/* heads): the owner's own PRs change protected paths by design, and a
+  # PR that introduces or changes these checks would be judged by a base that lacks them. A skipped
+  # job counts as passing for branch protection, while `wg self gate` demands `success` on a self
+  # PR. Owner PRs still run the lint and every replay case through ci.yml's tests.
   protected-paths:
     if: startsWith(github.head_ref, 'wg-self/')
     runs-on: ubuntu-latest
@@ -34,6 +36,7 @@ jobs:
         run: cargo run --quiet --locked --manifest-path base/Cargo.toml -p xtask -- protected-paths --repo . --base "$BASE" --head "$HEAD"
 
   lint-editable:
+    if: startsWith(github.head_ref, 'wg-self/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -48,6 +51,7 @@ jobs:
         run: cargo run --quiet --locked --manifest-path base/Cargo.toml -p xtask -- lint-editable --repo .
 
   replay-eval:
+    if: startsWith(github.head_ref, 'wg-self/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
