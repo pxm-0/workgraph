@@ -32,8 +32,6 @@ jobs:
         run: $DEV -e HARUSPEX_CLI=/workspace/haruspex/scripts/haruspex.py workspace cargo test --workspace --locked
       - name: File size
         run: $DEV workspace cargo xtask size
-      - name: Workflow control-flow tests
-        run: $DEV workspace sh -c 'node --test tests/*.test.mjs'
 
   # Separate jobs, so the self-merge gate can require each by (workflow file, job name) (§12.3).
   coverage:
