@@ -31,6 +31,8 @@ pub struct RunCtx<'a> {
     pub haruspex_cli: String,
     pub plugins: Vec<(String, bool)>,
     pub user: String,
+    /// Answers of an interrupted run to feed again (resume); empty for a fresh run.
+    pub replay: crate::claude::replay::Replay,
     /// Set in a shift (Phase 2): what publish and the stop conditions need. `None` in place.
     pub shift: Option<ShiftCtx>,
 }
