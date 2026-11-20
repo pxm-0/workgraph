@@ -97,6 +97,22 @@ fn a_shift_turns_queued_issues_into_draft_prs_decisions_and_a_report() {
     );
     assert!(f.comments("o/r", 1)[0].contains(&format!("shift `{id}` picked this up")));
     assert!(f.comments("o/r", 1)[1].starts_with("Draft PR: https://github.com/o/r/pull/100"));
+    let run1 = f.record("o/r", 1)["runs"][0].as_str().unwrap().to_string();
+    let output: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            f.home
+                .join(".workgraph/runs")
+                .join(&run1)
+                .join("output.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(output["pr"], "https://github.com/o/r/pull/100");
+    assert!(output["next"]
+        .as_str()
+        .unwrap()
+        .contains("/workgraph:work approve"));
 
     // The needs-decision comment: the question fenced as data, recommendation first.
     let ask = &f.comments("o/r", 3)[1];
