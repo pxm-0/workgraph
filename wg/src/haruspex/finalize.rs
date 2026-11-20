@@ -108,3 +108,93 @@ pub fn finalize_chain(f: &Finalize) -> Value {
         .map(|x| x["step"].clone());
     json!({ "passed": passed, "blockedAt": blocked_at, "staged": f.staged, "steps": s })
 }
+
+/// What `finalize_run` needs beyond the approval: the commit messages, the pinned CLI, the
+/// changed paths to stage (the user's own work already removed) and the check pins to re-read.
+pub struct RunFinalize<'a> {
+    pub cli: &'a str,
+    pub message: &'a str,
+    pub evidence_message: &'a str,
+    pub staged: Vec<String>,
+    pub pins: &'a std::collections::BTreeMap<String, String>,
+}
+
+/// `project.json` commands still equal the pins taken at Read (design §9.3).
+fn pins_hold(steps: &mut Vec<Value>, pins: &std::collections::BTreeMap<String, String>) -> bool {
+    let result = fs::read_to_string(".haruspex/project.json")
+        .map_err(|e| format!("cannot read project.json: {e}"))
+        .and_then(|t| serde_json::from_str::<Value>(&t).map_err(|e| e.to_string()))
+        .and_then(|v| {
+            match pins
+                .iter()
+                .find(|(name, cmd)| v["commands"][name.as_str()].as_str() != Some(cmd.as_str()))
+            {
+                Some((name, _)) => Err(format!("check {name} changed in project.json since Read")),
+                None => Ok(()),
+            }
+        });
+    steps.push(json!({ "step": "check pins", "ok": result.is_ok(), "outputTail": result.err().unwrap_or_default() }));
+    steps.last().is_some_and(|s| s["ok"] == true)
+}
+
+/// The run's finalize chain (design §9.5), callable only with the owner's `HumanApproval`. Unlike
+/// the legacy chain it tolerates a clean tree: it commits only when something is staged.
+pub fn finalize_run(approval: &crate::tokens::HumanApproval, f: &RunFinalize) -> Value {
+    let (task, by, cli) = (approval.task(), approval.by(), f.cli);
+    let mut s = Vec::new();
+    let note = format!(
+        "approved by {by} via /workgraph:work approve after the build, under the auto-proceed policy; head {}",
+        &approval.head()[..approval.head().len().min(12)]
+    );
+    let committed = if f.staged.is_empty() {
+        true
+    } else {
+        let mut git_add = vec!["add", "--"];
+        git_add.extend(f.staged.iter().map(String::as_str));
+        step(&mut s, "stage", "git", &git_add)
+            && step(&mut s, "commit", "git", &["commit", "-m", f.message])
+    };
+    let passed = committed
+        && step(
+            &mut s,
+            "approve ready-to-build",
+            "python3",
+            &[
+                cli,
+                "approve",
+                "ready-to-build",
+                ".",
+                "--by",
+                by,
+                "--note",
+                &note,
+            ],
+        )
+        && step(
+            &mut s,
+            "gate ready-to-build",
+            "python3",
+            &[cli, "gate", "ready-to-build", ".", "--record"],
+        )
+        && set_task_status(&mut s, task, "verifying")
+        && pins_hold(&mut s, f.pins)
+        && step(&mut s, "verify", "python3", &[cli, "verify", "."])
+        && step(
+            &mut s,
+            "gate verification",
+            "python3",
+            &[cli, "gate", "verification", ".", "--record"],
+        )
+        && step(&mut s, "stage evidence", "git", &["add", "--", ".haruspex"])
+        && step(
+            &mut s,
+            "commit evidence",
+            "git",
+            &["commit", "-m", f.evidence_message],
+        );
+    let blocked_at = s
+        .iter()
+        .find(|x| x["ok"] == false)
+        .map(|x| x["step"].clone());
+    json!({ "passed": passed, "blockedAt": blocked_at, "staged": f.staged, "steps": s })
+}
