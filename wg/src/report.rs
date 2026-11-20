@@ -61,7 +61,10 @@ pub fn output(ctx: &RunCtx, ran: &Ran) -> Result<Value, String> {
                 "reviewed".into(),
                 json!(k.review_pass.as_ref().is_some_and(|r| r.tree() == tree)),
             );
-            "Nothing is committed. On the user's approval, run wg finalize --run with this runId."
+            match &ran.published {
+                Some(_) => "A draft PR is open. The owner approves it with /workgraph:work approve <repo>#<pr>.",
+                None => "Nothing is committed. On the user's approval, run wg finalize --run with this runId.",
+            }
         }
         End::NeedsDecision(list) => {
             o.insert("status".into(), json!("needs_decision"));
@@ -106,6 +109,7 @@ pub fn output(ctx: &RunCtx, ran: &Ran) -> Result<Value, String> {
             .collect::<Vec<_>>()),
     );
     o.insert("runId".into(), json!(ctx.run_id));
+    o.insert("pr".into(), json!(ran.published));
     o.insert("costUsd".into(), json!(usd(known)));
     o.insert("callsWithUnknownCost".into(), json!(unknown));
     o.insert("spend".into(), by_stage);

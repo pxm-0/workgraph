@@ -39,7 +39,8 @@ fn is_python(token: &str) -> bool {
     token == "python3" || token.ends_with("/python3") || token == "python"
 }
 
-/// Approve, record or reopen through any Haruspex CLI, or `wg finalize|approve|self|auth`.
+/// Approve, record or reopen through any Haruspex CLI, or `wg finalize|approve|self|auth`, or the
+/// shift owner commands `wg decide|shift` (an agent answering its own escalation).
 fn incident(tokens: &[&str]) -> Option<String> {
     for w in tokens.windows(2) {
         let (a, b) = (w[0], w[1]);
@@ -47,7 +48,12 @@ fn incident(tokens: &[&str]) -> Option<String> {
         if hx && matches!(b, "approve" | "record" | "reopen") {
             return Some(format!("haruspex {b} is the owner's alone"));
         }
-        if is_wg(a) && matches!(b, "finalize" | "approve" | "self" | "auth") {
+        if is_wg(a)
+            && matches!(
+                b,
+                "finalize" | "approve" | "self" | "auth" | "decide" | "shift"
+            )
+        {
             return Some(format!("wg {b} is the owner's alone"));
         }
     }
@@ -239,6 +245,8 @@ mod tests {
             "wg approve --repo a --pr 1".into(),
             "wg self gate".into(),
             "wg auth key anthropic-api".into(),
+            "wg decide --repo a --issue 1 --decisions-file d.json".into(),
+            "/Users/me/.workgraph/bin/current/wg shift run".into(),
         ];
         for c in incidents {
             assert!(matches!(check(&rules(), &c), Bash::Incident(_)), "{c}");
