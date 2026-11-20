@@ -169,6 +169,9 @@ owner approves each one here. Find `wg` as in section 6.
 1. Run `<wg> approval-summary --repo <owner/repo> --pr <pr>` and show: title and URL, `verified`,
    `reviewed`, the review's criterion verdicts and open findings, `checks`, `checksAlreadyFailing`
    (handle them as in section 5), skipped risky units, and cost (`costUsd`, `spend` by provider).
+   When `tainted` is true, also show `riskyBuilt` (each unit and its `risky:<category>` label) and
+   `sandboxRuns` (job, label, steps): those were built and checked only in the sim sandbox, and
+   approving verifies there too (a repo without `[repo.sandbox].verify` is refused; say so).
    If `headMatches` is false, someone pushed to the PR after the shift: say so and stop.
 2. Ask once, with AskUserQuestion: "Approve the Haruspex build gate for PR #<pr> and make it ready
    for review? It is recorded as approved after the build, under your auto-proceed policy."

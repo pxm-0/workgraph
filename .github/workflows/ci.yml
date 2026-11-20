@@ -38,3 +38,33 @@ jobs:
         run: $DEV workspace cargo xtask size
       - name: Workflow control-flow tests
         run: $DEV workspace sh -c 'node --test tests/*.test.mjs'
+
+  # The sandbox against real rootless podman (design §15.4): ubuntu-latest ships podman; the runner
+  # user gets a lingering systemd session (submit starts jobs as transient user units) and a
+  # root-owned image allowlist, as the sim's provisioning script sets up for wgsbx.
+  podman:
+    runs-on: ubuntu-24.04
+    env:
+      PROBE: docker.io/library/busybox@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec
+      PG: docker.io/library/postgres@sha256:1d5b02d3a9941fbd52437db4107f8c52d6297dac553ca1e5c299ebb3756b4857
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.100.0"
+      - name: Rootless podman, a user session and the image allowlist
+        run: |
+          podman --version
+          sudo loginctl enable-linger "$USER"
+          for i in $(seq 1 20); do [ -S "/run/user/$(id -u)/bus" ] && break; sleep 1; done
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          systemctl --user is-system-running || true
+          sudo install -d -o root -g root -m 0755 /etc/wgsbx
+          printf 'probe = "%s"\nimages = ["%s", "%s"]\n' "$PROBE" "$PROBE" "$PG" | sudo tee /etc/wgsbx/images.toml
+          sudo chmod 0644 /etc/wgsbx/images.toml
+          podman pull -q "$PROBE"
+          podman pull -q "$PG"
+      - name: Sandbox suite
+        run: XDG_RUNTIME_DIR="/run/user/$(id -u)" WG_PODMAN=1 cargo test --locked -p wg --test sandbox_podman -- --test-threads 2
+      - name: Nothing labelled is left
+        run: test -z "$(podman ps -a --filter label=wg.job -q)" && test -z "$(podman volume ls --filter label=wg.job -q)"
