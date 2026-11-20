@@ -233,16 +233,7 @@ fn doctor_reports_each_check_and_refuses_user_allow_rules() {
     assert_eq!(perm["ok"], false);
     let task = h.join("task.txt");
     fs::write(&task, "x").unwrap();
-    let (code, v) = wg(
-        &h,
-        &h,
-        &[
-            "run",
-            "--experimental",
-            "--task-file",
-            task.to_str().unwrap(),
-        ],
-    );
+    let (code, v) = wg(&h, &h, &["run", "--task-file", task.to_str().unwrap()]);
     assert_eq!(code, 2);
     assert!(
         v["error"].as_str().unwrap().contains("permissions.allow"),

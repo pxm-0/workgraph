@@ -1,4 +1,4 @@
-//! End to end through the binary: `wg run --experimental` in a throwaway git repo with a scripted
+//! End to end through the binary: `wg run` in a throwaway git repo with a scripted
 //! `claude` (tests/fixtures/fake-claude.py) and the real, pinned Haruspex CLI, then
 //! `wg finalize --run`. Needs HARUSPEX_CLI=/abs/haruspex.py, as cli.rs does.
 
@@ -94,15 +94,7 @@ fn toy(name: &str, cli: &str) -> Toy {
 
 fn run(t: &Toy) -> Value {
     let task = t.repo.parent().unwrap().join("task.txt");
-    let (code, out) = wg(
-        t,
-        &[
-            "run",
-            "--experimental",
-            "--task-file",
-            task.to_str().unwrap(),
-        ],
-    );
+    let (code, out) = wg(t, &["run", "--task-file", task.to_str().unwrap()]);
     assert_eq!(code, 0, "{out}");
     out
 }
