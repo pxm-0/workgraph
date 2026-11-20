@@ -1,0 +1,121 @@
+{
+  "duration_api_ms": 22203,
+  "stop_reason": "tool_use",
+  "session_id": "f7a7016d-79b5-4410-8e0a-84d9c2ce6007",
+  "total_cost_usd": 0.014335670000000002,
+  "usage": {
+    "input_tokens": 12,
+    "cache_creation_input_tokens": 52668,
+    "cache_read_input_tokens": 199987,
+    "output_tokens": 3602,
+    "output_tokens_details": {
+      "thinking_tokens": 1307
+    },
+    "server_tool_use": {
+      "web_search_requests": 0,
+      "web_fetch_requests": 0
+    },
+    "service_tier": "standard",
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 52668,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "inference_geo": "global",
+    "iterations": [
+      {
+        "input_tokens": 4,
+        "output_tokens": 383,
+        "cache_read_input_tokens": 51232,
+        "cache_creation_input_tokens": 1436,
+        "cache_creation": {
+          "ephemeral_5m_input_tokens": 0,
+          "ephemeral_1h_input_tokens": 1436
+        },
+        "type": "message"
+      }
+    ],
+    "speed": "standard",
+    "fallback_credit": null
+  },
+  "modelUsage": {
+    "claude-haiku-5-5": {
+      "inputTokens": 12,
+      "outputTokens": 3602,
+      "cacheReadInputTokens": 199987,
+      "cacheCreationInputTokens": 52668,
+      "webSearchRequests": 0,
+      "costUSD": 0.014335670000000002,
+      "contextWindow": 1000000,
+      "maxOutputTokens": 128000,
+      "thinkingTokens": 1307,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationEphemeral1hInputTokens": 52668,
+      "canonicalModel": "claude-haiku-5-5",
+      "provider": "firstParty",
+      "costBasis": "list"
+    }
+  },
+  "permission_denials": [
+    {
+      "tool_name": "Bash",
+      "tool_use_id": "toolu_01Lg61utYvnTkmaGx3LGFzu9",
+      "tool_input": {
+        "command": "cd \"<spike>/t1\" && python3 check.py; echo \"exit=$?\"",
+        "description": "Run existing check script against current calc.py"
+      }
+    }
+  ],
+  "terminal_reason": "completed",
+  "fast_mode_state": "off",
+  "fast_mode_disabled_reason": "sdk_opt_in_required",
+  "subagent_stats": {
+    "spawned": 0,
+    "requested": {
+      "background": 0,
+      "foreground": 0,
+      "unset": 0
+    },
+    "started_in_background": 0,
+    "max_depth": 0,
+    "spawned_by_subagents": 0,
+    "completed": 0,
+    "failed": 0,
+    "killed": {
+      "parent": 0,
+      "user": 0,
+      "system": 0
+    },
+    "refused": {
+      "depth_limit": 0,
+      "concurrency_limit": 0,
+      "budget": 0
+    },
+    "by_type": {}
+  },
+  "safety_stops": 0,
+  "is_error": false,
+  "num_turns": 10,
+  "subtype": "success",
+  "api_error_status": null,
+  "result": "{\"ready\":true,\"objections\":[\"check.py is the regression test (asserts calc.add(2, 3) == 5) and is not in the Reading's file list; it fails today (2 - 3 = -1) and should pass with ok after the fix. No edit needed to it.\",\"check.py covers only one input; adding calc.add(-1, 1) == 0 would catch sign or operator slips that 2 + 3 alone misses. Optional.\",\"No other callers of add: grep finds it only in calc.py and check.py. notes.txt and deep/notes.txt are unrelated.\",\"Behavior change for non-numeric inputs: with a + b, strings or lists concatenate instead of raising TypeError. Nothing in the repo passes such values, and the spec asks for +.\",\"No tracked docs, changelog, or version files need updating.\",\"Not verified by running: the Bash call to run python3 check.py was denied by permission mode, so both the current failure and the post-fix pass come from reading the code.\"]}",
+  "structured_output": {
+    "ready": true,
+    "objections": [
+      "check.py is the regression test (asserts calc.add(2, 3) == 5) and is not in the Reading's file list; it fails today (2 - 3 = -1) and should pass with ok after the fix. No edit needed to it.",
+      "check.py covers only one input; adding calc.add(-1, 1) == 0 would catch sign or operator slips that 2 + 3 alone misses. Optional.",
+      "No other callers of add: grep finds it only in calc.py and check.py. notes.txt and deep/notes.txt are unrelated.",
+      "Behavior change for non-numeric inputs: with a + b, strings or lists concatenate instead of raising TypeError. Nothing in the repo passes such values, and the spec asks for +.",
+      "No tracked docs, changelog, or version files need updating.",
+      "Not verified by running: the Bash call to run python3 check.py was denied by permission mode, so both the current failure and the post-fix pass come from reading the code."
+    ]
+  },
+  "ttft_ms": 2673,
+  "type": "result",
+  "duration_ms": 29785,
+  "uuid": "2f55c0fd-5e47-4894-b276-bfbaac8b0c64",
+  "ttft_stream_ms": 1986,
+  "time_to_request_ms": 641,
+  "first_content_frame_ms": 1986,
+  "queued_turn_count": 0,
+  "result_index": 0
+}

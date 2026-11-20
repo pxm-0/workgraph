@@ -1,0 +1,127 @@
+{
+  "duration_api_ms": 3984,
+  "stop_reason": "end_turn",
+  "session_id": "ecd8ff57-024d-4133-b127-a32667243095",
+  "total_cost_usd": 0.0074929,
+  "usage": {
+    "input_tokens": 4,
+    "cache_creation_input_tokens": 32856,
+    "cache_read_input_tokens": 74780,
+    "output_tokens": 347,
+    "output_tokens_details": {
+      "thinking_tokens": 58
+    },
+    "server_tool_use": {
+      "web_search_requests": 0,
+      "web_fetch_requests": 0
+    },
+    "service_tier": "standard",
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 32856,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "inference_geo": "global",
+    "iterations": [
+      {
+        "input_tokens": 2,
+        "output_tokens": 177,
+        "cache_read_input_tokens": 53241,
+        "cache_creation_input_tokens": 1154,
+        "cache_creation": {
+          "ephemeral_5m_input_tokens": 0,
+          "ephemeral_1h_input_tokens": 1154
+        },
+        "type": "message"
+      }
+    ],
+    "speed": "standard",
+    "fallback_credit": null
+  },
+  "modelUsage": {
+    "claude-haiku-5-5": {
+      "inputTokens": 4,
+      "outputTokens": 347,
+      "cacheReadInputTokens": 74780,
+      "cacheCreationInputTokens": 32856,
+      "webSearchRequests": 0,
+      "costUSD": 0.0074929,
+      "contextWindow": 1000000,
+      "maxOutputTokens": 128000,
+      "thinkingTokens": 58,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationEphemeral1hInputTokens": 32856,
+      "canonicalModel": "claude-haiku-5-5",
+      "provider": "firstParty",
+      "costBasis": "list"
+    }
+  },
+  "permission_denials": [
+    {
+      "tool_name": "Skill",
+      "tool_use_id": "toolu_01XHmBYuG15p7kKRFF7fLaNX",
+      "tool_input": {
+        "skill": "ponytail:ponytail-help"
+      }
+    }
+  ],
+  "terminal_reason": "completed",
+  "fast_mode_state": "off",
+  "fast_mode_disabled_reason": "sdk_opt_in_required",
+  "subagent_stats": {
+    "spawned": 0,
+    "requested": {
+      "background": 0,
+      "foreground": 0,
+      "unset": 0
+    },
+    "started_in_background": 0,
+    "max_depth": 0,
+    "spawned_by_subagents": 0,
+    "completed": 0,
+    "failed": 0,
+    "killed": {
+      "parent": 0,
+      "user": 0,
+      "system": 0
+    },
+    "refused": {
+      "depth_limit": 0,
+      "concurrency_limit": 0,
+      "budget": 0
+    },
+    "by_type": {}
+  },
+  "safety_stops": 0,
+  "is_error": false,
+  "num_turns": 4,
+  "subtype": "success",
+  "api_error_status": null,
+  "result": "Results:\n\n- **karpathy-guidelines: succeeded.** The skill loaded and returned its guidelines: think before coding, simplicity first, surgical changes, and goal-driven execution.\n- **ponytail:ponytail-help: failed.** The call returned \"Skill execution blocked by permission rules,\" so the skill did not run and I have no help text from it.\n\nI didn't try to work around the block. If you want the ponytail help output, you'll need to allow `ponytail:ponytail-help` in your permission rules, and then I can retry it.",
+  "ttft_ms": 2526,
+  "type": "result",
+  "duration_ms": 7839,
+  "uuid": "c83ed34c-aa8b-469f-880f-2c3e6d4dd1eb",
+  "ttft_stream_ms": 2223,
+  "time_to_request_ms": 421,
+  "first_content_frame_ms": 2224,
+  "queued_turn_count": 0,
+  "result_index": 0,
+  "model_usage_since_last_result": {
+    "claude-haiku-5-5": {
+      "inputTokens": 4,
+      "outputTokens": 347,
+      "cacheReadInputTokens": 74780,
+      "cacheCreationInputTokens": 32856,
+      "webSearchRequests": 0,
+      "costUSD": 0.0074929,
+      "contextWindow": 1000000,
+      "maxOutputTokens": 128000,
+      "thinkingTokens": 58,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationEphemeral1hInputTokens": 32856,
+      "canonicalModel": "claude-haiku-5-5",
+      "provider": "firstParty",
+      "costBasis": "list"
+    }
+  }
+}

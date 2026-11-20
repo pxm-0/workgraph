@@ -1,0 +1,137 @@
+{
+  "duration_api_ms": 18498,
+  "stop_reason": "tool_use",
+  "session_id": "18a1f52f-3c2a-4ad8-9b41-0844d876d7b5",
+  "total_cost_usd": 0.014394000000000002,
+  "usage": {
+    "input_tokens": 14,
+    "cache_creation_input_tokens": 52597,
+    "cache_read_input_tokens": 250820,
+    "output_tokens": 2730,
+    "output_tokens_details": {
+      "thinking_tokens": 731
+    },
+    "server_tool_use": {
+      "web_search_requests": 0,
+      "web_fetch_requests": 0
+    },
+    "service_tier": "standard",
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 52597,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "inference_geo": "global",
+    "iterations": [
+      {
+        "input_tokens": 4,
+        "output_tokens": 224,
+        "cache_read_input_tokens": 51891,
+        "cache_creation_input_tokens": 706,
+        "cache_creation": {
+          "ephemeral_5m_input_tokens": 0,
+          "ephemeral_1h_input_tokens": 706
+        },
+        "type": "message"
+      }
+    ],
+    "speed": "standard",
+    "fallback_credit": null
+  },
+  "modelUsage": {
+    "claude-haiku-5-5": {
+      "inputTokens": 14,
+      "outputTokens": 2730,
+      "cacheReadInputTokens": 250820,
+      "cacheCreationInputTokens": 52597,
+      "webSearchRequests": 0,
+      "costUSD": 0.014394000000000002,
+      "contextWindow": 1000000,
+      "maxOutputTokens": 128000,
+      "thinkingTokens": 731,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationEphemeral1hInputTokens": 52597,
+      "canonicalModel": "claude-haiku-5-5",
+      "provider": "firstParty",
+      "costBasis": "list"
+    }
+  },
+  "permission_denials": [
+    {
+      "tool_name": "Bash",
+      "tool_use_id": "toolu_01DPa2xSLWPhQ4KPQLbp7ZiC",
+      "tool_input": {
+        "command": "echo \"before:\" && (python3 -I check.py; echo \"exit $?\")",
+        "description": "Run check.py to confirm failure before fix"
+      }
+    },
+    {
+      "tool_name": "Edit",
+      "tool_use_id": "toolu_01MJERmukJpQ3LfKJPDvaizz",
+      "tool_input": {
+        "file_path": "<spike>/t1/calc.py",
+        "old_string": "    return a - b",
+        "new_string": "    return a + b",
+        "replace_all": false
+      }
+    },
+    {
+      "tool_name": "Edit",
+      "tool_use_id": "toolu_01JNKJZCwFS4KmyEvqVdjtu9",
+      "tool_input": {
+        "file_path": "<spike>/t1/calc.py",
+        "old_string": "    return a - b",
+        "new_string": "    return a + b",
+        "replace_all": false
+      }
+    }
+  ],
+  "terminal_reason": "completed",
+  "fast_mode_state": "off",
+  "fast_mode_disabled_reason": "sdk_opt_in_required",
+  "subagent_stats": {
+    "spawned": 0,
+    "requested": {
+      "background": 0,
+      "foreground": 0,
+      "unset": 0
+    },
+    "started_in_background": 0,
+    "max_depth": 0,
+    "spawned_by_subagents": 0,
+    "completed": 0,
+    "failed": 0,
+    "killed": {
+      "parent": 0,
+      "user": 0,
+      "system": 0
+    },
+    "refused": {
+      "depth_limit": 0,
+      "concurrency_limit": 0,
+      "budget": 0
+    },
+    "by_type": {}
+  },
+  "safety_stops": 0,
+  "is_error": false,
+  "num_turns": 8,
+  "subtype": "success",
+  "api_error_status": null,
+  "result": "{\"summary\":\"calc.add returns a - b; the fix is changing calc.py line 2 to return a + b. Not applied: Bash and Edit were denied by permission mode, so calc.py is unchanged and check.py has not been run. Only caller is check.py (asserts calc.add(2, 3) == 5, currently failing). Risk is low: one-line change, no other callers depend on subtraction.\",\"files\":[\"calc.py\"],\"risky\":false}",
+  "structured_output": {
+    "summary": "calc.add returns a - b; the fix is changing calc.py line 2 to return a + b. Not applied: Bash and Edit were denied by permission mode, so calc.py is unchanged and check.py has not been run. Only caller is check.py (asserts calc.add(2, 3) == 5, currently failing). Risk is low: one-line change, no other callers depend on subtraction.",
+    "files": [
+      "calc.py"
+    ],
+    "risky": false
+  },
+  "ttft_ms": 2775,
+  "type": "result",
+  "duration_ms": 33351,
+  "uuid": "0eb1df30-e62f-40aa-a15e-f8ed80ab6fe1",
+  "ttft_stream_ms": 1725,
+  "time_to_request_ms": 341,
+  "first_content_frame_ms": 1726,
+  "queued_turn_count": 0,
+  "result_index": 0
+}

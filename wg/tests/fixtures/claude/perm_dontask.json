@@ -1,0 +1,126 @@
+{
+  "duration_api_ms": 11624,
+  "stop_reason": "end_turn",
+  "session_id": "f47904a1-39c5-4d23-a5cb-06660f71b187",
+  "total_cost_usd": 0.010421700000000002,
+  "usage": {
+    "input_tokens": 6,
+    "cache_creation_input_tokens": 41622,
+    "cache_read_input_tokens": 122220,
+    "output_tokens": 1749,
+    "output_tokens_details": {
+      "thinking_tokens": 643
+    },
+    "server_tool_use": {
+      "web_search_requests": 0,
+      "web_fetch_requests": 0
+    },
+    "service_tier": "standard",
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 41622,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "inference_geo": "global",
+    "iterations": [
+      {
+        "input_tokens": 2,
+        "output_tokens": 457,
+        "cache_read_input_tokens": 54895,
+        "cache_creation_input_tokens": 808,
+        "cache_creation": {
+          "ephemeral_5m_input_tokens": 0,
+          "ephemeral_1h_input_tokens": 808
+        },
+        "type": "message"
+      }
+    ],
+    "speed": "standard",
+    "fallback_credit": null
+  },
+  "modelUsage": {
+    "claude-haiku-5-5": {
+      "inputTokens": 6,
+      "outputTokens": 1749,
+      "cacheReadInputTokens": 122220,
+      "cacheCreationInputTokens": 41622,
+      "webSearchRequests": 0,
+      "costUSD": 0.010421700000000002,
+      "contextWindow": 1000000,
+      "maxOutputTokens": 128000,
+      "thinkingTokens": 643,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationEphemeral1hInputTokens": 41622,
+      "canonicalModel": "claude-haiku-5-5",
+      "provider": "firstParty",
+      "costBasis": "list"
+    }
+  },
+  "permission_denials": [
+    {
+      "tool_name": "Bash",
+      "tool_use_id": "toolu_01LU1wLPLLHRr44i5jN6rMcG",
+      "tool_input": {
+        "command": "touch bash_marker.txt && echo \"touch ok\" && pwd",
+        "description": "Create bash_marker.txt in the current directory and print cwd"
+      }
+    },
+    {
+      "tool_name": "Write",
+      "tool_use_id": "toolu_01F2F3FVqnu3QDRKwF6MVum7",
+      "tool_input": {
+        "file_path": "<spike>/repo/write_marker.txt",
+        "content": "x"
+      }
+    },
+    {
+      "tool_name": "Write",
+      "tool_use_id": "toolu_014GZDPmN1UqmdTTGxPLsAz3",
+      "tool_input": {
+        "file_path": "<spike>/repo/write_marker.txt",
+        "content": "x"
+      }
+    }
+  ],
+  "terminal_reason": "completed",
+  "fast_mode_state": "off",
+  "fast_mode_disabled_reason": "sdk_opt_in_required",
+  "subagent_stats": {
+    "spawned": 0,
+    "requested": {
+      "background": 0,
+      "foreground": 0,
+      "unset": 0
+    },
+    "started_in_background": 0,
+    "max_depth": 0,
+    "spawned_by_subagents": 0,
+    "completed": 0,
+    "failed": 0,
+    "killed": {
+      "parent": 0,
+      "user": 0,
+      "system": 0
+    },
+    "refused": {
+      "depth_limit": 0,
+      "concurrency_limit": 0,
+      "budget": 0
+    },
+    "by_type": {}
+  },
+  "safety_stops": 0,
+  "is_error": false,
+  "num_turns": 5,
+  "subtype": "success",
+  "api_error_status": null,
+  "result": "Two of the three steps failed, and the one that worked was the read.\n\n1. **`touch bash_marker.txt`: failed.** Bash is blocked because the session runs in \"don't ask\" permission mode. I didn't try another route to create the file.\n2. **`write_marker.txt` containing `x`: failed.** The first attempt hit a Fact-Forcing Gate hook that asked for justification. I answered it in substance: this is the marker file you asked for, nothing else in the tree needs to be superseded, nothing links to it, and it's a new file because you named that path. The retry was then denied by the same \"don't ask\" permission mode. I didn't try to work around it, such as with the GateGuard environment settings the hook mentioned.\n3. **Read `notes.txt`: succeeded.** It contains one line: `hello`.\n\nTo finish steps 1 and 2, either allow Bash and Write in this session or run `touch bash_marker.txt` and create `write_marker.txt` yourself. Nothing was created or changed in the repo.\n\nNot checked: whether `notes.txt` is the file you meant, since I read it at the path I assumed. Risk: none for the repo. The two failed steps leave no partial files.",
+  "ttft_ms": 5648,
+  "type": "result",
+  "duration_ms": 33828,
+  "uuid": "de6edd55-c3ff-437d-9ee9-a82d16fad06e",
+  "ttft_stream_ms": 4286,
+  "time_to_request_ms": 2630,
+  "first_content_frame_ms": 4287,
+  "queued_turn_count": 0,
+  "result_index": 0
+}

@@ -1,0 +1,137 @@
+{
+  "duration_api_ms": 21178,
+  "stop_reason": "tool_use",
+  "session_id": "a46603ff-6b56-4c1e-918a-f2c8235435a3",
+  "total_cost_usd": 0.014798819999999999,
+  "usage": {
+    "input_tokens": 12,
+    "cache_creation_input_tokens": 53115,
+    "cache_read_input_tokens": 250412,
+    "output_tokens": 3341,
+    "output_tokens_details": {
+      "thinking_tokens": 990
+    },
+    "server_tool_use": {
+      "web_search_requests": 0,
+      "web_fetch_requests": 0
+    },
+    "service_tier": "standard",
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 53115,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "inference_geo": "global",
+    "iterations": [
+      {
+        "input_tokens": 2,
+        "output_tokens": 464,
+        "cache_read_input_tokens": 52002,
+        "cache_creation_input_tokens": 1113,
+        "cache_creation": {
+          "ephemeral_5m_input_tokens": 0,
+          "ephemeral_1h_input_tokens": 1113
+        },
+        "type": "message"
+      }
+    ],
+    "speed": "standard",
+    "fallback_credit": null
+  },
+  "modelUsage": {
+    "claude-haiku-5-5": {
+      "inputTokens": 12,
+      "outputTokens": 3341,
+      "cacheReadInputTokens": 250412,
+      "cacheCreationInputTokens": 53115,
+      "webSearchRequests": 0,
+      "costUSD": 0.014798819999999999,
+      "contextWindow": 1000000,
+      "maxOutputTokens": 128000,
+      "thinkingTokens": 990,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationEphemeral1hInputTokens": 53115,
+      "canonicalModel": "claude-haiku-5-5",
+      "provider": "firstParty",
+      "costBasis": "list"
+    }
+  },
+  "permission_denials": [
+    {
+      "tool_name": "Edit",
+      "tool_use_id": "toolu_01W25C18snGDCF7ezfaJLLcV",
+      "tool_input": {
+        "file_path": "<spike>/t2/calc.py",
+        "old_string": "def add(a, b):\n    return a - b\n",
+        "new_string": "def add(a, b):\n    return a - b\n\ndef is_even(n):\n    return n % 2 == 0\n",
+        "replace_all": false
+      }
+    },
+    {
+      "tool_name": "Bash",
+      "tool_use_id": "toolu_01TdBM33WGLDen77PG9tB8GC",
+      "tool_input": {
+        "command": "python3 -I -c \"\nimport calc\ncases = {0: True, 1: False, 4: True, 3: False, -2: True, -3: False}\nbad = [n for n, want in cases.items() if calc.is_even(n) is not want]\nprint('failures:', bad or 'none')\n\" && python3 -I check.py && git status --short",
+        "description": "Run is_even spot checks and existing check.py"
+      }
+    },
+    {
+      "tool_name": "Edit",
+      "tool_use_id": "toolu_01Txv3MXCLbPxbRmGsvdXAKS",
+      "tool_input": {
+        "file_path": "<spike>/t2/calc.py",
+        "old_string": "def add(a, b):\n    return a - b\n",
+        "new_string": "def add(a, b):\n    return a - b\n\ndef is_even(n):\n    return n % 2 == 0\n",
+        "replace_all": false
+      }
+    }
+  ],
+  "terminal_reason": "completed",
+  "fast_mode_state": "off",
+  "fast_mode_disabled_reason": "sdk_opt_in_required",
+  "subagent_stats": {
+    "spawned": 0,
+    "requested": {
+      "background": 0,
+      "foreground": 0,
+      "unset": 0
+    },
+    "started_in_background": 0,
+    "max_depth": 0,
+    "spawned_by_subagents": 0,
+    "completed": 0,
+    "failed": 0,
+    "killed": {
+      "parent": 0,
+      "user": 0,
+      "system": 0
+    },
+    "refused": {
+      "depth_limit": 0,
+      "concurrency_limit": 0,
+      "budget": 0
+    },
+    "by_type": {}
+  },
+  "safety_stops": 0,
+  "is_error": false,
+  "num_turns": 9,
+  "subtype": "success",
+  "api_error_status": null,
+  "result": "{\"summary\":\"NOT APPLIED. Edits to calc.py were denied (permission mode \\\"don't ask\\\"), so is_even(n) is not in the repo. The intended change is one function after add(): `def is_even(n): return n % 2 == 0`. It is low-risk: it adds one function, nothing existing changes, and the only importer is check.py, which already asserts is_even(4) is True and is_even(3) is False. I could not run check.py because Bash was also denied. Separate finding: the existing add(a, b) returns a - b, which is a bug I left alone because it is out of scope.\",\"files\":[\"calc.py\"],\"risky\":false}",
+  "structured_output": {
+    "summary": "NOT APPLIED. Edits to calc.py were denied (permission mode \"don't ask\"), so is_even(n) is not in the repo. The intended change is one function after add(): `def is_even(n): return n % 2 == 0`. It is low-risk: it adds one function, nothing existing changes, and the only importer is check.py, which already asserts is_even(4) is True and is_even(3) is False. I could not run check.py because Bash was also denied. Separate finding: the existing add(a, b) returns a - b, which is a bug I left alone because it is out of scope.",
+    "files": [
+      "calc.py"
+    ],
+    "risky": false
+  },
+  "ttft_ms": 3654,
+  "type": "result",
+  "duration_ms": 35500,
+  "uuid": "6539118a-3e61-41cb-bbf2-fb2abc5a78c2",
+  "ttft_stream_ms": 2254,
+  "time_to_request_ms": 318,
+  "first_content_frame_ms": 2254,
+  "queued_turn_count": 0,
+  "result_index": 0
+}

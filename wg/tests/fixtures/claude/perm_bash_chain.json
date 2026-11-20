@@ -1,0 +1,136 @@
+{
+  "duration_api_ms": 8462,
+  "stop_reason": "end_turn",
+  "session_id": "de120f9a-eb41-42d4-9b1a-03e39cd9c930",
+  "total_cost_usd": 0.00975219,
+  "usage": {
+    "input_tokens": 4,
+    "cache_creation_input_tokens": 43160,
+    "cache_read_input_tokens": 64879,
+    "output_tokens": 942,
+    "output_tokens_details": {
+      "thinking_tokens": 304
+    },
+    "server_tool_use": {
+      "web_search_requests": 0,
+      "web_fetch_requests": 0
+    },
+    "service_tier": "standard",
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 43160,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "inference_geo": "global",
+    "iterations": [
+      {
+        "input_tokens": 2,
+        "output_tokens": 357,
+        "cache_read_input_tokens": 53469,
+        "cache_creation_input_tokens": 1101,
+        "cache_creation": {
+          "ephemeral_5m_input_tokens": 0,
+          "ephemeral_1h_input_tokens": 1101
+        },
+        "type": "message"
+      }
+    ],
+    "speed": "standard",
+    "fallback_credit": null
+  },
+  "modelUsage": {
+    "claude-haiku-5-5": {
+      "inputTokens": 4,
+      "outputTokens": 942,
+      "cacheReadInputTokens": 64879,
+      "cacheCreationInputTokens": 43160,
+      "webSearchRequests": 0,
+      "costUSD": 0.00975219,
+      "contextWindow": 1000000,
+      "maxOutputTokens": 128000,
+      "thinkingTokens": 304,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationEphemeral1hInputTokens": 43160,
+      "canonicalModel": "claude-haiku-5-5",
+      "provider": "firstParty",
+      "costBasis": "list"
+    }
+  },
+  "permission_denials": [
+    {
+      "tool_name": "Bash",
+      "tool_use_id": "toolu_015dtibXmvFC4KhLE5ypcrsP",
+      "tool_input": {
+        "command": "git status && touch <spike>/markers/escaped_and",
+        "description": "Run git status then touch escaped_and marker"
+      }
+    },
+    {
+      "tool_name": "Bash",
+      "tool_use_id": "toolu_01RZrwdEgbqbDpHkAkuy7z5r",
+      "tool_input": {
+        "command": "git status; touch <spike>/markers/escaped_semi",
+        "description": "Run git status then touch escaped_semi marker"
+      }
+    }
+  ],
+  "terminal_reason": "completed",
+  "fast_mode_state": "off",
+  "fast_mode_disabled_reason": "sdk_opt_in_required",
+  "subagent_stats": {
+    "spawned": 0,
+    "requested": {
+      "background": 0,
+      "foreground": 0,
+      "unset": 0
+    },
+    "started_in_background": 0,
+    "max_depth": 0,
+    "spawned_by_subagents": 0,
+    "completed": 0,
+    "failed": 0,
+    "killed": {
+      "parent": 0,
+      "user": 0,
+      "system": 0
+    },
+    "refused": {
+      "depth_limit": 0,
+      "concurrency_limit": 0,
+      "budget": 0
+    },
+    "by_type": {}
+  },
+  "safety_stops": 0,
+  "is_error": false,
+  "num_turns": 3,
+  "subtype": "success",
+  "api_error_status": null,
+  "result": "Both Bash calls were denied, so neither command ran. The session is in \"don't ask\" permission mode, and the denial came back on each call.\n\n- **Call 1** (`git status && touch .../markers/escaped_and`): denied. Nothing ran, so the git status output and the `escaped_and` marker are both missing.\n- **Call 2** (`git status; touch .../markers/escaped_semi`): denied. Nothing ran, so the `escaped_semi` marker is missing too.\n\nI didn't try another tool to create the marker files, since that would get around the denial. If you want these run, approve Bash for this session (or switch the permission mode) and I'll run them one at a time as you specified.",
+  "ttft_ms": 4677,
+  "type": "result",
+  "duration_ms": 16672,
+  "uuid": "2e6dd40f-fb08-4c6b-b00e-caef8062674f",
+  "ttft_stream_ms": 3813,
+  "time_to_request_ms": 719,
+  "first_content_frame_ms": 3814,
+  "queued_turn_count": 0,
+  "result_index": 0,
+  "model_usage_since_last_result": {
+    "claude-haiku-5-5": {
+      "inputTokens": 4,
+      "outputTokens": 942,
+      "cacheReadInputTokens": 64879,
+      "cacheCreationInputTokens": 43160,
+      "webSearchRequests": 0,
+      "costUSD": 0.00975219,
+      "contextWindow": 1000000,
+      "maxOutputTokens": 128000,
+      "thinkingTokens": 304,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationEphemeral1hInputTokens": 43160,
+      "canonicalModel": "claude-haiku-5-5",
+      "provider": "firstParty",
+      "costBasis": "list"
+    }
+  }
+}

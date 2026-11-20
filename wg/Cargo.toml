@@ -17,3 +17,7 @@ path = "tests/cli_target.rs"
 [[test]]
 name = "legacy_args"
 path = "tests/legacy_args.rs"
+
+[[test]]
+name = "claude_fixtures"
+path = "tests/claude_fixtures.rs"
