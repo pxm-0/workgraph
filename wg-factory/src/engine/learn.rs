@@ -196,7 +196,7 @@ fn finish(s: &mut RunState, phrased: &[RuleDraft], out: &mut Vec<Command>) {
         in_play: s.in_play.clone(),
         top: learned.rules.iter().take(5).cloned().collect(),
     };
-    super::publish::finish_or_publish(s, o, out);
+    super::stages::begin(s, o, out);
 }
 
 fn base_outcome(s: &RunState) -> Outcome {

@@ -1,7 +1,7 @@
 //! Template variables: blocks of text the kernel renders into the prompt files. The kernel fences
 //! the untrusted ones (`rules`, `problem`, `evidence`) and adds its own (`hx`).
 
-use crate::api::{CheckOutcome, Review, Rule, Scope};
+use crate::api::{CheckOutcome, Finding, Review, Rule, Scope};
 use crate::learn::rules::for_prompt;
 use crate::model::{add, RunState, Unit};
 use alloc::format;
@@ -119,7 +119,7 @@ pub fn fix_vars(state: &mut RunState, u: &Unit, problem: &str, round: u32, max: 
 }
 
 pub fn review_vars(state: &RunState, round: u32) -> Vars {
-    let again = if round > 1 {
+    let again = if round > 1 || state.stage_at.is_some() {
         " This is a re-review after fixes: check the earlier findings again and mark the fixed ones \"resolved\"."
     } else {
         ""
@@ -131,12 +131,66 @@ pub fn review_vars(state: &RunState, round: u32) -> Vars {
     ]
 }
 
+/// The Reading's task id, or the task a release (no Reading) works on.
 pub fn task_id(state: &RunState) -> String {
     state
         .reading
         .as_ref()
         .map(|r| r.task_id.clone())
+        .or_else(|| state.resume_task.clone())
         .unwrap_or_default()
+}
+
+/// The variables every `agent` stage gets; its prompt may use any of them (the kernel checks a
+/// prompt against this set at load, so a new agent stage needs only TOML and a prompt).
+pub const AGENT_VARS: &[&str] = &[
+    "task",
+    "task_id",
+    "units",
+    "criteria",
+    "problem",
+    "round",
+    "max_rounds",
+];
+
+pub fn agent_vars(state: &RunState, problem: &str, run: u32) -> Vars {
+    let units: Vec<String> = state
+        .built
+        .iter()
+        .map(|u| format!("{} ({})", u.id, u.files.join(", ")))
+        .collect();
+    let mut criteria: Vec<String> = Vec::new();
+    for u in &state.built {
+        for c in &u.criteria {
+            add(&mut criteria, c);
+        }
+    }
+    alloc::vec![
+        var("task", state.task.clone()),
+        var("task_id", task_id(state)),
+        var("units", units.join("; ")),
+        var("criteria", criteria.join(", ")),
+        var("problem", problem.to_string()),
+        var("round", format!("{run}")),
+        var("max_rounds", String::from("2")),
+    ]
+}
+
+/// What a QA agent found, for the fixers and the agent's second run.
+pub fn verdict_problem(findings: &[Finding]) -> String {
+    let lines: Vec<String> = findings
+        .iter()
+        .map(|f| {
+            format!(
+                "- {} [{}] {}: {}",
+                f.id,
+                f.severity.name(),
+                f.file.as_deref().unwrap_or(""),
+                f.summary
+            )
+        })
+        .collect();
+    format!("QA found these problems:\n{}", lines.join("\n"))
 }
 
 pub fn check_problem(failed: &[CheckOutcome]) -> String {
