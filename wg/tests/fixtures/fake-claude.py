@@ -11,7 +11,9 @@ first worker create the STOP file as it works (and STOP-TWICE the first reviewer
 writes a test no fixer makes pass, WORKFLOW writes a test that drops a GitHub workflow when it runs,
 INCIDENT makes the worker run `wg shift run` through the guard hook, WRONG-BRANCH makes it
 switch branches, and RISKY makes the unit risky (it also touches auth_token.py) so the worker runs
-its check through `wg sandbox exec`, the one Bash it is granted."""
+its check through `wg sandbox exec`, the one Bash it is granted. Phase 4 stages: `explore` (the QA
+agent) passes, `rereview` reviews as `review` does, every `<stage>:<unit>#<n>` label is a fixer,
+`notes` writes release notes and `plan` fills the Haruspex task's release plan."""
 import json
 import os
 import subprocess
@@ -165,9 +167,24 @@ elif label.startswith("work:"):
     if "WRONG-BRANCH" in prompt:
         run(["git", "checkout", "-q", "-b", "wg/99-elsewhere"])
     reply = {"summary": "add now adds"}
-elif label.startswith("fix:"):
+elif ":" in label and "#" in label:
     reply = {"summary": "tried, but nothing changed"}
-elif label.startswith("review"):
+elif label.startswith("explore"):
+    reply = {"passed": True, "findings": []}
+elif label == "notes":
+    reply = {"summary": "add now adds", "changes": ["add(2, 3) returns 5"], "breaking": False}
+elif label == "plan":
+    with open(task_path()) as f:
+        task = json.load(f)
+    task["status"] = "ready_for_release"
+    task["release_plan"] = {"deployment_steps": ["merge is deployed by the owner"],
+                            "rollback_steps": ["revert the merge commit"],
+                            "smoke_tests": ["python3 check.py"], "monitoring": ["none: a library"],
+                            "ownership": ["pxm-0"]}
+    with open(task_path(), "w") as f:
+        json.dump(task, f, indent=2)
+    reply = {"ready": True, "summary": "revert to roll back; smoke with the check"}
+elif label.startswith(("review", "rereview")):
     with open(task_path()) as f:
         task = json.load(f)
     task["acceptance_criteria"][0].update({"status": "passed", "evidence": ["check:test"]})

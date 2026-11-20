@@ -88,6 +88,14 @@ pub struct Opts {
     pub diffs: HashMap<&'static str, &'static str>,
     /// An earlier run of this task built a risky unit (a rerun on its kept worktree).
     pub tainted_earlier: bool,
+    /// The chain; empty means `dev` in place, `dev` + `qa` in a shift.
+    pub pipelines: Vec<&'static str>,
+    /// The repo's `qa` check set (name, command), approved like the gate checks.
+    pub qa_checks: Vec<(&'static str, &'static str)>,
+    /// Prompts and pipelines added to the compiled ones (`<dir>/prompts`, `<dir>/pipelines`).
+    pub overlay: Option<PathBuf>,
+    /// What `gate ready-to-release . --json` reports.
+    pub release_blockers: Vec<&'static str>,
 }
 
 /// A fake sim sandbox: ready, or unavailable for a reason; the agent can die at a label.
@@ -194,6 +202,10 @@ impl Default for Opts {
             sandbox: None,
             diffs: HashMap::new(),
             tainted_earlier: false,
+            pipelines: vec![],
+            qa_checks: vec![],
+            overlay: None,
+            release_blockers: vec!["Human approval for ready_to_release is pending."],
         }
     }
 }
@@ -336,11 +348,18 @@ pub struct FakeHx {
     pub approvals: Mutex<Value>,
     pub project: BTreeMap<String, String>,
     pub blockers: Mutex<Vec<String>>,
+    pub release_blockers: Mutex<Vec<String>>,
+    pub gates: Mutex<Vec<String>>,
 }
 
 impl Haruspex for FakeHx {
-    fn gate_ready_to_build(&self) -> Result<Vec<String>, String> {
-        Ok(self.blockers.lock().unwrap().clone())
+    fn gate(&self, gate: &str) -> Result<Vec<String>, String> {
+        self.gates.lock().unwrap().push(gate.to_string());
+        match gate {
+            "ready-to-build" => Ok(self.blockers.lock().unwrap().clone()),
+            "ready-to-release" => Ok(self.release_blockers.lock().unwrap().clone()),
+            g => Err(format!("no gate {g}")),
+        }
     }
     fn task(&self, _id: &str) -> Result<Value, String> {
         Ok(self.task.lock().unwrap().clone())
@@ -374,6 +393,10 @@ pub fn fake_hx(units: &[Value], checks: &[(&str, &str)]) -> FakeHx {
             .map(|(n, c)| (n.to_string(), c.to_string()))
             .collect(),
         blockers: Mutex::new(vec!["Human approval for ready_to_build is pending.".into()]),
+        release_blockers: Mutex::new(vec![
+            "Human approval for ready_to_release is pending.".into()
+        ]),
+        gates: Mutex::new(vec![]),
     }
 }
 
@@ -441,9 +464,34 @@ pub fn config(checks: &[(&str, &str)], approve: bool) -> Config {
 }
 
 pub fn config_with(checks: &[(&str, &str)], approve: bool, max_calls: u32, extra: &str) -> Config {
+    config_qa(checks, &[], approve, max_calls, extra)
+}
+
+/// As `config_with`, with the repo's `qa` check set (each approved too).
+pub fn config_qa(
+    checks: &[(&str, &str)],
+    qa: &[(&str, &str)],
+    approve: bool,
+    max_calls: u32,
+    extra: &str,
+) -> Config {
+    let repo = "[[repo]]\nname = \"o/r\"\npath = \"/x\"\n";
+    let qa_line = format!(
+        "qa_checks = [{}]\n",
+        qa.iter()
+            .map(|(n, _)| format!("\"{n}\""))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let extra = match (qa.is_empty(), extra.contains(repo)) {
+        (true, _) => extra.to_string(),
+        (false, true) => extra.replacen(repo, &format!("{repo}{qa_line}"), 1),
+        (false, false) => format!("{extra}\n{repo}{qa_line}"),
+    };
+    let checks: Vec<(&str, &str)> = checks.iter().chain(qa).copied().collect();
     let mut text = format!("{extra}\n[limits]\nmax_calls_per_task = {max_calls}\n");
     if approve {
-        for (n, c) in checks {
+        for (n, c) in &checks {
             text.push_str(&format!(
                 "[[check]]\nrepo = \"o/r\"\nname = \"{n}\"\nproject = \"{c}\"\nfactory = \"{c}\"\n"
             ));
@@ -468,7 +516,13 @@ pub fn run_with(o: Opts, step: Step) -> Out {
     ] {
         std::fs::create_dir_all(&d).unwrap();
     }
-    let cfg = config_with(&o.checks, o.approve_checks, o.max_calls, &o.config_extra);
+    let cfg = config_qa(
+        &o.checks,
+        &o.qa_checks,
+        o.approve_checks,
+        o.max_calls,
+        &o.config_extra,
+    );
     let units = o.units.clone();
     let criteria: Vec<Value> = units
         .iter()
@@ -504,7 +558,15 @@ pub fn run_with(o: Opts, step: Step) -> Out {
                 review(n.parse().unwrap())
             } else if base.starts_with("work:") {
                 json!({ "summary": "done" })
-            } else if base.starts_with("fix:") {
+            } else if let Some(n) = base.strip_prefix("rereview#") {
+                review(n.parse().unwrap())
+            } else if base == "explore" || base == "explore#2" {
+                json!({ "passed": true, "findings": [] })
+            } else if base == "notes" {
+                json!({ "summary": "add adds", "changes": ["add(2, 3) is 5"], "breaking": false })
+            } else if base == "plan" {
+                json!({ "ready": true, "summary": "deploy, smoke, roll back by revert" })
+            } else if base.contains(':') && base.contains('#') {
                 if innocent(label) {
                     json!({ "summary": "", "blocked": "not caused by my unit" })
                 } else {
@@ -542,9 +604,30 @@ pub fn run_with(o: Opts, step: Step) -> Out {
         changed: o.changed.clone(),
         diffs: o.diffs.clone(),
     };
-    let hx =
-        o.hx.clone()
-            .unwrap_or_else(|| Arc::new(fake_hx(&o.units, &o.checks)));
+    let hx = o.hx.clone().unwrap_or_else(|| {
+        let h = fake_hx(&o.units, &o.checks);
+        *h.release_blockers.lock().unwrap() =
+            o.release_blockers.iter().map(|b| b.to_string()).collect();
+        Arc::new(h)
+    });
+    let assets = match &o.overlay {
+        Some(dir) => wg::assets::Assets::compiled().overlay(dir).unwrap(),
+        None => wg::assets::Assets::compiled(),
+    };
+    let names: Vec<String> = match (o.pipelines.is_empty(), o.shift) {
+        (false, _) => o.pipelines.iter().map(|p| p.to_string()).collect(),
+        (true, true) => vec!["dev".into(), "qa".into()],
+        (true, false) => vec!["dev".into()],
+    };
+    let chain = wg::pipelines::chain(
+        &assets,
+        &names,
+        &cfg.repo("o/r")
+            .map(wg::pipelines::RepoView::of)
+            .unwrap_or_default(),
+        60,
+    )
+    .expect("the chain loads");
     let memory_path = dirs.memory("o__r");
     if let Some(m) = &o.memory {
         std::fs::create_dir_all(memory_path.parent().unwrap()).unwrap();
@@ -572,6 +655,7 @@ pub fn run_with(o: Opts, step: Step) -> Out {
         plugins: vec![],
         user: "tester".into(),
         replay: wg::claude::replay::Replay::none(),
+        assets,
         shift: o.shift.then(|| {
             let steps = std::sync::atomic::AtomicUsize::new(0);
             let stop = o.stop;
@@ -613,13 +697,7 @@ pub fn run_with(o: Opts, step: Step) -> Out {
             .unwrap_or(dirty),
         memory: wg::memory_store::load(&memory_path),
         memory_path: memory_path.clone(),
-        pipeline: {
-            let p = wg::pipelines::load(wg::assets::DEV_PIPELINE, 60).unwrap();
-            wg_factory::api::PipelineDef {
-                publish: if o.shift { p.publish.clone() } else { None },
-                ..p
-            }
-        },
+        chain,
         start_branch: "main".into(),
         initializing: false,
         baseline_floor: o
