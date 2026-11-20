@@ -35,7 +35,9 @@ means it refused: show it and stop.
      answers and queues the issue for the next shift.
    - **Approvals.** For each draft PR, offer `/workgraph:work approve <owner/repo>#<pr>` and follow
      that skill's section 7 when the owner says yes.
-   - **Parked.** Say why each parked (rate limited, call cap, the issue changed after the claim):
+   - **Parked.** Say why each parked (rate limited, call cap, the issue changed after the claim,
+     sandbox unavailable with the doctor's reason; the report's Sandbox section has the doctor
+     verdict and the argus fingerprint before and after):
      those are back in the queue; nothing to do unless the owner wants to change them. A task the
      shift stopped mid-run stays claimed (`wg:in-shift`): offer `<wg> shift resume <id>`, which
      replays the answers it already paid for.
@@ -62,8 +64,10 @@ The decisions step of **morning** for one issue: read its escalations from the l
    owner makes.
 3. Remind the owner that `factory.toml` needs `[intake].trusted_actors`, a `[[repo]]` per repo
    (`name`, `path`, optionally `factory_compose` and `install`), each check approved with
-   `wg config allow-check`, and the Haruspex pin. Sandbox setup (`wg sandbox setup-print`) arrives
-   with Phase 3; until then risky units are skipped and listed for the owner.
+   `wg config allow-check`, and the Haruspex pin. For risky units, a repo needs `[repo.sandbox]`
+   (image digests, in-container `checks`, and `verify`), and the sim needs provisioning once:
+   `<wg> sandbox setup-print` prints a plan and a script; show both and let the owner run it
+   (never run it yourself). `<wg> sandbox doctor` then says whether risky units can proceed.
 
 To pause shifts, the owner creates `~/.workgraph/STOP`; a running shift stops between steps and
 its task parks as resumable (`wg shift resume <id>`). Stale claims go back to the queue with

@@ -49,6 +49,19 @@ incidents, decisions (`wg decide` stores your answers and queues the issue again
 ready), and parked work. `~/.workgraph/STOP` pauses shifts; `wg shift resume <id>` finishes an
 interrupted one without paying again for the answers it already got.
 
+**Sandbox (Phase 3).** Risky units (migrations, auth, deletes, CI, deploys, payments, secrets, by
+the kernel's classifier on planned paths and on each layer's actual diff) proceed in a rootless
+podman container run as `wgsbx` on the existing OrbStack machine `oreochiserver-sim`: no host
+mounts, no network, read-only root, no capabilities, CPU, memory and pid limits, and a throwaway
+tar copy of the work. A risky worker's only Bash is `wg sandbox exec --unit <U> -- <cmd>`; once one
+is built the task is tainted, so every later check, review command and Haruspex verify runs there
+too, and the draft PR carries `risky:<category>` labels and the `SandboxRun` evidence. If the
+sandbox is unavailable the task parks; it never falls back to the Mac. `wg sandbox doctor` checks
+the machine and proves the container's isolation (it fails closed), `wg sandbox setup-print`
+prints the provisioning script you run once, `wg sandbox reap` removes stale jobs, and
+`wg/tests/sim/drill.sh` is the real-sim drill. Configure it per repo with `[repo.sandbox]` in
+`factory.toml` (image and service digests, in-container `checks`, and `verify`).
+
 ## Memory
 
 One file per repo, `.claude/work-memory.json`:
