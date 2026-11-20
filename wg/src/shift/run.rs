@@ -71,9 +71,36 @@ fn preflight(dirs: &Dirs, cfg: &Config, gh: &Gh) -> Result<(), String> {
     crate::cli::live::probe_all(cfg, dirs).map(|_| ())
 }
 
-/// Per-repo preflight: fetchable, the dev stack exists on the default branch, the compose
-/// override files exist, and no unallowlisted project agent config on the default branch.
-fn repo_problem(repo: &RepoCfg) -> Option<String> {
+/// Per-repo preflight: the chain loads within the call cap (and the release line, if on), every
+/// QA check is owner-approved, the repo is fetchable, the dev stack exists on the default branch,
+/// the compose override files exist, and no unallowlisted project agent config on that branch.
+fn repo_problem(cfg: &Config, repo: &RepoCfg) -> Option<String> {
+    if let Err(e) = task::shift_chain(cfg, repo) {
+        return Some(format!("pipeline: {e}"));
+    }
+    if repo.release {
+        let view = crate::pipelines::RepoView::of(repo);
+        let assets = crate::assets::Assets::compiled();
+        let release = crate::pipelines::chain(
+            &assets,
+            &["release".to_string()],
+            &view,
+            cfg.max_calls_per_task,
+        );
+        if let Err(e) = release {
+            return Some(format!("release pipeline: {e}"));
+        }
+    }
+    if let Some(n) = repo
+        .qa_checks
+        .iter()
+        .find(|n| cfg.check(&repo.name, n).is_none())
+    {
+        return Some(format!(
+            "qa check {n} has no approved command: wg config allow-check --repo {} --name {n} ...",
+            repo.name
+        ));
+    }
     let path = Path::new(&repo.path);
     if let Err(e) = crate::git::fetch(path) {
         return Some(format!("cannot fetch: {e}"));
@@ -253,11 +280,14 @@ pub fn run(dirs: &Dirs, cfg: &Config) -> Result<Value, String> {
         tasks: 0,
         failures_in_a_row: 0,
     };
+    let mut ready: Vec<&RepoCfg> = Vec::new();
+    let mut stopped = false;
     'repos: for repo in &cfg.repos {
-        if let Some(why) = repo_problem(repo) {
+        if let Some(why) = repo_problem(cfg, repo) {
             j.append("repo_skipped", json!({ "repo": repo.name, "why": why }))?;
             continue;
         }
+        ready.push(repo);
         let picked = match super::record::issues_of(dirs, &repo.name).and_then(|reruns| {
             intake::intake(
                 &gh,
@@ -285,6 +315,7 @@ pub fn run(dirs: &Dirs, cfg: &Config) -> Result<Value, String> {
         for i in &picked.picked {
             if let Some(why) = stop_before_next(cfg, &c, &dirs.stop_file(), deadline) {
                 j.append("stopped", json!({ "why": why }))?;
+                stopped = true;
                 break 'repos;
             }
             // Intake ran maybe hours ago: the owner may have closed, un-queued or edited it since.
@@ -303,8 +334,15 @@ pub fn run(dirs: &Dirs, cfg: &Config) -> Result<Value, String> {
             };
             if let Some(why) = stop_after(&d) {
                 j.append("stopped", json!({ "why": why }))?;
+                stopped = true;
                 break 'repos;
             }
+        }
+    }
+    // The release line (design §7.3 step 10): verified, merged tasks, prepared up to the owner's gate.
+    for repo in ready.into_iter().filter(|_| !stopped) {
+        if let Err(why) = super::release::line(&env, repo) {
+            j.append("error", json!({ "repo": repo.name, "release": why }))?;
         }
     }
     super::sandbox::end(cfg, &j, &sandbox)?;

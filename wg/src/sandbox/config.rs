@@ -59,6 +59,10 @@ pub struct RepoSandbox {
     /// Check name → what `project.json` holds for a tainted task (design §9.5).
     #[serde(default)]
     pub verify: BTreeMap<String, String>,
+    /// The release line's rehearsal steps, run in order in one sandbox job (Phase 4), e.g.
+    /// `npm run migrate:up`, `npm run migrate:down`, `npm run migrate:up`. No network, ever.
+    #[serde(default)]
+    pub release_rehearsal: Vec<String>,
 }
 
 fn pre_baked() -> bool {
@@ -84,6 +88,12 @@ pub fn machine(f: SandboxFile) -> Result<Machine, String> {
     }
     if m.machine.ends_with("-golden") {
         return Err("[sandbox].machine may not be a golden image".into());
+    }
+    // The real server is never a sandbox: risky work and release rehearsals target the sim only.
+    if m.machine == "oreochiserver" {
+        return Err(
+            "[sandbox].machine may never be the real oreochiserver; use oreochiserver-sim".into(),
+        );
     }
     if !name_ok(&m.user, 32, |c| c.is_ascii_lowercase() || c == '_') || m.user == "root" {
         return Err("[sandbox].user is not an unprivileged user name".into());
@@ -126,6 +136,12 @@ pub fn repo(name: &str, s: &RepoSandbox) -> Result<(), String> {
     for (n, cmd) in &s.checks {
         crate::ids::check_name(n).map_err(|e| what(&e))?;
         job::command(cmd, &format!("check {n}")).map_err(|e| what(&e))?;
+    }
+    if s.release_rehearsal.len() > 8 {
+        return Err(what("release_rehearsal has at most 8 steps"));
+    }
+    for (i, cmd) in s.release_rehearsal.iter().enumerate() {
+        job::command(cmd, &format!("release_rehearsal step {}", i + 1)).map_err(|e| what(&e))?;
     }
     for (n, cmd) in &s.verify {
         if !s.checks.contains_key(n) {
@@ -217,6 +233,9 @@ mod tests {
         assert!(f("oreochiserver-sim-golden", "wgsbx")
             .unwrap_err()
             .contains("golden"));
+        assert!(f("oreochiserver", "wgsbx")
+            .unwrap_err()
+            .contains("never be the real oreochiserver"));
         assert!(
             f("a b", "wgsbx").is_err() && f("sim", "root").is_err() && f("sim", "Bad").is_err()
         );
@@ -228,6 +247,10 @@ mod tests {
         let pg = format!("docker.io/library/postgres@sha256:{}", "b".repeat(64));
         assert_eq!(parse(&format!("services = {{ db = {{ image = \"{pg}\", profile = \"service\", data = \"/var/lib/postgresql/data\", env = {{ POSTGRES_PASSWORD = \"sandbox-only\" }} }} }}")), Ok(()));
         assert_eq!(parse("verify = { test = \"/Users/o/.workgraph/bin/current/wg sandbox exec --task {task} --check test\" }"), Ok(()));
+        assert_eq!(
+            parse("release_rehearsal = [\"npm run migrate:up\", \"npm run migrate:down\"]"),
+            Ok(())
+        );
         for (extra, want) in [
             ("deps_image = false", "Phase 6"),
             ("prepare = \"npm ci\"", "Phase 6"),
@@ -241,6 +264,11 @@ mod tests {
                 "no sandbox check",
             ),
             ("verify = { test = \"npm test\" }", "must be"),
+            ("release_rehearsal = [\"\"]", "release_rehearsal step 1"),
+            (
+                "release_rehearsal = [\"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\"]",
+                "at most 8",
+            ),
             (
                 "verify = { test = \"wg sandbox exec --task {task} --check test\" }",
                 "must be",
