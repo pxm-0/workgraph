@@ -68,3 +68,9 @@ jobs:
         run: XDG_RUNTIME_DIR="/run/user/$(id -u)" WG_PODMAN=1 cargo test --locked -p wg --test sandbox_podman -- --test-threads 2
       - name: Nothing labelled is left
         run: test -z "$(podman ps -a --filter label=wg.job -q)" && test -z "$(podman volume ls --filter label=wg.job -q)"
+      - name: Diagnostics
+        if: failure()
+        run: |
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          journalctl --user -n 200 --no-pager || true
+          podman ps -a; podman volume ls; ls -la ~/jobs || true

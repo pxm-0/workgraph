@@ -156,7 +156,11 @@ fn oom_pids_and_timeout_hold() {
         &image("busybox"),
         &[
             ("oom", "head -c 400m /dev/zero | tail > /dev/null", 60),
-            ("pids", "for i in $(seq 1 80); do sleep 20 & done 2>/dev/null; sleep 1; ls /proc | grep -c '^[0-9]'", 60),
+            (
+                "pids",
+                "for i in $(seq 1 80); do sleep 20 & done; echo spawned-all",
+                60,
+            ),
             ("slow", "sleep 120", 3),
         ],
     );
@@ -164,15 +168,11 @@ fn oom_pids_and_timeout_hold() {
     j.limits.pids = 32;
     let r = run(&j);
     assert_eq!((r.steps[0].exit, r.steps[0].oom), (137, true), "{r:?}");
-    let procs: u32 = r.steps[1]
-        .tail
-        .lines()
-        .last()
-        .unwrap_or("999")
-        .trim()
-        .parse()
-        .unwrap_or(999);
-    assert!(procs <= 32, "the pids limit holds: {procs}");
+    let pids = &r.steps[1];
+    assert!(
+        !pids.tail.contains("spawned-all") && pids.tail.to_lowercase().contains("fork"),
+        "the pids limit holds: {pids:?}"
+    );
     assert_eq!(
         (r.steps[2].exit, r.steps[2].timed_out),
         (124, true),
@@ -323,7 +323,12 @@ fn the_container_doctor_passes_and_fails_closed_on_each_planted_breach() {
     ] {
         let r = ok(plant);
         assert_eq!(r["ok"], false, "{plant}: {r}");
-        let whys: Vec<&str> = r["checks"].as_array().unwrap().iter().filter_map(|c| c["why"].as_str()).collect();
+        let whys: Vec<&str> = r["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|c| c["why"].as_str())
+            .collect();
         let want = format!("container_isolation_failed:{check}");
         assert!(whys.iter().any(|w| w.contains(&want)), "{plant}: {r}");
     }

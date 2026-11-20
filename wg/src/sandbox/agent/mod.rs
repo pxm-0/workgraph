@@ -47,13 +47,24 @@ fn cleanup(s: &Store, id: &str) -> Result<Value, String> {
     Ok(json!({ "job": id, "cleanup": c }))
 }
 
+/// The job's unit still runs or still cleans up (`ExecStopPost` runs while it is `deactivating`).
 fn unit_active(id: &str) -> bool {
     std::process::Command::new("systemctl")
-        .args(["--user", "is-active", "--quiet", &format!("wgsbx-{id}")])
+        .args([
+            "--user",
+            "show",
+            "-p",
+            "ActiveState",
+            "--value",
+            &format!("wgsbx-{id}"),
+        ])
         .env_clear()
         .envs(podman::env())
-        .status()
-        .is_ok_and(|s| s.success())
+        .output()
+        .is_ok_and(|o| {
+            let state = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            o.status.success() && !matches!(state.as_str(), "" | "inactive" | "failed")
+        })
 }
 
 fn poll(s: &Store, id: &str) -> Result<Value, String> {

@@ -134,8 +134,16 @@ pub fn step(job: &str, name: &str, image: &str, created: u64, l: &Limits) -> Vec
 
 /// A step's command: `timeout -k 10 <secs> sh -c <cmd>`, `<cmd>` one argv element.
 pub fn step_command(secs: u32, cmd: &str) -> Vec<String> {
-    s(&["timeout", "-k", "10", &secs.to_string(), "sh", "-c", cmd])
+    s(&["sh", "-c", STEP, "wg-step", &secs.to_string(), cmd])
 }
+
+/// Marks a step whose container saw an OOM kill (podman reports `OOMKilled` only when the
+/// container's first process dies, not when the kernel kills a child of it).
+pub const OOM_MARK: &str = "[wg: oom_kill]";
+
+/// The fixed step wrapper: `$1` is the timeout, `$2` the command, passed as arguments, never
+/// spliced into this text.
+const STEP: &str = r#"timeout -k 10 "$1" sh -c "$2"; rc=$?; if grep -qs '^oom_kill [1-9]' /sys/fs/cgroup/memory.events; then echo '[wg: oom_kill]' >&2; fi; exit $rc"#;
 
 /// The service profile up to and including the image (design §8.3).
 pub fn service(job: &str, svc: &Service, created: u64, l: &Limits) -> Vec<String> {
@@ -367,9 +375,11 @@ mod tests {
         assert_eq!(a, want);
         no_host_reach(&a);
         assert_eq!(
-            step_command(30, "npm test; rm x"),
-            ["timeout", "-k", "10", "30", "sh", "-c", "npm test; rm x"]
+            step_command(30, "npm test; rm x")[3..],
+            ["wg-step", "30", "npm test; rm x"]
         );
+        let wrap = &step_command(30, "x")[2];
+        assert!(wrap.starts_with("timeout -k 10 \"$1\" sh -c \"$2\"") && wrap.contains(OOM_MARK));
     }
 
     #[test]
