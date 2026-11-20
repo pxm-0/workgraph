@@ -217,7 +217,6 @@ pub fn json_strs(v: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec;
 
     #[test]
     fn json_strings_escape_quotes_controls_and_newlines() {
@@ -226,7 +225,7 @@ mod tests {
             json_strs(&[String::from("x"), String::from("y")]),
             "[\"x\",\"y\"]"
         );
-        assert_eq!(json_strs(&vec![]), "[]");
+        assert_eq!(json_strs(&[]), "[]");
     }
 
     #[test]
