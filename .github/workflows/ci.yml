@@ -8,6 +8,11 @@ on:
 permissions:
   contents: read
 
+# Every check runs in the compose dev stack, the digest-pinned image the devcontainer and the
+# pre-push hook use.
+env:
+  DEV: docker compose -f compose.dev.yml run --rm -T
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -17,14 +22,19 @@ jobs:
         with:
           repository: pxm-0/haruspex
           path: haruspex
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Build the dev image
+        run: docker compose -f compose.dev.yml build dev
+      - name: Format
+        run: $DEV dev cargo fmt --all --check
+      - name: Clippy
+        run: $DEV dev cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: wg-factory builds without std
+        run: $DEV dev cargo build -p wg-factory --locked --target thumbv7em-none-eabihf
+      - name: Tests (finalize against the real Haruspex CLI)
+        run: $DEV -e HARUSPEX_CLI=/workspace/haruspex/scripts/haruspex.py dev cargo test --workspace --locked
+      - name: Coverage of wg, at least 80% of lines
+        run: $DEV -e HARUSPEX_CLI=/workspace/haruspex/scripts/haruspex.py dev cargo llvm-cov -p wg --locked --fail-under-lines 80
+      - name: File size
+        run: $DEV dev cargo xtask size
       - name: Workflow control-flow tests
-        run: node --test tests/*.test.mjs
-      - name: wg integration tests (with the real Haruspex CLI)
-        working-directory: wg
-        env:
-          HARUSPEX_CLI: ${{ github.workspace }}/haruspex/scripts/haruspex.py
-        run: cargo test --locked
+        run: $DEV dev sh -c 'node --test tests/*.test.mjs'
