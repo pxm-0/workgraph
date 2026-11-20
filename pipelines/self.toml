@@ -1,0 +1,68 @@
+# The self pipeline (design §6.2, §12.1), protected, compiled in and never overlaid: workgraph
+# improving itself, for pxm-0/workgraph only. It is the dev pipeline's stages with the self-plan
+# and self-review prompts, then a non-draft publish labelled wg:self. haruspex = false means no
+# human gate exists in this lane and none is pretended: Haruspex records stay local to the
+# worktree (they never ship; .haruspex/** is protected), and the merge decision is the kernel's
+# self-merge gate (`wg self gate`), which runs from the installed base binary after CI.
+[pipeline]
+name = "self"
+haruspex = false
+
+[[stage]]
+id = "plan"
+kind = "read"
+model = "opus"
+effort = "high"
+prompt = "self-plan"
+max_turns = 60
+timeout_secs = 1800
+
+[[stage]]
+id = "challenge"
+kind = "challenge"
+model = "sonnet"
+effort = "high"
+prompt = "challenge"
+max_turns = 30
+timeout_secs = 900
+
+[[stage]]
+id = "escalate"
+kind = "escalate"
+
+[[stage]]
+id = "baseline"
+kind = "baseline"
+
+[[stage]]
+id = "build"
+kind = "build"
+max_units = 3
+max_fix_rounds = 3
+max_turns = 80
+timeout_secs = 1800
+worker_prompt = "work"
+fix_prompt = "fix"
+
+[[stage]]
+id = "review"
+kind = "review"
+model = "opus"
+prompt = "self-review"
+max_fix_rounds = 1
+max_turns = 60
+timeout_secs = 1800
+
+[[stage]]
+id = "learn"
+kind = "learn"
+model = "sonnet"
+prompt = "learn"
+max_turns = 3
+timeout_secs = 600
+
+[[stage]]
+id = "publish"
+kind = "publish"
+draft = false
+labels = ["wg:self"]

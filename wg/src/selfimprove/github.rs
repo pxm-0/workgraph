@@ -184,7 +184,8 @@ pub fn required(
         {
             continue;
         }
-        if mine.is_empty() || mine.iter().all(|r| r.status == "completed") {
+        // No run yet means CI has not reported: wait. A forged or misplaced run never matches.
+        if !mine.is_empty() && mine.iter().all(|r| r.status == "completed") {
             failed.push(format!("{wf} {job}"));
         } else {
             pending.push(format!("{wf} {job}"));
@@ -321,8 +322,7 @@ mod tests {
             ok[1].clone(),
         ];
         assert!(required(&other, &h, &pairs)
-            .unwrap()
-            .unwrap()
+            .unwrap_err()
             .contains("ci.yml test"));
         let forged = [
             CheckRun {
@@ -331,7 +331,10 @@ mod tests {
             },
             ok[1].clone(),
         ];
-        assert!(required(&forged, &h, &pairs).unwrap().is_some());
+        assert!(
+            required(&forged, &h, &pairs).is_err(),
+            "a forged run is never evidence"
+        );
         let stale = [
             CheckRun {
                 head_sha: "b".repeat(40),
@@ -339,7 +342,10 @@ mod tests {
             },
             ok[1].clone(),
         ];
-        assert!(required(&stale, &h, &pairs).unwrap().is_some());
+        assert!(
+            required(&stale, &h, &pairs).is_err(),
+            "nor one on another head"
+        );
         let failed = [
             run(
                 "test",

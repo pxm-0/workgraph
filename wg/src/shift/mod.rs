@@ -13,4 +13,6 @@ pub mod run;
 pub mod runctx;
 pub mod sandbox;
 pub mod schedule;
+pub mod selflane;
+pub mod selfupdate;
 pub mod task;

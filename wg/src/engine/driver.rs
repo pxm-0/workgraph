@@ -597,6 +597,13 @@ impl Loop<'_> {
                     "gate_evaluated",
                     json!({ "gate": "ready_to_build", "blockers": blockers }),
                 )?;
+                // The self lane: a plan that names a protected path ends here, before any edit.
+                if let Some(why) = super::publish::self_plan_refusal(self.ctx, &r) {
+                    self.ctx
+                        .journal
+                        .append("warning", json!({ "refused": why }))?;
+                    return Ok(Some(End::Failed(why)));
+                }
                 let view = self.k.risk_view(self.ctx);
                 self.ctx.journal.append(
                     "risk_updated",

@@ -33,6 +33,8 @@ pub struct Ctx<'a> {
     pub repo: &'a super::RepoView,
     /// A dev pipeline comes first, so there are built units to blame and fix.
     pub built: bool,
+    /// The compiled self pipeline: its publish is a non-draft `wg:self` PR (design §12.1).
+    pub self_lane: bool,
 }
 
 /// `re-review` → `rereview`: the prefix of the stage's call labels.
@@ -225,7 +227,7 @@ pub fn stage(s: &Stage, c: &Ctx) -> Result<StageDef, String> {
                 None => format!("The owner decides {}.", gate_name(s)?),
             },
         },
-        "publish" => StageKind::Publish(publish(s)?),
+        "publish" => StageKind::Publish(publish(s, c.self_lane)?),
         k if super::ORDER.contains(&k) => {
             return Err(format!("stage {}: {k} runs only in the dev pipeline", s.id))
         }
@@ -240,7 +242,20 @@ pub fn stage(s: &Stage, c: &Ctx) -> Result<StageDef, String> {
 
 /// The publish stage: always a draft (only `wg approve` makes a shift PR ready), labels only from
 /// `PUBLISH_LABELS`.
-fn publish(s: &Stage) -> Result<PublishDef, String> {
+fn publish(s: &Stage, self_lane: bool) -> Result<PublishDef, String> {
+    if self_lane {
+        // The gate, not `wg approve`, decides a self PR, so it opens ready and carries wg:self.
+        if s.draft != Some(false) || s.labels.as_deref() != Some(&["wg:self".to_string()][..]) {
+            return Err(format!(
+                "stage {}: the self publish is draft = false with labels = [\"wg:self\"]",
+                s.id
+            ));
+        }
+        return Ok(PublishDef {
+            draft: false,
+            labels: vec!["wg:self".into()],
+        });
+    }
     if s.draft == Some(false) {
         return Err(format!(
             "stage {}: a shift PR is always a draft; only wg approve makes it ready",

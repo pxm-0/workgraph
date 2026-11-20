@@ -110,3 +110,7 @@ path = "tests/self_rollback.rs"
 [[test]]
 name = "eval_capture"
 path = "tests/eval_capture.rs"
+
+[[test]]
+name = "self_lane"
+path = "tests/self_lane.rs"

@@ -42,6 +42,23 @@ pub fn created(dirs: &Dirs, repo: &str) -> Vec<u64> {
         .collect()
 }
 
+/// True when the factory itself ever put `label` on issue `n` of `repo` (the intake ledger of its
+/// own label edits): such a label is never the owner's queueing (design §7.3 step 11).
+pub fn factory_labelled(dirs: &Dirs, repo: &str, n: u64, label: &str) -> bool {
+    std::fs::read_to_string(dirs.intake_ledger())
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .any(|v| {
+            v["kind"] == "label"
+                && v["repo"] == repo
+                && v["issue"] == n
+                && v["add"]
+                    .as_array()
+                    .is_some_and(|a| a.iter().any(|x| x == label))
+        })
+}
+
 /// A `wg:*` state label other than the queue label and the priority label.
 pub fn other_state(i: &Issue, queue: &str) -> Option<String> {
     i.labels
@@ -136,7 +153,8 @@ pub fn relabel(
     )
 }
 
-/// The claim: queued → in-shift, plus a comment naming the shift.
+/// The claim: queued → in-shift, plus a comment naming the shift. A self-lane issue keeps the
+/// owner's `wg:self`: the factory never adds or removes that label (design §12.1).
 pub fn claim(
     dirs: &Dirs,
     gh: &Gh,
@@ -145,7 +163,11 @@ pub fn claim(
     n: u64,
     shift: &str,
 ) -> Result<(), String> {
-    relabel(dirs, gh, repo, n, &[IN_SHIFT], &[&s.label])?;
+    let remove: Vec<&str> = [s.label.as_str()]
+        .into_iter()
+        .filter(|l| *l != crate::selfimprove::github::SELF)
+        .collect();
+    relabel(dirs, gh, repo, n, &[IN_SHIFT], &remove)?;
     gh.comment(
         repo,
         n,

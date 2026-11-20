@@ -127,11 +127,12 @@ fn failing_or_foreign_check_runs_refuse_and_running_ones_wait() {
         s["check_runs"] = green();
         s["check_runs"][0]["app"] = json!("someones-app");
     });
+    let v = f.gate(pr2);
     assert_eq!(
-        f.gate(pr2)["outcome"],
-        "refused",
-        "a check-run from another app is no evidence"
+        v["outcome"], "pending",
+        "a check-run from another app is no evidence: {v}"
     );
+    f.close(pr2);
     let (pr3, _) = f.pr("docs3", "echo 'z' >> docs/a.md", true);
     f.set_gh(|s| {
         s["check_runs"] = green();

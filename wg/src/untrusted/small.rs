@@ -113,11 +113,14 @@ struct WireProposal {
     evidence: String,
 }
 
-const CATEGORIES: [&str; 4] = [
+/// The retro categories, plus `factory` (something workgraph itself did badly, design §10.4):
+/// filed as `wg:self-proposed` issues, never applied and never taken by the self lane.
+const CATEGORIES: [&str; 5] = [
     "automated-check",
     "coding-standard",
     "navigation",
     "haruspex-profile",
+    "factory",
 ];
 
 /// Every sig must be one this run fixed. Rule text is sanitized later, rule by rule, so one bad
@@ -204,10 +207,15 @@ mod tests {
         let ok =
             json!({ "rules": [rule("npm test | x", "worker")], "proposals": [prop("navigation")] });
         assert!(learn(&ok, &ctx()).is_ok());
+        let factory = json!({ "rules": [], "proposals": [prop("factory")] });
+        assert_eq!(
+            learn(&factory, &ctx()).unwrap().proposals[0].category,
+            "factory"
+        );
         for bad in [
             json!({ "rules": [rule("other", "worker")], "proposals": [] }),
             json!({ "rules": [rule("npm test | x", "boss")], "proposals": [] }),
-            json!({ "rules": [], "proposals": [prop("factory")] }),
+            json!({ "rules": [], "proposals": [prop("deploy-now")] }),
         ] {
             assert!(learn(&bad, &ctx()).is_err(), "{bad}");
         }
