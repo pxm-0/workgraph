@@ -1,0 +1,61 @@
+name: self-gate
+
+# The self-merge gate's CI half (design §12.3 step 4). Every job checks the PR's BASE out into
+# base/ and runs base's code against the head tree, so a PR is judged by rules it cannot change.
+# The token is read-only and no job uses a secret; candidate Rust runs only here, in Actions.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  BASE: ${{ github.event.pull_request.base.sha }}
+  HEAD: ${{ github.event.pull_request.head.sha }}
+
+jobs:
+  protected-paths:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.100.0"
+      - name: Every side of every change against base's protected list
+        run: cargo run --quiet --locked --manifest-path base/Cargo.toml -p xtask -- protected-paths --repo . --base "$BASE" --head "$HEAD"
+
+  lint-editable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.100.0"
+      - name: Base's lint over the head's editable Rust
+        run: cargo run --quiet --locked --manifest-path base/Cargo.toml -p xtask -- lint-editable --repo .
+
+  replay-eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.100.0"
+      # The head's engine (wg/** is protected, so its kernel is base's) replays base's cassettes;
+      # the case count must equal base's manifest.
+      - name: Replay base's cases with the candidate engine
+        run: cargo run --quiet --locked -p wg -- eval replay --cases base/eval/replay --manifest base/eval/manifest.toml

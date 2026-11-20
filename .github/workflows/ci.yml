@@ -28,16 +28,37 @@ jobs:
         run: $DEV workspace cargo fmt --all --check
       - name: Clippy
         run: $DEV workspace cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: wg-factory builds without std
-        run: $DEV workspace cargo build -p wg-factory --locked --target thumbv7em-none-eabihf
       - name: Tests (finalize against the real Haruspex CLI)
         run: $DEV -e HARUSPEX_CLI=/workspace/haruspex/scripts/haruspex.py workspace cargo test --workspace --locked
-      - name: Coverage of wg, at least 80% of lines
-        run: $DEV -e HARUSPEX_CLI=/workspace/haruspex/scripts/haruspex.py workspace cargo llvm-cov -p wg --locked --fail-under-lines 80
       - name: File size
         run: $DEV workspace cargo xtask size
       - name: Workflow control-flow tests
         run: $DEV workspace sh -c 'node --test tests/*.test.mjs'
+
+  # Separate jobs, so the self-merge gate can require each by (workflow file, job name) (§12.3).
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: pxm-0/haruspex
+          path: haruspex
+      - name: Build the dev image
+        run: docker compose -f compose.dev.yml build workspace
+      - name: Coverage of wg, at least 80% of lines
+        run: $DEV -e HARUSPEX_CLI=/workspace/haruspex/scripts/haruspex.py workspace cargo llvm-cov -p wg --locked --fail-under-lines 80
+
+  # thumbv7em-none-eabihf has no std at all, so this proves wg-factory never names std, however
+  # spelled (design §12.2). Only the library is built; the std test crates are not.
+  no-std-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the dev image
+        run: docker compose -f compose.dev.yml build workspace
+      - name: wg-factory builds without std
+        run: $DEV workspace cargo build -p wg-factory --locked --target thumbv7em-none-eabihf
 
   # The sandbox against real rootless podman (design §15.4): ubuntu-latest ships podman; the runner
   # user gets a lingering systemd session (submit starts jobs as transient user units) and a

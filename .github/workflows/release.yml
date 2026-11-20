@@ -1,11 +1,13 @@
 name: release
 
-# A `v*` tag builds the matrix and attaches each binary to a new release. A pull request that
-# touches the build runs the same matrix without publishing, so the release assets are proven to
-# build before merge.
+# A `v*` tag builds the matrix and attaches each binary to a new release. A push to main builds the
+# same matrix and keeps each binary as an artifact with its sha256 and head SHA, which is what
+# `wg self install --sha` downloads and verifies (design §12.5): nothing is built on the Mac. A
+# pull request that touches the build runs the matrix without publishing.
 on:
   push:
     tags: ["v*"]
+    branches: [main]
   pull_request:
     paths:
       - "wg/**"
@@ -19,7 +21,7 @@ permissions:
 
 jobs:
   create:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -60,8 +62,22 @@ jobs:
           name: wg-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/wg
           retention-days: 7
+      - name: Keep the binary, its sha256 and head SHA (main)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          mkdir install
+          cp "target/${{ matrix.target }}/release/wg" install/wg
+          (cd install && shasum -a 256 wg > wg.sha256)
+          echo "${{ github.sha }}" > install/head_sha
+      - name: Upload the install artifact (main)
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: wg-${{ matrix.target }}
+          path: install/
+          retention-days: 90
       - name: Upload binary and checksum
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
