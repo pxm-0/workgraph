@@ -2,8 +2,11 @@
 name: work
 description: Run a coding task in the current repo as a graph under a Haruspex Reading. It plans units mapped to acceptance criteria, mitigates non-critical risks itself, builds test-first in parallel on the cheapest proven model, gates on real checks, reviews independently against the criteria, and learns weighted rules. Only when the user types /workgraph:work.
 disable-model-invocation: true
-argument-hint: <task>
+argument-hint: [--experimental] <task>
 ---
+
+If the command starts with `--experimental`, follow **section 6** instead of sections 2-5: the
+Rust path (`wg run`), Phase 1a of the factory design. Otherwise run.js stays the default.
 
 If no task came with the command, ask for it in one line. Run every command below from the repo
 root. Mechanical steps go through the `wg` binary, which prints one JSON line; read its fields,
@@ -95,3 +98,64 @@ the task to verifying, runs `verify` and the verification gate, and commits `.ha
 at the first failure. If `passed` is false, show `blockedAt` and that step's `outputTail`: no PR.
 If it passed, push the branch with `-u` and open a PR whose body lists the criteria with their
 evidence, the review findings, and a test plan. Then report the PR link.
+
+## 6. `--experimental`: the Rust path (`wg run`)
+
+The kernel, not this skill, runs every check, calls every agent and holds the evidence. Find `wg`
+as in section 1 (prefer `~/.workgraph/bin/current/wg` when it exists). Do not look for a Haruspex
+CLI: `wg` uses only the one pinned in `~/.workgraph/factory.toml`.
+
+**Once per Mac, with the owner's yes for each:**
+
+- If `<wg> doctor` reports `haruspex pin` failing, show
+  `<wg> config pin-haruspex --cli <absolute path to haruspex.py>` (the newest
+  `~/.claude/plugins/cache/haruspex/haruspex/*/scripts/haruspex.py`, never one inside a repo) and
+  run it only after a yes. Report any other failing doctor check and stop.
+- Offer to add `ask` rules to the owner's user settings for `Bash(*wg finalize*)`,
+  `Bash(*wg approve*)`, `Bash(*wg self*)` and `Bash(*wg config*)`, so even a hijacked session hits
+  a real prompt. Add them only after a yes; `wg doctor` accepts exactly these `ask` rules.
+
+**Run.**
+
+1. Write the task text, verbatim, to a file in your scratchpad.
+2. Run `<wg> run --experimental --task-file <file>` from the repo root with Bash
+   `run_in_background` (runs outlast the foreground limit) and read its one JSON line when it
+   finishes. `error` means it refused to start: show it and stop.
+3. The fields are run.js's (`status, branch, haruspex, verified, reviewed, review, checks,
+   checksAlreadyFailing, done, skipped, stuck, fixRounds, reviewFixRounds, outOfScope,
+   userChangesBefore, models, rules, proposals, next`) plus `runId`, `costUsd`, `spend`,
+   `callsWithUnknownCost`, `memorySaved` and `logDir`. `verified`, `reviewed` and `checks` come
+   from the kernel's own evidence.
+
+**`needs_decision`.** Ask exactly as in section 3. For a `CHECKS` escalation the question names
+each command; on the owner's yes for one, run
+`<wg> config allow-check --repo <owner/repo> --name <name> --cmd <command> --factory-cmd <command>`
+(both strings as shown; a command that is not `docker compose ...` runs on the Mac, say so). Then
+write the answers as `[{"id": ..., "answer": ...}]` and `userChangesBefore` as a JSON array to
+scratch files and rerun with `--task-id <taskId> --initialized --user-changes-file <f>
+--decisions-file <f>`. `DIRTY` as in section 3. `BASELINE` (every required check already fails):
+the owner fixes the checks or removes them from `required_checks` with a note; never you.
+
+**`parked` or `failed`.** Show `note` (or `incident`) and `logDir`; edits stay uncommitted. An
+`incident` means an agent tried something its role forbids: say so plainly and stop.
+
+**Report** as in section 4, plus spend per stage and provider from `spend`, and `git diff --stat`.
+
+**Approve.** Handle `checksAlreadyFailing` as in section 5. Ask once, with AskUserQuestion:
+approve and commit / change something / discard. Never approve on the owner's behalf; for discard
+show what would be deleted and confirm first. On approve:
+
+```
+<wg> finalize --run <runId> --by "$(git config user.name)" \
+  --message "<feat: or fix: summary>
+
+<attribution trailer>" \
+  --evidence-message "chore: record Haruspex verification for <taskId>
+
+<attribution trailer>"
+```
+
+It refuses unless the run's checks and independent review hold at the current tree; then it
+commits (leaving `userChangesBefore` out), approves and records the build gate, verifies and
+records the verification gate, and commits the evidence. On `passed`, push with `-u` and open the
+PR as in section 5; otherwise show `blockedAt` and its `outputTail`, or the refusal.
