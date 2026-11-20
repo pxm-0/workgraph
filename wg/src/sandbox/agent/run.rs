@@ -101,7 +101,8 @@ fn step(
     let code = i64::from(r.code.unwrap_or(-1));
     // Judged by the agent's own clock: images' `timeout` differ (busybox's exits by the signal,
     // 143), and a cgroup-wide OOM kill takes the wrapper too, so a 137 before the deadline is OOM.
-    let timed_out = r.timed_out || code == 124 || ran_out;
+    // The clock only explains a failure: a command that exited 0 passed, however long podman took.
+    let timed_out = r.timed_out || code == 124 || (code != 0 && ran_out);
     let oom = !timed_out && (oom_flag || r.out.contains(podman::OOM_MARK) || code == 137);
     let exit = if timed_out { 124 } else { code };
     let result = StepResult {
@@ -314,6 +315,20 @@ pub mod tests {
         assert!(calls
             .iter()
             .any(|c| c == "volume rm -f wgsbx-j-0000000a-src wgsbx-j-0000000a-svc-db"));
+    }
+
+    #[test]
+    fn a_step_that_exits_0_at_its_budget_still_passes() {
+        let pm = Fake {
+            calls: Mutex::new(vec![]),
+            rules: vec![("wg-step 0 late", ran(143, "Terminated"))],
+        };
+        let j = job(&[("t", "true")]);
+        // A zero budget: the agent's clock says the time ran out before podman even returned.
+        let (ok, _) = step(&pm, &j, 0, "t", "true", 0, 7);
+        assert_eq!((ok.exit, ok.timed_out), (0, false), "exit 0 is a pass");
+        let (late, _) = step(&pm, &j, 1, "t", "late", 0, 7);
+        assert_eq!((late.exit, late.timed_out, late.oom), (124, true, false));
     }
 
     #[test]
