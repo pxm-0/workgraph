@@ -1,6 +1,7 @@
 //! Untrusted LLM output: `structured_output` is parsed into wire structs that deny unknown fields,
 //! then checked by a semantic validator, then converted to the factory's `api` types (design §4.3).
 
+pub mod issue;
 pub mod reading;
 pub mod review;
 pub mod rules;
