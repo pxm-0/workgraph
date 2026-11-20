@@ -14,7 +14,10 @@ env:
   HEAD: ${{ github.event.pull_request.head.sha }}
 
 jobs:
+  # Self PRs only: the owner's own PRs change protected paths by design. A skipped job counts as
+  # passing for branch protection, and the self gate itself demands `success` on a wg-self/* head.
   protected-paths:
+    if: startsWith(github.head_ref, 'wg-self/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
