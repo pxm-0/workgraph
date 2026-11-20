@@ -307,7 +307,8 @@ fn agent_edits_task(edit: fn(&mut Value)) -> Out {
 
 #[test]
 fn an_agent_that_weakens_the_contract_after_read_is_an_incident() {
-    let cases: [(fn(&mut Value), &str); 3] = [
+    type Edit = fn(&mut Value);
+    let cases: [(Edit, &str); 3] = [
         (|t| t["acceptance_criteria"] = json!([]), "criterion AC-a"),
         (|t| t["required_checks"] = json!([]), "required check test"),
         (

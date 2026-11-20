@@ -35,6 +35,8 @@ pub fn pass() -> Value {
 }
 
 pub type Answer = Arc<dyn Fn(&str, &str) -> Option<Value> + Send + Sync>;
+pub type Raw = Arc<dyn Fn(&Spawn) -> Option<RawOutput> + Send + Sync>;
+pub type Reply = Box<dyn Fn(&str, &str) -> Value + Send + Sync>;
 pub type Checker = Arc<dyn Fn(&str, &str, u32) -> Option<String> + Send + Sync>;
 
 /// One scenario. `answer(label, prompt)` overrides the default reply for a label (Some(raw
@@ -63,7 +65,7 @@ pub struct Opts {
     /// Appended to factory.toml (providers, auth).
     pub config_extra: String,
     /// Answers a spawn with raw output before the scripted replies (envelope-level tests).
-    pub raw: Arc<dyn Fn(&Spawn) -> Option<RawOutput> + Send + Sync>,
+    pub raw: Raw,
     /// The guard logs an incident while this label runs.
     pub guard_incident: Option<&'static str>,
 }
@@ -110,8 +112,8 @@ pub struct Call {
 
 pub struct FakeProc {
     pub calls: Mutex<Vec<Call>>,
-    pub reply: Box<dyn Fn(&str, &str) -> Value + Send + Sync>,
-    pub raw: Arc<dyn Fn(&Spawn) -> Option<RawOutput> + Send + Sync>,
+    pub reply: Reply,
+    pub raw: Raw,
     pub guard_incident: Option<&'static str>,
 }
 

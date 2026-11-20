@@ -162,9 +162,15 @@ fn a_run_reaches_ready_for_review_and_finalize_run_passes_the_verification_gate(
         .iter()
         .any(|e| e["decision"] == "incident"));
     let ledger = lines(&t.home.join(".workgraph/cost.jsonl"));
-    let labels: Vec<&str> = ledger.iter().map(|l| l["label"].as_str().unwrap()).collect();
+    let labels: Vec<&str> = ledger
+        .iter()
+        .map(|l| l["label"].as_str().unwrap())
+        .collect();
     // learn runs too: check.py leaves __pycache__/ outside the plan, which is learn evidence.
-    assert_eq!(labels, ["read", "challenge", "work:fix", "review#1", "learn"]);
+    assert_eq!(
+        labels,
+        ["read", "challenge", "work:fix", "review#1", "learn"]
+    );
     assert!(ledger
         .iter()
         .all(|l| l["provider"] == "subscription" && l["model_id"].is_string()));
