@@ -11,7 +11,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates git jq procps python3 \
  && rm -rf /var/lib/apt/lists/*
 
-# node for the workflow tests; npm because the finalize fixture's check is `npm test`.
+# node and npm because the finalize fixture's check is `npm test`.
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
