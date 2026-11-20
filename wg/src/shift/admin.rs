@@ -205,8 +205,10 @@ pub fn gc(dirs: &Dirs, cfg: &Config, gh: &Gh) -> Result<Value, String> {
         };
         crate::git::remove_worktree(Path::new(&repo.path), &dirs.worktrees(), path)?;
         removed.push(json!({ "repo": rec.repo, "issue": rec.issue, "worktree": rec.worktree }));
-        // A verified task stays one for the release line, which recreates its own worktree.
-        let awaits_release = repo.release && rec.status == "verified";
+        // A verified task stays one for the release line, which recreates its own worktree; a
+        // stuck release stays one for `wg shift retry-release`.
+        let awaits_release =
+            repo.release && ["verified", "release-stuck"].contains(&rec.status.as_str());
         record::save(
             dirs,
             &TaskRecord {

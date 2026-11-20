@@ -9,7 +9,7 @@ use crate::sandbox::job::Step;
 use crate::tokens::SandboxRun;
 use serde_json::json;
 use std::collections::VecDeque;
-use wg_factory::api::{CheckOutcome, Event, Reply};
+use wg_factory::api::{CheckOutcome, Event, Reply, StageDef, StageKind};
 
 /// Runs a configured step set in the sim sandbox, never on the Mac (design §8.1): the steps in one
 /// job, in order, on the worktree's tracked files. A sandbox that cannot run parks the run.
@@ -86,6 +86,55 @@ pub fn sandbox(
         })
         .collect();
     queue.push_back(Event::SandboxDone { label, results });
+    Ok(None)
+}
+
+/// Why the owner may not be asked at `gate` yet, judged on the kernel's own evidence only (design
+/// §1.4, §9.5): every sandbox stage of the chain that applies has a run from this task at the
+/// current tree whose steps all exited 0, and the kernel's own evaluation of `gate` now has no
+/// blocker but the owner's pending approval. The factory's word that a stage passed counts for
+/// nothing.
+pub fn human_refusal(
+    ctx: &RunCtx,
+    k: &Kernel,
+    stages: &[StageDef],
+    gate: &str,
+) -> Result<Option<String>, String> {
+    let tree = ctx.ports.repo.tree()?;
+    for s in stages {
+        let StageKind::Sandbox { always, .. } = &s.kind else {
+            continue;
+        };
+        if !(*always || k.tainted) {
+            continue;
+        }
+        let passed = k
+            .sandbox_runs
+            .iter()
+            .rev()
+            .find(|r| r.label() == s.label)
+            .is_some_and(|r| {
+                r.tree() == tree && !r.steps().is_empty() && r.steps().iter().all(|(_, e)| *e == 0)
+            });
+        if !passed {
+            return Ok(Some(format!(
+                "stage {} has no passing sandbox run at the current tree",
+                s.id
+            )));
+        }
+    }
+    let blockers = ctx.ports.hx.gate(gate)?;
+    ctx.journal.append(
+        "gate_evaluated",
+        json!({ "gate": gate, "label": "human", "blockers": blockers }),
+    )?;
+    let pending = format!("Human approval for {} is pending.", gate.replace('-', "_"));
+    if blockers != [pending] {
+        return Ok(Some(format!(
+            "{gate} has blockers besides the owner's approval: {}",
+            blockers.join(" | ")
+        )));
+    }
     Ok(None)
 }
 

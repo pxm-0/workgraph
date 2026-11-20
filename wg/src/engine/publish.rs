@@ -48,6 +48,11 @@ pub fn refusal(ctx: &RunCtx, k: &Kernel, title: &str) -> Result<Option<String>, 
             "a gate check has no passing result at the current tree".into(),
         ));
     }
+    if !k.qa_verified_at(&tree) {
+        return Ok(Some(
+            "a QA check has no passing result at the current tree".into(),
+        ));
+    }
     if !k
         .review_pass
         .as_ref()

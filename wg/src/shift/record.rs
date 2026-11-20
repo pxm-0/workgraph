@@ -20,9 +20,11 @@ pub struct TaskRecord {
     pub runs: Vec<String>,
     pub body_sha256: String,
     /// `in-shift`, `pr-open`, `needs-decision`, `stuck`, `parked`, `incident`, `approved` (finalize
-    /// passed, the push or `gh pr ready` still to do), `verified`, `gone`.
+    /// passed, the push or `gh pr ready` still to do), `verified`, `release-ready`,
+    /// `release-stuck`, `gone`.
     pub status: String,
-    /// The local evidence commit `wg approve` made, while the record is `approved`.
+    /// The evidence commit `wg approve` made and pushed: the PR head the owner verified, which
+    /// the release line requires the PR to have merged at.
     #[serde(default)]
     pub approved_head: Option<String>,
     pub pr: Option<u64>,

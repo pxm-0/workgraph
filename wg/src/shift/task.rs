@@ -132,6 +132,14 @@ fn fence(text: &str) -> String {
     format!("```text\n{}\n```", text.replace("```", "'''"))
 }
 
+/// The class of an incident, the only part of it that goes to GitHub.
+pub fn incident_class(reason: &str) -> &'static str {
+    ["guard", "approval", "contract", "managed", "token"]
+        .into_iter()
+        .find(|c| reason.contains(c))
+        .unwrap_or("integrity")
+}
+
 /// The issue comment for an outcome. LLM-written text is fenced as data, never markdown.
 fn comment(repo: &str, n: u64, shift: &str, d: &Done) -> String {
     match d.kind {
@@ -158,10 +166,7 @@ fn comment(repo: &str, n: u64, shift: &str, d: &Done) -> String {
             )
         }
         Kind::Incident => {
-            let class = ["guard", "approval", "contract", "managed", "token"]
-                .into_iter()
-                .find(|c| d.reason.contains(c))
-                .unwrap_or("integrity");
+            let class = incident_class(&d.reason);
             format!("An incident aborted this task (class: {class}). The shift stopped; details are in the owner's journal.")
         }
         Kind::Parked if d.resumable() => format!(

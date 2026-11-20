@@ -159,6 +159,7 @@ pub fn build(dirs: &Dirs, id: &str) -> Result<Value, String> {
             "finished": releases,
             "parked": of("release_parked"),
             "waiting": of("release_waits"),
+            "errors": of("release_error"),
         },
         "tasks": tasks,
         "stuck": pick("stuck"),
@@ -296,12 +297,45 @@ pub fn markdown(r: &Value) -> String {
             crate::ids::one_line(e["why"].as_str().unwrap_or(""), 300)
         )
     });
+    // A stuck release waits for the owner; an errored one is tried again by the next shift.
+    let stuck_releases: Vec<String> = r["releases"]["finished"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|e| e["outcome"] == "release-stuck")
+        .map(|e| {
+            format!(
+                "- {}#{} (PR #{}): {}. Fix the cause, then `wg shift retry-release --repo {} --issue {}`.",
+                s(e, "repo"),
+                e["issue"],
+                e["pr"],
+                crate::ids::one_line(e["note"].as_str().unwrap_or(""), 300),
+                s(e, "repo"),
+                e["issue"]
+            )
+        })
+        .chain(
+            r["releases"]["errors"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|e| {
+                    format!(
+                        "- {}#{} (PR #{}): the release errored and is tried again next shift: {}",
+                        s(e, "repo"),
+                        e["issue"],
+                        e["pr"],
+                        crate::ids::one_line(e["why"].as_str().unwrap_or(""), 300)
+                    )
+                }),
+        )
+        .collect();
     let stale = match r["staleLockPid"].as_u64() {
         Some(pid) => format!("\n\nThe previous shift (pid {pid}) died holding the lock."),
         None => String::new(),
     };
     format!(
-        "# Shift {}\n\nStopped: {}{stale}\n\n## Needs you\n\n### Incidents\n{}\n{}\n\n### Decisions\n{}\n\n### Approvals\n{}\n\n### Releases at the ready-to-release gate\n{}\n\n### Parked\n{}\n\n## Stuck\n{}\n\n## Skipped\n{}\n{}\n\n## Sandbox\n\n{}\n\n## Rules\n{}\n\n## Spend\n\nTotal ${} (calls with unknown cost: {})\n\n```json\n{}\n```\n",
+        "# Shift {}\n\nStopped: {}{stale}\n\n## Needs you\n\n### Incidents\n{}\n{}\n\n### Decisions\n{}\n\n### Approvals\n{}\n\n### Releases at the ready-to-release gate\n{}\n\n### Parked\n{}\n\n## Stuck\n{}\n\n### Releases stuck\n{}\n\n## Skipped\n{}\n{}\n\n## Sandbox\n\n{}\n\n## Rules\n{}\n\n## Spend\n\nTotal ${} (calls with unknown cost: {})\n\n```json\n{}\n```\n",
         s(r, "shift"),
         r["stopped"],
         list(&n["incidents"], &task_line),
@@ -314,6 +348,7 @@ pub fn markdown(r: &Value) -> String {
         )),
         list(&n["parked"], &parked),
         list(&r["stuck"], &task_line),
+        if stuck_releases.is_empty() { "- none".to_string() } else { stuck_releases.join("\n") },
         list(&r["skippedRepos"], &|e| format!("- repo {}: {}", s(e, "repo"), s(e, "why"))),
         list(&r["skippedIssues"], &|e| format!("- {}#{}: {}", s(e, "repo"), e["issue"], s(e, "why"))),
         sandbox,
@@ -416,6 +451,17 @@ mod tests {
             "outcome": "release-ready", "run": "r-6" }),
         )
         .unwrap();
+        j.append(
+            "release_finished",
+            json!({ "repo": "o/r", "issue": 10, "pr": 11, "merge": "def",
+            "outcome": "release-stuck", "run": "r-10", "note": "stage rehearse: sandbox steps failed" }),
+        )
+        .unwrap();
+        j.append(
+            "release_error",
+            json!({ "repo": "o/r", "issue": 12, "pr": 13, "merge": "ghi", "why": "gh timed out" }),
+        )
+        .unwrap();
         let led = |run: &str, provider: &str, cost: Value| {
             json!({ "run": run, "label": "read", "stage": "read",
             "provider": provider, "model_id": "opus", "cost_micros": cost })
@@ -484,6 +530,13 @@ mod tests {
         );
         assert!(md.contains("AC-1 passed") && md.contains("pid 4242"));
         assert!(md.contains("- r-1: added [r9], revised [], pruned [r2]"));
+        assert!(
+            at("## Stuck") < at("### Releases stuck")
+                && md.contains("- o/r#10 (PR #11): stage rehearse: sandbox steps failed. Fix the cause, then `wg shift retry-release --repo o/r --issue 10`.")
+                && md.contains("- o/r#12 (PR #13): the release errored and is tried again next shift: gh timed out"),
+            "{md}"
+        );
+        assert_eq!(r["releases"]["errors"][0]["issue"], 12);
         assert_eq!(latest(&dirs).unwrap().as_deref(), Some("20261120-0130"));
     }
 }
