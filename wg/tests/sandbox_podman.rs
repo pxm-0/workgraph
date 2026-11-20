@@ -322,11 +322,9 @@ fn the_container_doctor_passes_and_fails_closed_on_each_planted_breach() {
         ("cap", "capabilities"),
     ] {
         let r = ok(plant);
-        let failed = r["failed"].as_str().unwrap_or("");
-        assert!(
-            failed.contains(&format!("container_isolation_failed:{check}"))
-                || (plant == "bind" && failed.contains("host_paths")),
-            "{plant}: {r}"
-        );
+        assert_eq!(r["ok"], false, "{plant}: {r}");
+        let whys: Vec<&str> = r["checks"].as_array().unwrap().iter().filter_map(|c| c["why"].as_str()).collect();
+        let want = format!("container_isolation_failed:{check}");
+        assert!(whys.iter().any(|w| w.contains(&want)), "{plant}: {r}");
     }
 }
