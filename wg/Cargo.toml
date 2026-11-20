@@ -40,6 +40,14 @@ name = "hostile_publish"
 path = "tests/hostile_publish.rs"
 
 [[test]]
+name = "qa_flow"
+path = "tests/qa_flow.rs"
+
+[[test]]
+name = "release_e2e"
+path = "tests/release_e2e.rs"
+
+[[test]]
 name = "runner"
 path = "tests/runner.rs"
 

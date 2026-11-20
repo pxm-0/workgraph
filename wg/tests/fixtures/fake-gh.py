@@ -3,7 +3,8 @@
 state file named by FAKE_GH_STATE, applies label edits, comments and PRs to it, and logs every argv.
 Label edits are made by FAKE_GH_ACTOR (the owner's token), PR heads are read from the local bare
 origin named in the state. `fail` maps a command ("pr ready") to how many more calls of it fail,
-and `touch` maps one to a file it creates when it runs (a STOP file mid-publish, say)."""
+and `touch` maps one to a file it creates when it runs (a STOP file mid-publish, say). A PR the
+test merged carries `state: MERGED` and its `mergeCommit` oid."""
 import json
 import os
 import subprocess
@@ -52,7 +53,10 @@ def head(repo, branch):
 
 def pr_view(p):
     p["headRefOid"] = head(p["repo"], p["headRefName"])
-    return {k: p[k] for k in ["number", "url", "state", "headRefOid"]}
+    view = {k: p[k] for k in ["number", "url", "state", "headRefOid"]}
+    if "mergeCommit" in args[-1]:  # `pr view --json ...,mergeCommit`: a merged PR names its merge
+        view["mergeCommit"] = {"oid": p["mergeCommit"]} if p.get("mergeCommit") else None
+    return view
 
 
 command = " ".join(args[:2])
