@@ -1,5 +1,6 @@
 # The one toolchain image: devcontainer, compose dev stack and CI all build this file.
-# Base images are pinned by digest; bump the tag and digest together.
+# Base images are pinned by digest; bump the tag and digest together, and the rust tag with
+# rust-toolchain.toml.
 FROM node:22.23.5-trixie-slim@sha256:68c76cfad89921b927eae28ba21407475e29d0ce450afcdbe70c1532db042b64 AS node
 
 FROM rust:1.100.0-slim-trixie@sha256:6f14b2b4b278ec0d50aa1d69541c304ce0f95e0f6268487aa9924af1c2e9aebe
