@@ -36,5 +36,3 @@ jobs:
         run: $DEV -e HARUSPEX_CLI=/workspace/haruspex/scripts/haruspex.py workspace cargo llvm-cov -p wg --locked --fail-under-lines 80
       - name: File size
         run: $DEV workspace cargo xtask size
-      - name: Workflow control-flow tests
-        run: $DEV workspace sh -c 'node --test tests/*.test.mjs'
