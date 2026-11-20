@@ -45,9 +45,11 @@ pub fn out_of_scope(
 ) -> Vec<String> {
     let planned: Vec<&String> = units.iter().flat_map(|u| u.files.iter()).collect();
     let in_plan = |f: &String| {
-        planned
-            .iter()
-            .any(|p| *p == f || (f.ends_with('/') && p.starts_with(f.as_str())))
+        planned.iter().any(|p| {
+            *p == f
+                || (f.ends_with('/') && p.starts_with(f.as_str()))
+                || (p.ends_with('/') && f.starts_with(p.as_str()))
+        })
     };
     let harness = |f: &String| {
         f.starts_with(".haruspex/") || (initialized && (f == "AGENTS.md" || f == "CLAUDE.md"))
@@ -122,5 +124,19 @@ mod tests {
         assert_eq!(got, s(&["lib/", "stray.txt"]));
         let not_init = out_of_scope(&s(&["CLAUDE.md"]), &units, &[], &[], false);
         assert_eq!(not_init, s(&["CLAUDE.md"]));
+    }
+
+    #[test]
+    fn a_file_inside_a_planned_directory_is_in_scope() {
+        let units = [u("m", &["db/migrations/"], true)];
+        let changed = s(&[
+            "db/migrations/001.sql",
+            "db/migrationsx.sql",
+            "db/other.sql",
+        ]);
+        assert_eq!(
+            out_of_scope(&changed, &units, &[], &[], false),
+            s(&["db/migrationsx.sql", "db/other.sql"])
+        );
     }
 }
