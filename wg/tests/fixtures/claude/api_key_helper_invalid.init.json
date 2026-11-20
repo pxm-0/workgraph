@@ -1,0 +1,22 @@
+{
+  "type": "system",
+  "subtype": "init",
+  "apiKeySource": "apiKeyHelper",
+  "model": "claude-haiku-5-5",
+  "permissionMode": "dontAsk",
+  "claude_code_version": "2.1.311",
+  "plugins": [
+    "superpowers",
+    "mattpocock-skills",
+    "ecc",
+    "ponytail",
+    "i-have-adhd",
+    "workgraph",
+    "haruspex",
+    "cc-plugin-agents-md",
+    "cc-plugin-telemetry",
+    "cc-plugin-plugin-authoring"
+  ],
+  "mcp_server_count_by_source": {},
+  "project_mcp_servers": []
+}

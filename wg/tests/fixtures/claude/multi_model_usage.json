@@ -1,0 +1,119 @@
+{
+  "duration_api_ms": 5827,
+  "stop_reason": "end_turn",
+  "session_id": "2c56a13a-fdfa-49ce-93a3-b96c58930011",
+  "total_cost_usd": 0.17110382500000001,
+  "usage": {
+    "input_tokens": 4,
+    "cache_creation_input_tokens": 39530,
+    "cache_read_input_tokens": 65680,
+    "output_tokens": 209,
+    "output_tokens_details": {
+      "thinking_tokens": 0
+    },
+    "server_tool_use": {
+      "web_search_requests": 0,
+      "web_fetch_requests": 0
+    },
+    "service_tier": "standard",
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 39530,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "inference_geo": "global",
+    "iterations": [
+      {
+        "input_tokens": 2,
+        "output_tokens": 41,
+        "cache_read_input_tokens": 52402,
+        "cache_creation_input_tokens": 406,
+        "cache_creation": {
+          "ephemeral_5m_input_tokens": 0,
+          "ephemeral_1h_input_tokens": 406
+        },
+        "type": "message"
+      }
+    ],
+    "speed": "standard",
+    "fallback_credit": null
+  },
+  "modelUsage": {
+    "claude-sonnet-5-5": {
+      "inputTokens": 4,
+      "outputTokens": 209,
+      "cacheReadInputTokens": 65680,
+      "cacheCreationInputTokens": 39530,
+      "webSearchRequests": 0,
+      "costUSD": 0.16678600000000002,
+      "contextWindow": 1000000,
+      "maxOutputTokens": 128000,
+      "thinkingTokens": 0,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationEphemeral1hInputTokens": 39530,
+      "canonicalModel": "claude-sonnet-5-5",
+      "provider": "firstParty",
+      "costBasis": "list"
+    },
+    "claude-haiku-5-5": {
+      "inputTokens": 2,
+      "outputTokens": 75,
+      "cacheReadInputTokens": 0,
+      "cacheCreationInputTokens": 34241,
+      "webSearchRequests": 0,
+      "costUSD": 0.004317825,
+      "contextWindow": 1000000,
+      "maxOutputTokens": 128000,
+      "thinkingTokens": 72,
+      "cacheCreationEphemeral5mInputTokens": 34241,
+      "cacheCreationEphemeral1hInputTokens": 0,
+      "canonicalModel": "claude-haiku-5-5",
+      "provider": "firstParty",
+      "costBasis": "list"
+    }
+  },
+  "permission_denials": [],
+  "terminal_reason": "completed",
+  "fast_mode_state": "off",
+  "fast_mode_disabled_reason": "sdk_opt_in_required",
+  "subagent_stats": {
+    "spawned": 1,
+    "requested": {
+      "background": 0,
+      "foreground": 1,
+      "unset": 0
+    },
+    "started_in_background": 0,
+    "max_depth": 1,
+    "spawned_by_subagents": 0,
+    "completed": 1,
+    "failed": 0,
+    "killed": {
+      "parent": 0,
+      "user": 0,
+      "system": 0
+    },
+    "refused": {
+      "depth_limit": 0,
+      "concurrency_limit": 0,
+      "budget": 0
+    },
+    "by_type": {
+      "general-purpose": 1
+    }
+  },
+  "safety_stops": 0,
+  "is_error": false,
+  "num_turns": 2,
+  "subtype": "success",
+  "api_error_status": null,
+  "result": "7*6 = **42**\n\nI ran it through one Haiku subagent, as you asked. I didn't check the answer independently.",
+  "ttft_ms": 3060,
+  "type": "result",
+  "duration_ms": 19609,
+  "uuid": "a27a29a0-7df0-4c29-acfc-ac594b471a63",
+  "ttft_stream_ms": 2360,
+  "time_to_request_ms": 391,
+  "first_content_frame_ms": 2360,
+  "queued_turn_count": 0,
+  "result_index": 0
+}

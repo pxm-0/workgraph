@@ -1,0 +1,120 @@
+{
+  "duration_api_ms": 16905,
+  "stop_reason": "tool_use",
+  "session_id": "8490cf54-0f8a-4438-bc92-f80a6729bbc6",
+  "total_cost_usd": 0.0130306,
+  "usage": {
+    "input_tokens": 10,
+    "cache_creation_input_tokens": 51477,
+    "cache_read_input_tokens": 149020,
+    "output_tokens": 2488,
+    "output_tokens_details": {
+      "thinking_tokens": 961
+    },
+    "server_tool_use": {
+      "web_search_requests": 0,
+      "web_fetch_requests": 0
+    },
+    "service_tier": "standard",
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 51477,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "inference_geo": "global",
+    "iterations": [
+      {
+        "input_tokens": 4,
+        "output_tokens": 407,
+        "cache_read_input_tokens": 50417,
+        "cache_creation_input_tokens": 1060,
+        "cache_creation": {
+          "ephemeral_5m_input_tokens": 0,
+          "ephemeral_1h_input_tokens": 1060
+        },
+        "type": "message"
+      }
+    ],
+    "speed": "standard",
+    "fallback_credit": null
+  },
+  "modelUsage": {
+    "claude-haiku-5-5": {
+      "inputTokens": 10,
+      "outputTokens": 2488,
+      "cacheReadInputTokens": 149020,
+      "cacheCreationInputTokens": 51477,
+      "webSearchRequests": 0,
+      "costUSD": 0.0130306,
+      "contextWindow": 1000000,
+      "maxOutputTokens": 128000,
+      "thinkingTokens": 961,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationEphemeral1hInputTokens": 51477,
+      "canonicalModel": "claude-haiku-5-5",
+      "provider": "firstParty",
+      "costBasis": "list"
+    }
+  },
+  "permission_denials": [
+    {
+      "tool_name": "Bash",
+      "tool_use_id": "toolu_01J7uFatqQxC2Gr47nmfZyBa",
+      "tool_input": {
+        "command": "python3 check.py; echo \"exit=$?\"",
+        "description": "Run check.py and report exit code"
+      }
+    }
+  ],
+  "terminal_reason": "completed",
+  "fast_mode_state": "off",
+  "fast_mode_disabled_reason": "sdk_opt_in_required",
+  "subagent_stats": {
+    "spawned": 0,
+    "requested": {
+      "background": 0,
+      "foreground": 0,
+      "unset": 0
+    },
+    "started_in_background": 0,
+    "max_depth": 0,
+    "spawned_by_subagents": 0,
+    "completed": 0,
+    "failed": 0,
+    "killed": {
+      "parent": 0,
+      "user": 0,
+      "system": 0
+    },
+    "refused": {
+      "depth_limit": 0,
+      "concurrency_limit": 0,
+      "budget": 0
+    },
+    "by_type": {}
+  },
+  "safety_stops": 0,
+  "is_error": false,
+  "num_turns": 7,
+  "subtype": "success",
+  "api_error_status": null,
+  "result": "{\"verdict\":\"pass\",\"findings\":[\"LOW, pre-existing, not in this diff: add(a, b) returns a - b in calc.py line 2. Not changed; fix as a separate change if wanted.\",\"LOW, test coverage: check.py asserts only is_even(4) is True and is_even(3) is False. No tests for 0, negatives, or non-integers. Python % handles negatives correctly, so the code is fine, but it is untested.\",\"LOW, input handling: no validation. is_even(4.0) returns True, is_even(2.5) returns False, and a string raises TypeError. Add a strict integer check at the boundary only if the spec requires integers only.\",\"python3 check.py was NOT run: Bash was denied in don't-ask mode and was not worked around. The pass verdict rests on reading check.py and calc.py; by hand, the assertions hold (4 % 2 == 0, 3 % 2 == 1). Run it to confirm.\",\"No CRITICAL or HIGH issues. The diff adds only is_even and matches the request.\"]}",
+  "structured_output": {
+    "verdict": "pass",
+    "findings": [
+      "LOW, pre-existing, not in this diff: add(a, b) returns a - b in calc.py line 2. Not changed; fix as a separate change if wanted.",
+      "LOW, test coverage: check.py asserts only is_even(4) is True and is_even(3) is False. No tests for 0, negatives, or non-integers. Python % handles negatives correctly, so the code is fine, but it is untested.",
+      "LOW, input handling: no validation. is_even(4.0) returns True, is_even(2.5) returns False, and a string raises TypeError. Add a strict integer check at the boundary only if the spec requires integers only.",
+      "python3 check.py was NOT run: Bash was denied in don't-ask mode and was not worked around. The pass verdict rests on reading check.py and calc.py; by hand, the assertions hold (4 % 2 == 0, 3 % 2 == 1). Run it to confirm.",
+      "No CRITICAL or HIGH issues. The diff adds only is_even and matches the request."
+    ]
+  },
+  "ttft_ms": 3373,
+  "type": "result",
+  "duration_ms": 29755,
+  "uuid": "63321f65-fbc7-4667-a76b-a3f2373af8b9",
+  "ttft_stream_ms": 2144,
+  "time_to_request_ms": 345,
+  "first_content_frame_ms": 2145,
+  "queued_turn_count": 0,
+  "result_index": 0
+}

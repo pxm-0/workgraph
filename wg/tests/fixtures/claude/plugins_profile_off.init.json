@@ -1,0 +1,28 @@
+{
+  "type": "system",
+  "subtype": "init",
+  "apiKeySource": "none",
+  "model": "claude-haiku-5-5",
+  "permissionMode": "dontAsk",
+  "claude_code_version": "2.1.311",
+  "plugins": [
+    "mattpocock-skills",
+    "ecc",
+    "haruspex",
+    "jtbd-base",
+    "productivity",
+    "marketing",
+    "finance",
+    "engineering",
+    "design",
+    "cowork-plugin-management",
+    "cc-plugin-agents-md",
+    "cc-plugin-telemetry",
+    "cc-plugin-plugin-authoring"
+  ],
+  "mcp_server_count_by_source": {
+    "plugin": 28,
+    "claudeai": 5
+  },
+  "project_mcp_servers": []
+}

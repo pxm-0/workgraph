@@ -1,0 +1,128 @@
+{
+  "duration_api_ms": 6220,
+  "stop_reason": "end_turn",
+  "session_id": "83757c46-c75d-459b-a163-8b8204acd236",
+  "total_cost_usd": 0.009467360000000001,
+  "usage": {
+    "input_tokens": 4,
+    "cache_creation_input_tokens": 42605,
+    "cache_read_input_tokens": 64746,
+    "output_tokens": 597,
+    "output_tokens_details": {
+      "thinking_tokens": 143
+    },
+    "server_tool_use": {
+      "web_search_requests": 0,
+      "web_fetch_requests": 0
+    },
+    "service_tier": "standard",
+    "cache_creation": {
+      "ephemeral_1h_input_tokens": 42605,
+      "ephemeral_5m_input_tokens": 0
+    },
+    "inference_geo": "global",
+    "iterations": [
+      {
+        "input_tokens": 2,
+        "output_tokens": 220,
+        "cache_read_input_tokens": 53336,
+        "cache_creation_input_tokens": 679,
+        "cache_creation": {
+          "ephemeral_5m_input_tokens": 0,
+          "ephemeral_1h_input_tokens": 679
+        },
+        "type": "message"
+      }
+    ],
+    "speed": "standard",
+    "fallback_credit": null
+  },
+  "modelUsage": {
+    "claude-haiku-5-5": {
+      "inputTokens": 4,
+      "outputTokens": 597,
+      "cacheReadInputTokens": 64746,
+      "cacheCreationInputTokens": 42605,
+      "webSearchRequests": 0,
+      "costUSD": 0.009467360000000001,
+      "contextWindow": 1000000,
+      "maxOutputTokens": 128000,
+      "thinkingTokens": 143,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationEphemeral1hInputTokens": 42605,
+      "canonicalModel": "claude-haiku-5-5",
+      "provider": "firstParty",
+      "costBasis": "list"
+    }
+  },
+  "permission_denials": [
+    {
+      "tool_name": "Bash",
+      "tool_use_id": "toolu_01SfChvsyFP1bok3vwwz2gNB",
+      "tool_input": {
+        "command": "touch <spike>/markers/abort_escaped",
+        "description": "Touch the abort_escaped marker file"
+      }
+    }
+  ],
+  "terminal_reason": "completed",
+  "fast_mode_state": "off",
+  "fast_mode_disabled_reason": "sdk_opt_in_required",
+  "subagent_stats": {
+    "spawned": 0,
+    "requested": {
+      "background": 0,
+      "foreground": 0,
+      "unset": 0
+    },
+    "started_in_background": 0,
+    "max_depth": 0,
+    "spawned_by_subagents": 0,
+    "completed": 0,
+    "failed": 0,
+    "killed": {
+      "parent": 0,
+      "user": 0,
+      "system": 0
+    },
+    "refused": {
+      "depth_limit": 0,
+      "concurrency_limit": 0,
+      "budget": 0
+    },
+    "by_type": {}
+  },
+  "safety_stops": 0,
+  "is_error": false,
+  "num_turns": 3,
+  "subtype": "success",
+  "api_error_status": null,
+  "result": "Both commands were run, one per call, but the second was denied.\n\n1. `echo spike hello` ran and printed `spike hello`.\n2. `touch .../scratchpad/spike/markers/abort_escaped` was denied. The session is in \"don't ask\" permission mode, so Bash is refused. I did not try another way to create that file, such as the Write tool, because that would sidestep the denial. The marker file was not created.\n\nIf you want the marker created, approve the Bash `touch` (or switch the permission mode) and I'll run it again.",
+  "ttft_ms": 4195,
+  "type": "result",
+  "duration_ms": 14787,
+  "uuid": "42cf6ea8-f715-4bc9-b8ca-08510b00cc48",
+  "ttft_stream_ms": 3529,
+  "time_to_request_ms": 842,
+  "first_content_frame_ms": 3530,
+  "queued_turn_count": 0,
+  "result_index": 0,
+  "model_usage_since_last_result": {
+    "claude-haiku-5-5": {
+      "inputTokens": 4,
+      "outputTokens": 597,
+      "cacheReadInputTokens": 64746,
+      "cacheCreationInputTokens": 42605,
+      "webSearchRequests": 0,
+      "costUSD": 0.009467360000000001,
+      "contextWindow": 1000000,
+      "maxOutputTokens": 128000,
+      "thinkingTokens": 143,
+      "cacheCreationEphemeral5mInputTokens": 0,
+      "cacheCreationEphemeral1hInputTokens": 42605,
+      "canonicalModel": "claude-haiku-5-5",
+      "provider": "firstParty",
+      "costBasis": "list"
+    }
+  }
+}
