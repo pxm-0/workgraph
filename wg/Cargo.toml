@@ -30,3 +30,11 @@ path = "tests/claude_fixtures.rs"
 [[test]]
 name = "flow"
 path = "tests/flow.rs"
+
+[[test]]
+name = "hostile"
+path = "tests/hostile.rs"
+
+[[test]]
+name = "runner"
+path = "tests/runner.rs"

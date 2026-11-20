@@ -318,6 +318,12 @@ impl Loop<'_> {
             if a.capped {
                 return Ok(Some(End::Parked("call cap".into())));
             }
+            if a.reply == Err(LlmFailure::RateLimited) {
+                return Ok(Some(End::Parked(format!(
+                    "rate limited: no usable provider left for {}",
+                    c.label
+                ))));
+            }
             if let Err(e) = self.k.integrity(self.ctx, &c.label) {
                 return Ok(Some(if e.starts_with("incident") {
                     End::Incident(e)

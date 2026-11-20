@@ -59,6 +59,13 @@ pub struct Opts {
     pub approve_checks: bool,
     pub hx: Option<Arc<FakeHx>>,
     pub checks_fail_to_start: Option<&'static str>,
+    pub max_calls: u32,
+    /// Appended to factory.toml (providers, auth).
+    pub config_extra: String,
+    /// Answers a spawn with raw output before the scripted replies (envelope-level tests).
+    pub raw: Arc<dyn Fn(&Spawn) -> Option<RawOutput> + Send + Sync>,
+    /// The guard logs an incident while this label runs.
+    pub guard_incident: Option<&'static str>,
 }
 
 impl Default for Opts {
@@ -83,6 +90,10 @@ impl Default for Opts {
             approve_checks: true,
             hx: None,
             checks_fail_to_start: None,
+            max_calls: 60,
+            config_extra: String::new(),
+            raw: Arc::new(|_| None),
+            guard_incident: None,
         }
     }
 }
@@ -100,6 +111,8 @@ pub struct Call {
 pub struct FakeProc {
     pub calls: Mutex<Vec<Call>>,
     pub reply: Box<dyn Fn(&str, &str) -> Value + Send + Sync>,
+    pub raw: Arc<dyn Fn(&Spawn) -> Option<RawOutput> + Send + Sync>,
+    pub guard_incident: Option<&'static str>,
 }
 
 fn flag(argv: &[String], name: &str) -> Option<String> {
@@ -119,6 +132,22 @@ impl Proc for FakeProc {
             argv: s.argv.clone(),
             env: s.env.clone(),
         });
+        if self.guard_incident == Some(s.label.as_str()) {
+            let manifest = s
+                .env
+                .iter()
+                .find(|(k, _)| k == "WG_GUARD_MANIFEST")
+                .unwrap()
+                .1
+                .clone();
+            let m: Value =
+                serde_json::from_str(&std::fs::read_to_string(manifest).unwrap()).unwrap();
+            let line = json!({ "label": s.label, "decision": "incident", "reason": "write to protected .git/config", "effect": false });
+            std::fs::write(m["log"].as_str().unwrap(), format!("{line}\n")).unwrap();
+        }
+        if let Some(raw) = (self.raw)(s) {
+            return raw;
+        }
         let v = (self.reply)(&s.label, &s.stdin);
         if let Some(raw) = v.as_str() {
             return RawOutput {
@@ -284,7 +313,11 @@ pub fn temp(name: &str) -> PathBuf {
 }
 
 pub fn config(checks: &[(&str, &str)], approve: bool) -> Config {
-    let mut text = String::from("[limits]\nmax_calls_per_task = 60\n");
+    config_with(checks, approve, 60, "")
+}
+
+pub fn config_with(checks: &[(&str, &str)], approve: bool, max_calls: u32, extra: &str) -> Config {
+    let mut text = format!("{extra}\n[limits]\nmax_calls_per_task = {max_calls}\n");
     if approve {
         for (n, c) in checks {
             text.push_str(&format!(
@@ -311,7 +344,7 @@ pub fn run_with(o: Opts, step: Step) -> Out {
     ] {
         std::fs::create_dir_all(&d).unwrap();
     }
-    let cfg = config(&o.checks, o.approve_checks);
+    let cfg = config_with(&o.checks, o.approve_checks, o.max_calls, &o.config_extra);
     let units = o.units.clone();
     let criteria: Vec<Value> = units
         .iter()
@@ -328,6 +361,8 @@ pub fn run_with(o: Opts, step: Step) -> Out {
         o.answer.clone(),
     );
     let proc = FakeProc {
+        raw: o.raw.clone(),
+        guard_incident: o.guard_incident,
         calls: Mutex::new(vec![]),
         reply: Box::new(move |label, prompt| {
             if let Some(v) = answer(label, prompt) {
