@@ -65,6 +65,29 @@ pub fn run_gate(
     )
 }
 
+/// The canary for shift `id` (design §12.5): its journal and its runs' journals; rolls back when
+/// this is the first shift on a newly installed binary and it was unhealthy.
+pub fn canary(dirs: &Dirs, cfg: &Config, gh: &Gh, id: &str) -> Result<Value, String> {
+    crate::ids::run_id(id).map_err(|_| format!("{id:?} is not a shift id"))?;
+    let shift = crate::journal::read(&dirs.shifts().join(id).join("journal.jsonl"))?;
+    let runs: Vec<Vec<Value>> = shift
+        .iter()
+        .filter_map(|e| e["run"].as_str())
+        .filter_map(|r| crate::journal::read(&dirs.run(r).join("journal.jsonl")).ok())
+        .collect();
+    let co = checkout(cfg).ok();
+    let env = rollback::Env {
+        dirs,
+        gh,
+        repo: &cfg.self_improve.repo,
+        checkout: co.as_deref(),
+    };
+    Ok(match rollback::after_shift(&env, &shift, &runs)? {
+        Some(r) => json!({ "healthy": false, "rollback": r }),
+        None => json!({ "healthy": true }),
+    })
+}
+
 fn status(dirs: &Dirs, cfg: &Config) -> Result<Value, String> {
     let st = state::load(&dirs.self_state())?;
     let ledger = Ledger::at(&dirs.self_ledger());
@@ -132,7 +155,12 @@ pub fn self_(args: &[String]) -> Result<Value, String> {
             Ok(json!({ "paused": false, "merge_enabled": st.merge_enabled }))
         }
         "status" => status(&dirs, &cfg),
-        _ => Err("usage: wg self gate --pr N | install --sha S | rollback [--reason R] | pause [--reason R] | resume [--enable-merge] | status".into()),
+        "canary" => {
+            let a = parse(rest, &[])?;
+            a.only(&["shift"])?;
+            canary(&dirs, &cfg, &g, a.need("shift")?)
+        }
+        _ => Err("usage: wg self gate --pr N | install --sha S | rollback [--reason R] | canary --shift ID | pause [--reason R] | resume [--enable-merge] | status".into()),
     }
 }
 

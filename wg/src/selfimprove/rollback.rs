@@ -146,6 +146,15 @@ pub fn after_shift(e: &Env, shift: &[Value], runs: &[Vec<Value>]) -> Result<Opti
     let Some(last) = installed.iter().rev().find(|i| i["dir"] == cur.as_str()) else {
         return Ok(None);
     };
+    // Only a shift that ran this binary judges it.
+    let bin_hash = crate::haruspex::cli::sha256_file(&e.dirs.bin().join(&cur).join("wg"))?;
+    let ran = shift
+        .iter()
+        .find(|x| x["kind"] == "shift_started")
+        .and_then(|x| x["binary"].as_str());
+    if ran != Some(&bin_hash[..12]) {
+        return Ok(None);
+    }
     let judged = ledger
         .of_kind("canary")?
         .iter()

@@ -102,3 +102,11 @@ path = "tests/shift_sandbox.rs"
 [[test]]
 name = "self_gate"
 path = "tests/self_gate.rs"
+
+[[test]]
+name = "self_rollback"
+path = "tests/self_rollback.rs"
+
+[[test]]
+name = "eval_capture"
+path = "tests/eval_capture.rs"
