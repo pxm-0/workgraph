@@ -51,9 +51,34 @@ def head(repo, branch):
     return r.stdout.strip()
 
 
+def git(repo, *a):
+    r = subprocess.run(["git", "--git-dir", state["origins"][repo], *a], capture_output=True, text=True)
+    if r.returncode != 0:
+        sys.stderr.write(r.stderr)
+    return r
+
+
+def commits(p):
+    """A self PR's commits, as `gh pr view --json commits` lists them."""
+    out = git(p["repo"], "log", "--format=%H%x1f%s%x1f%b%x1e", f"refs/heads/{p['base']}..{p['headRefOid']}").stdout
+    rows = [c.strip("\n").split("\x1f") for c in out.split("\x1e") if c.strip()]
+    return [{"oid": c[0], "messageHeadline": c[1], "messageBody": c[2]} for c in reversed(rows)]
+
+
 def pr_view(p):
-    p["headRefOid"] = head(p["repo"], p["headRefName"])
+    p["headRefOid"] = head(p["repo"], p["headRefName"]) or p.get("headRefOid", "")
     view = {k: p[k] for k in ["number", "url", "state", "headRefOid"]}
+    if "title" in args[-1]:
+        view |= {"title": p.get("title", ""), "body": p.get("body", "")}
+    if "commits" in args[-1]:  # the self gate's view (design §12.3 step 1)
+        views = state.setdefault("views", {})
+        views[str(p["number"])] = views.get(str(p["number"]), 0) + 1
+        move = state.get("move_head")
+        if move and move["number"] == p["number"] and views[str(p["number"])] > move["after"]:
+            git(p["repo"], "update-ref", f"refs/heads/{p['headRefName']}", move["to"])
+            p["headRefOid"] = view["headRefOid"] = move["to"]
+        view |= {"baseRefName": p["base"], "isDraft": p["draft"], "mergeable": p.get("mergeable", "MERGEABLE"),
+                 "labels": [{"name": l} for l in p["labels"]], "commits": commits(p)}
     if "mergeCommit" in args[-1]:  # `pr view --json ...,mergeCommit`: a merged PR names its merge
         view["mergeCommit"] = {"oid": p["mergeCommit"]} if p.get("mergeCommit") else None
     return view
@@ -90,6 +115,16 @@ if args[:2] == ["issue", "comment"]:
     with open(opt("--body-file")) as f:
         issue(opt("-R"), args[2]).setdefault("comments", []).append(f.read())
     save_and_exit("")
+if args[:2] == ["api", "--paginate"] and "/check-runs" in args[2]:
+    sha = args[2].split("/")[-2]
+    runs = state.get("check_runs", [])
+    save_and_exit("\n".join(json.dumps({"name": r["name"], "head_sha": r.get("head_sha", sha), "app": r.get("app", "github-actions"),
+                                         "status": r.get("status", "completed"), "conclusion": r.get("conclusion", "success"),
+                                         "suite": i + 1}) for i, r in enumerate(runs)))
+if args[:2] == ["api", "--paginate"] and "/actions/runs?head_sha=" in args[2]:
+    sha = args[2].split("=")[-1]
+    runs = state.get("check_runs", [])
+    save_and_exit("\n".join(json.dumps({"suite": i + 1, "path": r["workflow"], "head_sha": sha}) for i, r in enumerate(runs)))
 if args[0] == "api" and args[1] == "--paginate":
     _, owner, name, _, n, _ = args[2].split("/")
     lines = [json.dumps(e) for e in issue(f"{owner}/{name}", n).get("events", [])]
@@ -102,6 +137,59 @@ if args[:2] == ["label", "create"]:
     names = state.setdefault("labels", {}).setdefault(opt("-R"), [])
     if args[2] not in names:
         names.append(args[2])
+    save_and_exit("")
+if args[:2] == ["pr", "list"] and "--label" in args:
+    repo, label = opt("-R"), opt("--label")
+    save_and_exit([{"number": p["number"]} for p in state.setdefault("prs", [])
+                   if p["repo"] == repo and p.get("state") == "OPEN" and label in p["labels"]])
+if args[:2] == ["pr", "edit"]:
+    p = next(p for p in state["prs"] if p["repo"] == opt("-R") and p["number"] == int(args[2]))
+    for l in opts("--add-label"):
+        if l not in p["labels"]:
+            p["labels"].append(l)
+    save_and_exit("")
+if args[:2] == ["pr", "comment"]:
+    p = next(p for p in state["prs"] if p["repo"] == opt("-R") and p["number"] == int(args[2]))
+    with open(opt("--body-file")) as f:
+        p.setdefault("comments", []).append(f.read())
+    save_and_exit("")
+if args[:2] == ["pr", "merge"]:
+    p = next(p for p in state["prs"] if p["repo"] == opt("-R") and p["number"] == int(args[2]))
+    h = head(p["repo"], p["headRefName"])
+    if "--admin" in args or opt("--match-head-commit") != h or "--squash" not in args:
+        sys.stderr.write("fake gh: merge refused: head moved, or not a pinned squash\n")
+        save_and_exit(None, 1)
+    tree = git(p["repo"], "rev-parse", f"{h}^{{tree}}").stdout.strip()
+    main = git(p["repo"], "rev-parse", f"refs/heads/{p['base']}").stdout.strip()
+    m = git(p["repo"], "-c", "user.name=gh", "-c", "user.email=gh@example.invalid", "commit-tree", tree, "-p", main,
+            "-m", f"{p['title']} (#{p['number']})").stdout.strip()
+    git(p["repo"], "update-ref", f"refs/heads/{p['base']}", m)
+    if "--delete-branch" in args:
+        git(p["repo"], "update-ref", "-d", f"refs/heads/{p['headRefName']}")
+    p.update({"state": "MERGED", "mergeCommit": m, "headRefOid": h})
+    save_and_exit("")
+if args[:2] == ["issue", "create"]:
+    repo = opt("-R")
+    issues = state["issues"].setdefault(repo, {})
+    n = 500 + len(issues)
+    with open(opt("--body-file")) as f:
+        body = f.read()
+    issues[str(n)] = {"number": n, "title": opt("--title"), "body": body, "author": {"login": actor},
+                      "labels": [{"name": l} for l in opts("--label")], "url": f"https://github.com/{repo}/issues/{n}",
+                      "createdAt": now}
+    save_and_exit(f"https://github.com/{repo}/issues/{n}")
+if args[:2] == ["run", "list"]:
+    save_and_exit([r for r in state.get("runs", []) if r["headSha"] == opt("--commit")])
+if args[:2] == ["run", "download"]:
+    run = next(r for r in state.get("runs", []) if str(r["databaseId"]) == args[2])
+    name, dest = opt("-n"), opt("-D")
+    src = run["artifacts"].get(name)
+    if src is None:
+        save_and_exit(None, 1)
+    os.makedirs(dest, exist_ok=True)
+    for f in os.listdir(src):
+        with open(os.path.join(src, f), "rb") as a, open(os.path.join(dest, f), "wb") as b:
+            b.write(a.read())
     save_and_exit("")
 if args[:2] == ["pr", "list"]:
     repo, branch = opt("-R"), opt("--head")
