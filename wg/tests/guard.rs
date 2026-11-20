@@ -124,6 +124,20 @@ fn corrupt_or_missing_manifests_and_bad_input_deny() {
 }
 
 #[test]
+fn the_guard_drains_its_input_before_denying() {
+    // Larger than a pipe buffer: a guard that exits before reading leaves the writer with EPIPE.
+    let g = setup("drain");
+    let big = hook(
+        "Read",
+        json!({ "file_path": "src/a.js", "pad": "x".repeat(1 << 20) }),
+    );
+    let (c, o) = guard(&g, &g.root.join("missing.json"), &big, &[]);
+    denied(c, &o);
+    let (c, o) = guard(&g, &g.manifest, &big, &[("WG_GUARD_TEST_PANIC", "1")]);
+    denied(c, &o);
+}
+
+#[test]
 fn reads_in_the_worktree_and_run_tmp_are_allowed_and_secrets_are_incidents() {
     let g = setup("reads");
     let read = |p: String| {
