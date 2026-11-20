@@ -15,9 +15,15 @@ set -eu
 WG=${WG:?set WG to a macOS wg binary}
 M=oreochiserver-sim
 IMAGE=docker.io/alpine/git@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26
+# Abort before anything if the machine is not already running: this drill never starts anything.
+orbctl list | awk -v m="$M" '$1 == m && $2 == "running" { ok = 1 } END { exit !ok }' || { echo "$M is not running" >&2; exit 1; }
 T=$(mktemp -d)
+REAL_HOME=$HOME
 export HOME="$T/home"
 mkdir -p "$HOME/.workgraph"
+# OrbStack's CLI finds its socket under $HOME/.orbstack; without this link it would try to start a VM.
+ln -s "$REAL_HOME/.orbstack" "$HOME/.orbstack"
+orbctl list | awk -v m="$M" '$1 == m && $2 == "running" { ok = 1 } END { exit !ok }' || { echo "orb cannot see $M from the drill HOME" >&2; exit 1; }
 pass() { printf 'PASS %s\n' "$1"; }
 fail() { printf 'FAIL %s\n' "$1"; exit 1; }
 
