@@ -38,3 +38,7 @@ path = "tests/hostile.rs"
 [[test]]
 name = "runner"
 path = "tests/runner.rs"
+
+[[test]]
+name = "e2e"
+path = "tests/e2e.rs"
