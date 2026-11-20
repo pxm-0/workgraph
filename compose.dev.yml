@@ -1,16 +1,16 @@
 # Dev stack (Argus docs/DEV_ENV_PROTOCOL.md). workgraph is a CLI, so there is no app service and
-# no published port: `dev` is the toolchain container for the devcontainer, the git hook and CI.
+# no published port: `workspace` is the toolchain container for the devcontainer, the git hook and CI.
 #
-#   docker compose -f compose.dev.yml run --rm dev cargo test --workspace
+#   docker compose -f compose.dev.yml run --rm workspace cargo test --workspace
 #
 # With the Haruspex CLI for the finalize tests (its checkout mounted read-only):
 #   docker compose -f compose.dev.yml run --rm -v ~/Code/nodens/haruspex:/haruspex:ro \
-#     -e HARUSPEX_CLI=/haruspex/scripts/haruspex.py dev cargo test --workspace
+#     -e HARUSPEX_CLI=/haruspex/scripts/haruspex.py workspace cargo test --workspace
 
 name: workgraph # fixed project name, so volumes never depend on the directory name
 
 services:
-  dev:
+  workspace:
     build:
       context: .devcontainer
     image: workgraph-dev:local
@@ -21,8 +21,10 @@ services:
       - cargo-registry:/usr/local/cargo/registry
       - cargo-target:/cargo-target
     environment:
-      # Build output stays in a named volume, never in the macOS checkout.
-      CARGO_TARGET_DIR: /cargo-target
+      # Build output stays in a named volume, never in the macOS checkout. The volume is shared by
+      # every checkout and worktree (fixed project name), so each gets its own subdirectory, keyed
+      # by the directory compose runs from; otherwise one checkout's tests could run another's wg.
+      CARGO_TARGET_DIR: /cargo-target${PWD:-/default}
 
 volumes:
   cargo-registry:
