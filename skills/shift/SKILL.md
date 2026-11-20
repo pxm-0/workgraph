@@ -35,6 +35,11 @@ means it refused: show it and stop.
      answers and queues the issue for the next shift.
    - **Approvals.** For each draft PR, offer `/workgraph:work approve <owner/repo>#<pr>` and follow
      that skill's section 7 when the owner says yes.
+   - **Releases at the ready-to-release gate.** For each (`repo#issue`, PR, merge commit, `run`),
+     show the release notes (`~/.workgraph/runs/<run>/release-notes.md`) and the plan in the
+     release worktree's Haruspex task. The factory stopped there: recording ready-to-release and
+     deploying are the owner's own acts, outside this skill. Never run `record`, `approve` or a
+     deploy for them.
    - **Parked.** Say why each parked (rate limited, call cap, the issue changed after the claim,
      sandbox unavailable with the doctor's reason; the report's Sandbox section has the doctor
      verdict and the argus fingerprint before and after):
@@ -63,7 +68,8 @@ The decisions step of **morning** for one issue: read its escalations from the l
    "just do it": launchd jobs, repository labels and override files are persistent changes the
    owner makes.
 3. Remind the owner that `factory.toml` needs `[intake].trusted_actors`, a `[[repo]]` per repo
-   (`name`, `path`, optionally `factory_compose` and `install`), each check approved with
+   (`name`, `path`, optionally `factory_compose`, `install`, `qa_checks` and `release`), each
+   check (QA ones too) approved with
    `wg config allow-check`, and the Haruspex pin. For risky units, a repo needs `[repo.sandbox]`
    (image digests, in-container `checks`, and `verify`), and the sim needs provisioning once:
    `<wg> sandbox setup-print` prints a plan and a script; show both and let the owner run it

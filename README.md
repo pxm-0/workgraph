@@ -62,6 +62,22 @@ prints the provisioning script you run once, `wg sandbox reap` removes stale job
 `wg/tests/sim/drill.sh` is the real-sim drill. Configure it per repo with `[repo.sandbox]` in
 `factory.toml` (image and service digests, in-container `checks`, and `verify`).
 
+**QA and release (Phase 4).** A repo's assembly line is `[[repo]].pipelines`, `["dev", "qa"]` by
+default. After dev's build and review, `pipelines/qa.toml` reruns the gate checks with the repo's
+`qa_checks` (owner-approved `[[check]]` entries, e.g. an e2e suite), sends a QA explorer after
+negative and recovery paths, and lets either one fix the blamed units for one round through the
+build fix loop; any QA fix is re-reviewed by opus before `publish`, which now ends `qa.toml`. The
+dev + qa chain's worst case is 50 calls, inside the compiled `max_calls_per_task` ceiling of 60:
+an owner `factory.toml` that lowered `[limits].max_calls_per_task` below 50 makes the preflight
+skip the repo (`wg doctor` shows each chain's worst case). With `[[repo]].release = true` and
+`[repo.sandbox].release_rehearsal` steps, a shift also takes each task you verified with
+`/workgraph:work approve` whose PR has merged: it recreates a worktree at the merge commit,
+reruns Haruspex verify there with the pinned commands, writes release notes and the Haruspex
+release plan, rehearses the steps in the sim sandbox (no network), evaluates ready-to-release and
+stops at your human gate with the issue labelled `wg:release-ready`. It never records a
+deployment and never deploys: that stays yours. A stage of an existing kind is TOML plus a prompt
+file (both compiled in by `wg/build.rs`); a new kind is a Rust change.
+
 ## Memory
 
 One file per repo, `.claude/work-memory.json`:

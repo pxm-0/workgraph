@@ -612,7 +612,10 @@ return as a Phase 6 item (§16), set from the cost ledger.
 read + `read!gate` + challenge + `max_units × (1 + max_fix_rounds)` work/fix calls + 2 reviews +
 review fix calls + every QA and agent stage + learn, and refuses a chain whose worst case exceeds
 `max_calls_per_task`. For §6.2's dev chain that is 1 + 1 + 1 + 5 × 4 + 2 + 5 + 1 = 31 calls, so
-`factory.toml` sets `max_calls_per_task = 40` (headroom for the one-retry rules of §5.3). At run
+`factory.toml` sets `max_calls_per_task = 40` (headroom for the one-retry rules of §5.3). Phase 4's
+dev + qa chain adds the QA check set's fix round (5), the explorer with its fix round and second
+run (7) and the re-review with its fix round (7): 50 calls, so the cap is raised to the compiled
+ceiling of 60, and `wg doctor` prints each repo chain's worst case. At run
 time, a call that would exceed the cap ends the task **`parked: call cap`** with the edits kept in
 the worktree and journalled; it never skips to publish, and a task without a `ReviewPass` is never
 published.
@@ -1019,7 +1022,7 @@ keychain_service = "workgraph-litellm"         # the proxy's own master key; Ope
 models = { haiku = "<litellm model_name>", sonnet = "<litellm model_name>", opus = "<litellm model_name>" }
 
 [limits]                       # no dollar caps yet (§17 D3); these stop runaways
-max_calls_per_task = 40        # dev worst case is 31 calls (§5.2)
+max_calls_per_task = 60        # dev + qa worst case is 50 calls (§5.2, Phase 4); dev alone 31
 runaway_per_call_usd = 25.0    # --max-budget-usd on every call: a runaway guard, not a budget
 max_eval_runs_per_pr = 2       # Tier B eval runs per self PR (§12.3)
 max_self_prs_per_day = 1
@@ -2416,6 +2419,17 @@ This is the first useful nightly factory.
   prepares and stops at the ready-to-release human stage;
 - a seeded e2e failure in QA is fixed by one blamed round, re-reviewed, then published;
 - a new stage is added with TOML and a prompt only, with no Rust diff.
+
+*As built* (PR for Phase 4): `wg/build.rs` compiles in every `prompts/*.md` and
+`pipelines/*.toml`, so a stage of an existing kind is a TOML stage plus a prompt file; the proof is
+`wg/tests/qa_flow.rs::a_new_stage_needs_only_toml_and_a_prompt` (an overlay adds both at run time).
+Dev's `learn` runs before QA, so QA fix rounds are not yet learned from. The release line is opt in
+per repo (`[[repo]].release = true`, which needs `[repo.sandbox].release_rehearsal`) and takes
+tasks from the task record (`verified` after `wg approve`) once `gh pr view` reports the PR merged.
+Haruspex binds check evidence to a commit, so before `release.toml` the kernel reruns `verify` at
+the merge commit with the owner-approved pins (a tainted task's through `[repo.sandbox].verify`);
+it records no gate and no approval. `/workgraph:work approve --release` is not built yet: the owner
+records ready-to-release and deploys by hand.
 
 ### Phase 5: self-improvement, shadow first
 
