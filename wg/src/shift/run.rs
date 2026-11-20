@@ -133,16 +133,9 @@ pub struct Counters {
     pub failures_in_a_row: u32,
 }
 
-/// Why intake stops before the next task, if it must.
-pub fn stop_before_next(
-    cfg: &Config,
-    c: &Counters,
-    stop_file: &Path,
-    deadline: u64,
-) -> Option<String> {
-    if let Some(why) = task::stop_reason(stop_file, deadline) {
-        return Some(why);
-    }
+/// The dev limits, checked before each task: they end intake, never the release line (only STOP,
+/// the window and an incident end that).
+pub fn enough_tasks(cfg: &Config, c: &Counters) -> Option<String> {
     if c.tasks >= cfg.shift.max_tasks {
         return Some(format!("max_tasks ({}) reached", cfg.shift.max_tasks));
     }
@@ -282,12 +275,16 @@ pub fn run(dirs: &Dirs, cfg: &Config) -> Result<Value, String> {
     };
     let mut ready: Vec<&RepoCfg> = Vec::new();
     let mut stopped = false;
+    let mut enough = false;
     'repos: for repo in &cfg.repos {
         if let Some(why) = repo_problem(cfg, repo) {
             j.append("repo_skipped", json!({ "repo": repo.name, "why": why }))?;
             continue;
         }
         ready.push(repo);
+        if enough {
+            continue;
+        }
         let picked = match super::record::issues_of(dirs, &repo.name).and_then(|reruns| {
             intake::intake(
                 &gh,
@@ -313,10 +310,15 @@ pub fn run(dirs: &Dirs, cfg: &Config) -> Result<Value, String> {
             )?;
         }
         for i in &picked.picked {
-            if let Some(why) = stop_before_next(cfg, &c, &dirs.stop_file(), deadline) {
+            if let Some(why) = task::stop_reason(&dirs.stop_file(), deadline) {
                 j.append("stopped", json!({ "why": why }))?;
                 stopped = true;
                 break 'repos;
+            }
+            if let Some(why) = enough_tasks(cfg, &c) {
+                j.append("stopped", json!({ "why": why }))?;
+                enough = true;
+                break;
             }
             // Intake ran maybe hours ago: the owner may have closed, un-queued or edited it since.
             if let Some(why) = intake::still_queued(&gh, &cfg.shift, &repo.name, i) {
@@ -340,9 +342,17 @@ pub fn run(dirs: &Dirs, cfg: &Config) -> Result<Value, String> {
         }
     }
     // The release line (design §7.3 step 10): verified, merged tasks, prepared up to the owner's gate.
+    // max_tasks and the failure count end intake only; STOP, the window and incidents end this too.
     for repo in ready.into_iter().filter(|_| !stopped) {
-        if let Err(why) = super::release::line(&env, repo) {
-            j.append("error", json!({ "repo": repo.name, "release": why }))?;
+        match super::release::line(&env, repo) {
+            Ok(Some(why)) => {
+                j.append("stopped", json!({ "why": why }))?;
+                break;
+            }
+            Ok(None) => {}
+            Err(why) => {
+                j.append("error", json!({ "repo": repo.name, "release": why }))?;
+            }
         }
     }
     super::sandbox::end(cfg, &j, &sandbox)?;
@@ -375,39 +385,31 @@ mod tests {
     fn stop_conditions() {
         let cfg =
             crate::config::parse("[shift]\nmax_tasks = 2\nmax_consecutive_failures = 2\n").unwrap();
-        let none = Path::new("/nonexistent/STOP");
-        let later = now() + 600;
         assert_eq!(
-            stop_before_next(
+            enough_tasks(
                 &cfg,
                 &Counters {
                     tasks: 1,
                     failures_in_a_row: 1
-                },
-                none,
-                later
+                }
             ),
             None
         );
-        assert!(stop_before_next(
+        assert!(enough_tasks(
             &cfg,
             &Counters {
                 tasks: 2,
                 failures_in_a_row: 0
-            },
-            none,
-            later
+            }
         )
         .unwrap()
         .contains("max_tasks"));
-        assert!(stop_before_next(
+        assert!(enough_tasks(
             &cfg,
             &Counters {
                 tasks: 1,
                 failures_in_a_row: 2
-            },
-            none,
-            later
+            }
         )
         .unwrap()
         .contains("consecutive"));

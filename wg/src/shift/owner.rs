@@ -179,8 +179,8 @@ pub fn approve(
     record::save(
         dirs,
         &TaskRecord {
+            // Kept: the release line takes only a PR that merged at this commit.
             status: "verified".into(),
-            approved_head: None,
             updated_at: crate::journal::now(),
             ..rec
         },

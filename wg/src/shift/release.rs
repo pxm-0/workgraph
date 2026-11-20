@@ -4,22 +4,31 @@
 //! commands, then writes notes and a plan, rehearses in the sim sandbox, evaluates
 //! ready-to-release and stops at the owner's human stage. It never records a deployment, never
 //! deploys and never touches a server: its only execution off the Mac is the sim sandbox.
+//!
+//! Outcomes: `release-ready` only on the kernel's evidence; an incident labels the issue
+//! `wg:incident` and stops the shift (§7.3 step 9); a refusal or a failed stage is `release-stuck`
+//! until the owner runs `wg shift retry-release`; any other error leaves the task `verified`, so
+//! the next shift tries again. Every one is in the shift report.
 
 use super::config::RepoCfg;
 use super::intake;
 use super::owner::VERIFIED;
 use super::record::{self, TaskRecord};
 use super::runctx;
-use super::task::{stop_reason, tainted_earlier, Env};
-use crate::engine::driver::{self, End, Start};
+use super::task::{incident_class, stop_reason, tainted_earlier, Env};
+use crate::engine::driver::{self, End, Ran, Start};
+use crate::engine::kernel::Kernel;
+use crate::haruspex::reverify::REFUSED;
 use crate::journal::now;
 use crate::memory_store::Loaded;
+use crate::state_dirs::Dirs;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::Path;
 use wg_factory::api::Memory;
 
 pub const RELEASE_READY: &str = "wg:release-ready";
+const INCIDENT: &str = "wg:incident";
 
 /// Verified tasks of `repo` with a PR, oldest claim first.
 pub fn candidates(e: &Env, repo: &str) -> Result<Vec<TaskRecord>, String> {
@@ -29,12 +38,11 @@ pub fn candidates(e: &Env, repo: &str) -> Result<Vec<TaskRecord>, String> {
         .collect())
 }
 
-/// Runs the release line for `repo`; returns how many releases it prepared or tried.
-pub fn line(e: &Env, repo: &RepoCfg) -> Result<u32, String> {
+/// Runs the release line for `repo`; `Some(why)` when the shift must stop (an incident).
+pub fn line(e: &Env, repo: &RepoCfg) -> Result<Option<String>, String> {
     if !repo.release {
-        return Ok(0);
+        return Ok(None);
     }
-    let mut n = 0;
     for rec in candidates(e, &repo.name)? {
         if let Some(why) = stop_reason(&e.dirs.stop_file(), e.deadline) {
             e.journal.append("stopped", json!({ "why": why }))?;
@@ -52,10 +60,12 @@ pub fn line(e: &Env, repo: &RepoCfg) -> Result<u32, String> {
                 continue;
             }
         };
-        n += 1;
         let issue = rec.issue;
-        let result = prepare(e, repo, rec.clone(), &merge);
-        let (status, label, comment, run) = match &result {
+        let result = match head_refusal(&rec, &view.head_oid) {
+            Some(why) => Err(why),
+            None => prepare(e, repo, rec.clone(), &merge),
+        };
+        let (status, label, comment, run, note) = match &result {
             Ok((End::AwaitingOwner { .. }, out)) => (
                 "release-ready",
                 Some(RELEASE_READY),
@@ -64,6 +74,7 @@ pub fn line(e: &Env, repo: &RepoCfg) -> Result<u32, String> {
                     fence(&notes(out))
                 ),
                 out["runId"].as_str().map(str::to_string),
+                None,
             ),
             // The sandbox was unavailable or the shift stopped: try again next shift.
             Ok((End::Parked(why), out)) => {
@@ -73,24 +84,33 @@ pub fn line(e: &Env, repo: &RepoCfg) -> Result<u32, String> {
                 )?;
                 continue;
             }
-            Ok((_, out)) => (
-                "release-stuck",
-                None,
-                format!(
-                    "workgraph could not prepare the release of #{pr}:\n\n{}",
-                    fence(out["note"].as_str().unwrap_or("the release line stopped"))
-                ),
-                out["runId"].as_str().map(str::to_string),
-            ),
-            Err(why) => (
-                "release-stuck",
-                None,
-                format!(
-                    "workgraph could not prepare the release of #{pr}:\n\n{}",
-                    fence(why)
-                ),
-                None,
-            ),
+            // The shift stops; GitHub learns the class only (§7.3 step 8).
+            Ok((End::Incident(why), out)) => {
+                e.journal.append(
+                    "incident",
+                    json!({ "at": "release", "repo": repo.name, "issue": issue, "run": out["runId"], "why": why }),
+                )?;
+                (
+                    "incident",
+                    Some(INCIDENT),
+                    format!("An incident aborted the release preparation of #{pr} (class: {}). The shift stopped; details are in the owner's journal.", incident_class(why)),
+                    out["runId"].as_str().map(str::to_string),
+                    Some(format!("incident: {}", incident_class(why))),
+                )
+            }
+            Ok((_, out)) => {
+                let note = out["note"].as_str().unwrap_or("the release line stopped");
+                stuck(pr, note, out["runId"].as_str().map(str::to_string))
+            }
+            Err(why) if why.starts_with(REFUSED) => stuck(pr, why, None),
+            // A worktree, gh or Haruspex error: the task stays verified for the next shift.
+            Err(why) => {
+                e.journal.append(
+                    "release_error",
+                    json!({ "repo": repo.name, "issue": issue, "pr": pr, "merge": merge, "why": why }),
+                )?;
+                continue;
+            }
         };
         if let Some(l) = label {
             e.gh.ensure_label(&repo.name, l)?;
@@ -108,10 +128,91 @@ pub fn line(e: &Env, repo: &RepoCfg) -> Result<u32, String> {
         )?;
         e.journal.append(
             "release_finished",
-            json!({ "repo": repo.name, "issue": issue, "pr": pr, "merge": merge, "outcome": status, "run": run }),
+            json!({ "repo": repo.name, "issue": issue, "pr": pr, "merge": merge, "outcome": status, "run": run, "note": note }),
         )?;
+        if status == "incident" {
+            return Ok(Some("an incident in the release line".into()));
+        }
     }
-    Ok(n)
+    Ok(None)
+}
+
+type Outcome = (
+    &'static str,
+    Option<&'static str>,
+    String,
+    Option<String>,
+    Option<String>,
+);
+
+fn stuck(pr: u64, note: &str, run: Option<String>) -> Outcome {
+    (
+        "release-stuck",
+        None,
+        format!(
+            "workgraph could not prepare the release of #{pr}:\n\n{}",
+            fence(note)
+        ),
+        run,
+        Some(crate::ids::one_line(note, 500)),
+    )
+}
+
+/// The PR merged with the head the owner verified, or the release is refused: a commit pushed to
+/// the task branch after `wg approve` was never reviewed.
+fn head_refusal(rec: &TaskRecord, head: &str) -> Option<String> {
+    match rec.approved_head.as_deref() {
+        Some(h) if h == head => None,
+        Some(h) => Some(format!(
+            "{REFUSED}the PR merged at head {head}, not at {h}, the commit the owner verified: what was pushed after `wg approve` was never reviewed"
+        )),
+        None => Some(format!(
+            "{REFUSED}the task record names no commit the owner verified"
+        )),
+    }
+}
+
+/// What the kernel holds against calling the release ready, whatever the factory said: a plan
+/// the writer marked ready, and a rehearsal of the configured steps where every step exited 0.
+pub fn unproven(k: &Kernel) -> Option<String> {
+    if k.release_plan_ready != Some(true) {
+        return Some("the kernel holds no release plan marked ready".into());
+    }
+    let rehearsed = k.sandbox_runs.iter().any(|r| {
+        !r.steps().is_empty()
+            && r.steps()
+                .iter()
+                .all(|(n, e)| n.starts_with("release-rehearsal-") && *e == 0)
+    });
+    (!rehearsed).then(|| "the kernel holds no passing rehearsal from the sandbox".into())
+}
+
+/// `wg shift retry-release`: the owner puts a stuck release back on the line for the next shift.
+pub fn retry(
+    dirs: &Dirs,
+    cfg: &crate::config::Config,
+    repo: &str,
+    issue: u64,
+) -> Result<Value, String> {
+    cfg.repo(repo)
+        .ok_or_else(|| format!("{repo} is not a [[repo]] in factory.toml"))?;
+    let rec = record::load(dirs, repo, issue)?
+        .ok_or_else(|| format!("{repo}#{issue} has no task record"))?;
+    if rec.status != "release-stuck" {
+        return Err(format!(
+            "{repo}#{issue} is {}, not release-stuck",
+            rec.status
+        ));
+    }
+    record::save(
+        dirs,
+        &TaskRecord {
+            status: "verified".into(),
+            updated_at: now(),
+            ..rec
+        },
+    )?;
+    Ok(json!({ "repo": repo, "issue": issue, "status": "verified" }))
 }
 
 fn fence(text: &str) -> String {
@@ -159,11 +260,12 @@ fn prepare(e: &Env, repo: &RepoCfg, rec: TaskRecord, merge: &str) -> Result<(End
     let replay = crate::claude::replay::Replay::none();
     let (ran, out) = runctx::with_ctx(e, repo, &worktree, &run_id, replay, &place, |ctx| {
         let start = Start {
+            // The title is issue text: fenced as dev fences the issue (§14 Z4).
             task: format!(
-                "Prepare the release of {}#{} ({}), merged as {merge}.",
+                "Prepare the release of {}#{} (Haruspex task {task}), merged as {merge}. The issue it came from:\n\n{}",
                 repo.name,
                 rec.issue,
-                crate::ids::one_line(&rec.title, 200)
+                crate::untrusted::issue::fenced_title(rec.issue, &crate::ids::one_line(&rec.title, 200))
             ),
             title: rec.title.clone(),
             decisions: vec![],
@@ -187,10 +289,21 @@ fn prepare(e: &Env, repo: &RepoCfg, rec: TaskRecord, merge: &str) -> Result<(End
             baseline_floor: None,
             tainted_earlier: tainted,
         };
-        runctx::finish(
-            ctx,
-            driver::run_task(ctx, start, &wg_factory::engine::step)?,
-        )
+        let ran = driver::run_task(ctx, start, &wg_factory::engine::step)?;
+        let ran = match (&ran.end, unproven(&ran.kernel)) {
+            (End::AwaitingOwner { .. }, Some(why)) => {
+                ctx.journal.append(
+                    "warning",
+                    json!({ "refused": format!("release-ready: {why}") }),
+                )?;
+                Ran {
+                    end: End::Failed(format!("refused: {why}")),
+                    ..ran
+                }
+            }
+            _ => ran,
+        };
+        runctx::finish(ctx, ran)
     })?;
     Ok((ran.end, out))
 }
@@ -218,7 +331,7 @@ fn verify(
         .filter_map(|c| c.as_str().map(str::to_string))
         .collect();
     if required.is_empty() {
-        return Err(format!("task {task} declares no required_checks"));
+        return Err(format!("{REFUSED}task {task} declares no required_checks"));
     }
     let mut pins = BTreeMap::new();
     for name in &required {
@@ -227,12 +340,17 @@ fn verify(
                 .as_ref()
                 .and_then(|s| s.verify.get(name))
                 .map(|c| c.replace("{task}", task))
-                .ok_or("host verify refused for tainted task; add [repo.sandbox].verify or verify yourself")?
+                .ok_or_else(|| format!("{REFUSED}host verify refused for tainted task; add [repo.sandbox].verify or verify yourself"))?
         } else {
             e.cfg
                 .check(&repo.name, name)
                 .map(|c| c.project.clone())
-                .ok_or_else(|| format!("check {name} has no approved command for {}", repo.name))?
+                .ok_or_else(|| {
+                    format!(
+                        "{REFUSED}check {name} has no approved command for {}",
+                        repo.name
+                    )
+                })?
         };
         pins.insert(name.clone(), cmd);
     }
@@ -251,7 +369,65 @@ fn verify(
     crate::haruspex::reverify::at_merge(
         &hx.cli.to_string_lossy(),
         worktree,
+        task,
         &pins,
         sandbox_project.as_deref(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tokens::SandboxRun;
+
+    fn rehearsal(exits: &[i64]) -> SandboxRun {
+        let steps = exits
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (format!("release-rehearsal-{}", i + 1), *e))
+            .collect();
+        SandboxRun::restore("j-1", "n", "rehearse", "t", "img", steps, true)
+    }
+
+    #[test]
+    fn release_ready_needs_the_kernels_plan_and_a_passing_rehearsal() {
+        let k = Kernel::default();
+        assert!(unproven(&k).unwrap().contains("plan"));
+        let k = Kernel {
+            release_plan_ready: Some(false),
+            ..k
+        };
+        assert!(unproven(&k).unwrap().contains("plan"));
+        let k = Kernel {
+            release_plan_ready: Some(true),
+            ..k
+        };
+        assert!(unproven(&k).unwrap().contains("rehearsal"));
+        let k = Kernel {
+            sandbox_runs: vec![rehearsal(&[0, 1])],
+            ..k
+        };
+        assert!(unproven(&k).unwrap().contains("rehearsal"));
+        let k = Kernel {
+            sandbox_runs: vec![rehearsal(&[0, 0])],
+            ..k
+        };
+        assert_eq!(unproven(&k), None);
+    }
+
+    #[test]
+    fn only_the_head_the_owner_verified_is_released() {
+        let rec = TaskRecord {
+            approved_head: Some("abc".into()),
+            ..TaskRecord::default()
+        };
+        assert_eq!(head_refusal(&rec, "abc"), None);
+        let why = head_refusal(&rec, "def").unwrap();
+        assert!(
+            why.starts_with(REFUSED) && why.contains("never reviewed"),
+            "{why}"
+        );
+        let none = head_refusal(&TaskRecord::default(), "abc").unwrap();
+        assert!(none.starts_with(REFUSED), "{none}");
+    }
 }

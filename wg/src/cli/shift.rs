@@ -1,4 +1,4 @@
-//! `wg shift run|resume|status|report|recover|gc|schedule-print`, `wg decide`, `wg approve` and
+//! `wg shift run|resume|status|report|recover|gc|retry-release|schedule-print`, `wg decide`, `wg approve` and
 //! `wg approval-summary` (design §3.1, §7, §9.5). Each prints one JSON line.
 
 use super::args::{not_an_agent, parse};
@@ -29,7 +29,9 @@ pub fn shift(args: &[String]) -> Result<Value, String> {
     let rest = args.get(1..).unwrap_or(&[]);
     let (dirs, cfg) = setup()?;
     match sub {
-        "run" | "resume" | "recover" | "gc" => not_an_agent(&format!("wg shift {sub}"))?,
+        "run" | "resume" | "recover" | "gc" | "retry-release" => {
+            not_an_agent(&format!("wg shift {sub}"))?
+        }
         _ => {}
     }
     let none = |r: &[String]| parse(r, &[]).and_then(|a| a.only(&[]));
@@ -47,8 +49,13 @@ pub fn shift(args: &[String]) -> Result<Value, String> {
         }
         ("recover", r) => none(r).and_then(|_| admin::recover(&dirs, &cfg, &gh(&dirs, &cfg))),
         ("gc", r) => none(r).and_then(|_| admin::gc(&dirs, &cfg, &gh(&dirs, &cfg))),
+        ("retry-release", r) => {
+            let a = parse(r, &[])?;
+            a.only(&["repo", "issue"])?;
+            crate::shift::release::retry(&dirs, &cfg, a.need("repo")?, number(a.need("issue")?, "issue")?)
+        }
         ("schedule-print", r) => none(r).map(|_| schedule::print(&dirs, &cfg)),
-        _ => Err("usage: wg shift run | resume <id> | status | report [id] | recover | gc | schedule-print".into()),
+        _ => Err("usage: wg shift run | resume <id> | status | report [id] | recover | gc | retry-release --repo <r> --issue <n> | schedule-print".into()),
     }
 }
 

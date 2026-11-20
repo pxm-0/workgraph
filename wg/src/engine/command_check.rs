@@ -179,7 +179,8 @@ pub fn llm(ctx: &RunCtx, k: &Kernel, c: &LlmCall, max_units: usize) -> Result<Re
 }
 
 /// Check names must be known; the kernel then runs its own set, whatever the factory listed: the
-/// gate, plus the `qa` checks the factory named.
+/// gate, plus the `qa` checks the factory named, plus the chain's whole QA set once it has run (a
+/// fix after `regression` passed is checked against it again, design §6.3).
 pub fn checks(
     k: &Kernel,
     label: &str,
@@ -202,12 +203,14 @@ pub fn checks(
     if !k.baseline_done {
         return Err(refuse("the baseline must run first"));
     }
-    let extra: Vec<String> = names
-        .iter()
-        .filter(|n| qa.contains(n) && !k.gate.contains(n))
-        .cloned()
-        .collect();
-    Ok(k.gate.iter().cloned().chain(extra).collect())
+    let started = if k.qa_started() { &k.qa[..] } else { &[] };
+    let mut out = k.gate.clone();
+    for n in names.iter().chain(started) {
+        if qa.contains(n) && !out.contains(n) {
+            out.push(n.clone());
+        }
+    }
+    Ok(out)
 }
 
 /// A `Gate` command: a known gate, evaluated `--json` only.

@@ -12,8 +12,10 @@ writes a test no fixer makes pass, WORKFLOW writes a test that drops a GitHub wo
 INCIDENT makes the worker run `wg shift run` through the guard hook, WRONG-BRANCH makes it
 switch branches, and RISKY makes the unit risky (it also touches auth_token.py) so the worker runs
 its check through `wg sandbox exec`, the one Bash it is granted. Phase 4 stages: `explore` (the QA
-agent) passes, `rereview` reviews as `review` does, every `<stage>:<unit>#<n>` label is a fixer,
-`notes` writes release notes and `plan` fills the Haruspex task's release plan."""
+agent) passes, `rereview` reviews as `review` does, every `<stage>:<unit>#<n>` label is a fixer
+(a `regression:` one sets `E2E = True` in calc.py, which a test's e2e check asserts), `notes`
+writes release notes and `plan` fills the Haruspex task's release plan (and, when the file
+`$HOME/release-incident` exists, also approves ready-to-release itself: an incident)."""
 import json
 import os
 import subprocess
@@ -167,6 +169,10 @@ elif label.startswith("work:"):
     if "WRONG-BRANCH" in prompt:
         run(["git", "checkout", "-q", "-b", "wg/99-elsewhere"])
     reply = {"summary": "add now adds"}
+elif label.startswith("regression:") and "#" in label:
+    with open("calc.py", "a") as f:
+        f.write("\nE2E = True\n")
+    reply = {"summary": "logout now ends the session"}
 elif ":" in label and "#" in label:
     reply = {"summary": "tried, but nothing changed"}
 elif label.startswith("explore"):
@@ -183,6 +189,13 @@ elif label == "plan":
                             "ownership": ["pxm-0"]}
     with open(task_path(), "w") as f:
         json.dump(task, f, indent=2)
+    if os.path.exists(os.path.join(home, "release-incident")):
+        with open(".haruspex/state.json") as f:
+            state = json.load(f)
+        state.setdefault("approvals", {})["ready_to_release"] = {
+            "status": "approved", "by": "the plan writer", "at": "2026-11-21T00:00:00Z"}
+        with open(".haruspex/state.json", "w") as f:
+            json.dump(state, f, indent=2)
     reply = {"ready": True, "summary": "revert to roll back; smoke with the check"}
 elif label.startswith(("review", "rereview")):
     with open(task_path()) as f:

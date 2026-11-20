@@ -80,7 +80,7 @@ struct Loop<'a> {
     publish: Option<wg_factory::api::PublishDef>,
     published: Option<String>,
     /// The chain's later stages: a gate, sandbox or human command runs only if one declares it.
-    stages: Vec<wg_factory::api::StageKind>,
+    stages: Vec<wg_factory::api::StageDef>,
 }
 
 pub fn run_task(ctx: &RunCtx, start: Start, step: Step) -> Result<Ran, String> {
@@ -98,6 +98,15 @@ pub fn run_task(ctx: &RunCtx, start: Start, step: Step) -> Result<Ran, String> {
                 .cfg
                 .repo(&ctx.repo_name)
                 .is_some_and(|r| r.always_tainted),
+        qa: start
+            .chain
+            .stages
+            .iter()
+            .flat_map(|s| match &s.kind {
+                wg_factory::api::StageKind::Checks { names, .. } => names.clone(),
+                _ => vec![],
+            })
+            .collect(),
         ..Kernel::default()
     };
     // The release line has no Reading: the contract it may not weaken is the task as merged.
@@ -133,7 +142,7 @@ pub fn run_task(ctx: &RunCtx, start: Start, step: Step) -> Result<Ran, String> {
         rejected: Vec::new(),
         publish: start.chain.publish().cloned(),
         published: None,
-        stages: start.chain.stages.iter().map(|s| s.kind.clone()).collect(),
+        stages: start.chain.stages.clone(),
     };
     let mut state = RunState::default();
     let end = loop {
@@ -214,7 +223,7 @@ impl Loop<'_> {
     /// Whether the chain declares the stage a gate, sandbox or human command stands for.
     fn declared(&self, cmd: &Command) -> bool {
         use wg_factory::api::StageKind as K;
-        self.stages.iter().any(|k| match (cmd, k) {
+        self.stages.iter().any(|s| match (cmd, &s.kind) {
             (Command::Gate { gate, .. }, K::HaruspexGate { gate: g, .. }) => gate == g,
             (Command::Sandbox { steps_from, .. }, K::Sandbox { steps_from: f, .. }) => {
                 steps_from == f
@@ -334,6 +343,13 @@ impl Loop<'_> {
                     return Ok(Some(End::Failed(
                         "a human stage names an unknown gate".into(),
                     )));
+                }
+                // The owner is asked on the kernel's evidence, never on the factory's word (§9.5).
+                if let Some(why) =
+                    super::stage_exec::human_refusal(self.ctx, &self.k, &self.stages, &gate)?
+                {
+                    j.append("warning", json!({ "refused": format!("human: {why}") }))?;
+                    return Ok(Some(End::Failed(format!("refused: {why}"))));
                 }
                 let ask = crate::ids::one_line(&ask, 300);
                 j.append("parked", json!({ "human": gate, "ask": ask }))?;
@@ -601,7 +617,12 @@ impl Loop<'_> {
                 self.k.challenge_escalations = ch.escalations.clone();
                 self.k.challenge_added = ch.added.clone();
             }
-            (Role::ReleaseWriter, Ok(reply)) => super::stage_exec::release_reply(self.ctx, reply)?,
+            (Role::ReleaseWriter, Ok(reply)) => {
+                if let Reply::ReleasePlan(p) = reply {
+                    self.k.release_plan_ready = Some(p.ready);
+                }
+                super::stage_exec::release_reply(self.ctx, reply)?
+            }
             (Role::Reviewer, Ok(Reply::Review(rv))) => {
                 self.k.review = Some(rv.clone());
                 if rv.passed && c.tier == Tier::Opus {

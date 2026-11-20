@@ -1,13 +1,15 @@
 //! QA and release pipelines end to end with fakes (design §6.2, §16 Phase 4): a seeded e2e failure
 //! fixed by one blamed round through the build fix loop, re-reviewed, then published; an explorer's
-//! finding fixed and explored again; a QA fix published without its re-review refused; a new stage
-//! added with TOML and a prompt only; and the release line stopping at the owner's gate.
+//! finding fixed and explored again; a QA fix published without its re-review refused; a QA set
+//! the kernel requires at publish whatever the factory does; a new stage added with TOML and a
+//! prompt only; and the release line stopping at the owner's gate only on the kernel's evidence.
 
 mod support;
 
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 use support::*;
+use wg::engine::driver as driver_step;
 use wg_factory::api::{Command, Event, LlmCall};
 use wg_factory::model::RunState;
 
@@ -186,6 +188,98 @@ fn an_honest_qa_with_no_fix_makes_no_re_review_call() {
 }
 
 #[test]
+fn an_explore_fix_that_breaks_e2e_is_caught_by_the_qa_set_and_never_published() {
+    let tree = Arc::new(Mutex::new("tree-1".to_string()));
+    let mut o = qa(
+        Arc::new(|label, cmd, _| {
+            (label == "check:explore#1" && cmd == "npm run e2e").then(|| E2E_FAIL.into())
+        }),
+        &[],
+        tree.clone(),
+    );
+    let t = tree.clone();
+    o.answer = Arc::new(move |label, _| match label {
+        "explore" => Some(
+            json!({ "passed": false, "findings": [{ "id": "QA-1", "severity": "high",
+            "file": "src/a.js", "summary": "empty input crashes" }] }),
+        ),
+        "explore:a#1" => {
+            *t.lock().unwrap() = "tree-2".into();
+            None
+        }
+        _ => None,
+    });
+    let o = run(o);
+    // The factory asked for no check names; the kernel ran the QA set anyway.
+    let recheck = o
+        .journal
+        .iter()
+        .find(|e| e["kind"] == "checks_run" && e["label"] == "check:explore#1")
+        .unwrap();
+    assert_eq!(
+        recheck["results"],
+        json!([{ "name": "test", "exit": 0 }, { "name": "e2e", "exit": 1 }])
+    );
+    assert_eq!(o.result["status"], "stuck", "{}", o.result);
+    assert!(o.result["note"]
+        .as_str()
+        .unwrap()
+        .contains("checks fail after its fix round: npm run e2e"));
+    assert!(!o.journal.iter().any(|e| e["what"] == "publish"));
+}
+
+#[test]
+fn publish_needs_the_qa_set_passing_whatever_the_factory_skips() {
+    // Skips `regression`: asks to publish where its QA checks were due.
+    let skip = |s: &RunState, ev: &Event| {
+        let (next, cmds) = wg_factory::engine::step(s, ev);
+        let cmds = cmds
+            .into_iter()
+            .map(|c| match c {
+                Command::Checks { label, .. } if label == "check:regression" => Command::Publish {
+                    title: "feat: skip the e2e suite".into(),
+                },
+                c => c,
+            })
+            .collect();
+        (next, cmds)
+    };
+    // Publishes after `regression` failed instead of fixing it.
+    let ignore = |s: &RunState, ev: &Event| {
+        let (next, cmds) = wg_factory::engine::step(s, ev);
+        let cmds = cmds
+            .into_iter()
+            .map(|c| match c {
+                Command::Llm(LlmCall { label, .. }) if label.starts_with("regression:") => {
+                    Command::Publish {
+                        title: "feat: ship it anyway".into(),
+                    }
+                }
+                c => c,
+            })
+            .collect();
+        (next, cmds)
+    };
+    for (step, checker) in [
+        (
+            &skip as driver_step::Step,
+            Arc::new(|_: &str, _: &str, _| None) as Checker,
+        ),
+        (&ignore as driver_step::Step, e2e_fails_once()),
+    ] {
+        let tree = Arc::new(Mutex::new("tree-1".to_string()));
+        let o = run_with(qa(checker, &[], tree), step);
+        let r = publish_refusals(&o);
+        assert!(
+            r.iter()
+                .any(|w| w.contains("a QA check has no passing result at the current tree")),
+            "{r:?}"
+        );
+        assert!(o.result["pr"].is_null());
+    }
+}
+
+#[test]
 fn a_qa_fix_after_review_published_without_its_re_review_is_refused() {
     let tree = Arc::new(Mutex::new("tree-1".to_string()));
     // A hostile factory: when the re-review is due, it asks to publish instead.
@@ -249,6 +343,10 @@ fn a_new_stage_needs_only_toml_and_a_prompt() {
 
 /// The release line for T-001 with a three-step rehearsal; `tweak` changes the scenario.
 fn release(tweak: impl FnOnce(&mut Opts)) -> Out {
+    release_with(tweak, &wg_factory::engine::step)
+}
+
+fn release_with(tweak: impl FnOnce(&mut Opts), step: driver_step::Step) -> Out {
     let rehearsal = "release_rehearsal = [\"npm run migrate:up\", \"npm run migrate:down\", \"npm run migrate:up\"]\n";
     let mut o = Opts {
         units: vec![unit("a", json!({}))],
@@ -259,7 +357,7 @@ fn release(tweak: impl FnOnce(&mut Opts)) -> Out {
         ..Opts::default()
     };
     tweak(&mut o);
-    run(o)
+    run_with(o, step)
 }
 
 fn sandbox_steps(o: &Out) -> Vec<Value> {
@@ -394,4 +492,82 @@ fn a_factory_cannot_run_a_gate_sandbox_or_human_stage_its_chain_does_not_declare
             .iter()
             .any(|e| e["kind"] == "sandbox_run" || e["kind"] == "gate_evaluated"));
     }
+}
+
+/// A release factory that emits `with` in place of the first command matching `at`.
+fn hostile_release(
+    at: fn(&Event, &Command) -> bool,
+    with: Command,
+    tweak: impl FnOnce(&mut Opts),
+) -> Out {
+    let step = move |s: &RunState, ev: &Event| {
+        let (next, cmds) = wg_factory::engine::step(s, ev);
+        let cmds = cmds
+            .into_iter()
+            .map(|c| if at(ev, &c) { with.clone() } else { c })
+            .collect();
+        (next, cmds)
+    };
+    release_with(tweak, &step)
+}
+
+fn human() -> Command {
+    Command::Human {
+        gate: "ready-to-release".into(),
+        ask: "approve?".into(),
+    }
+}
+
+#[test]
+fn the_owner_is_asked_only_on_the_kernels_rehearsal_and_gate() {
+    // Straight to the owner, before notes, plan, rehearsal or gate.
+    let o = hostile_release(|ev, _| matches!(ev, Event::Started(_)), human(), |_| {});
+    assert!(labels(&o).is_empty(), "{:?}", labels(&o));
+    // Past the plan, the rehearsal skipped.
+    let skipped = hostile_release(|_, c| matches!(c, Command::Sandbox { .. }), human(), |_| {});
+    assert_eq!(labels(&skipped), ["notes", "plan"]);
+    for o in [&o, &skipped] {
+        assert_eq!(o.result["status"], "failed", "{}", o.result);
+        assert!(
+            o.result["note"]
+                .as_str()
+                .unwrap()
+                .contains("stage rehearse has no passing sandbox run at the current tree"),
+            "{}",
+            o.result
+        );
+        assert!(!o.journal.iter().any(|e| e["kind"] == "parked"));
+        assert!(sandbox_steps(o).is_empty());
+    }
+    // Rehearsed, the gate skipped while it still has another blocker: the kernel evaluates it.
+    let o = hostile_release(
+        |_, c| matches!(c, Command::Gate { .. }),
+        human(),
+        |o| {
+            o.release_blockers = vec![
+                "Release plan needs rollback steps.",
+                "Human approval for ready_to_release is pending.",
+            ]
+        },
+    );
+    assert_eq!(o.result["status"], "failed", "{}", o.result);
+    assert!(o.result["note"].as_str().unwrap().contains(
+        "ready-to-release has blockers besides the owner's approval: Release plan needs rollback steps."
+    ));
+    assert!(!o.journal.iter().any(|e| e["kind"] == "parked"));
+}
+
+#[test]
+fn a_release_writer_incident_ends_the_run_as_an_incident() {
+    let o = release(|o| o.guard_incident = Some("plan"));
+    assert!(
+        o.result["incident"]
+            .as_str()
+            .is_some_and(|i| i.starts_with("guard incident in plan")),
+        "{}",
+        o.result
+    );
+    assert_eq!(labels(&o), ["notes", "plan"]);
+    assert!(sandbox_steps(&o).is_empty());
+    assert!(!o.journal.iter().any(|e| e["kind"] == "parked"));
 }

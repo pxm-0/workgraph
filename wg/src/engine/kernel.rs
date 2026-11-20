@@ -48,6 +48,11 @@ pub struct Kernel {
     /// Risky units whose Worker or Fixer ran, sandboxed.
     pub built_risky: Vec<String>,
     pub sandbox_runs: Vec<SandboxRun>,
+    /// The chain's QA check set (its `checks` stages' names): once it has run, every later check
+    /// run includes it, and publish needs it passing at the tree (design §6.3).
+    pub qa: Vec<String>,
+    /// The release plan writer's `ready`, as the kernel parsed it.
+    pub release_plan_ready: Option<bool>,
 }
 
 fn esc(id: &str, question: String, recommendation: &str) -> Escalation {
@@ -336,14 +341,31 @@ impl Kernel {
 
     /// The latest results pass for every gate check at `tree`.
     pub fn verified_at(&self, tree: &str) -> bool {
-        !self.gate.is_empty()
-            && self.gate.iter().all(|n| {
-                self.checks
-                    .iter()
-                    .rev()
-                    .find(|c| c.name() == n)
-                    .is_some_and(|c| c.passed() && c.tree() == tree)
-            })
+        !self.gate.is_empty() && self.passed_at(&self.gate, tree)
+    }
+
+    /// The latest results pass for every QA check at `tree` (none when the chain has no QA set).
+    pub fn qa_verified_at(&self, tree: &str) -> bool {
+        self.passed_at(&self.qa, tree)
+    }
+
+    /// A QA check that is not a required check has run in this task.
+    pub fn qa_started(&self) -> bool {
+        self.checks.iter().any(|c| {
+            self.qa
+                .iter()
+                .any(|n| n == c.name() && !self.required.contains(n))
+        })
+    }
+
+    fn passed_at(&self, names: &[String], tree: &str) -> bool {
+        names.iter().all(|n| {
+            self.checks
+                .iter()
+                .rev()
+                .find(|c| c.name() == n)
+                .is_some_and(|c| c.passed() && c.tree() == tree)
+        })
     }
 
     pub fn baseline_escalation(&self) -> Escalation {
