@@ -2,7 +2,9 @@
 name = "xtask"
 version = "0.1.0"
 edition = "2021"
-description = "Repo checks: cargo xtask size"
+description = "Repo checks: cargo xtask size | protected-paths | lint-editable"
 publish = false
 
 [dependencies]
+# The kernel's protected-path list and editable-Rust lint, so CI and `wg self gate` judge alike.
+wg = { path = "../wg" }

@@ -1,6 +1,13 @@
 //! Repo checks, run as `cargo xtask <check>` (alias in `.cargo/config.toml`).
 //!
-//!   cargo xtask size    fail on any .rs file over 800 lines
+//!   cargo xtask size                                    fail on any .rs file over 800 lines
+//!   cargo xtask protected-paths --base B --head H [--repo D]   a self PR's diff (design §12.3)
+//!   cargo xtask lint-editable [--repo D]                editable Rust's compile-time routes
+//!
+//! self-gate.yml runs the BASE checkout's xtask against the head tree, so a PR cannot change the
+//! rules it is judged by.
+
+mod selfgate;
 
 use std::fs;
 use std::io;
@@ -20,8 +27,10 @@ fn main() -> ExitCode {
         .as_slice()
     {
         ["size"] => size(&repo_root()),
+        ["protected-paths", rest @ ..] => selfgate::protected_paths(rest),
+        ["lint-editable", rest @ ..] => selfgate::lint_editable(rest),
         _ => {
-            eprintln!("usage: cargo xtask size");
+            eprintln!("usage: cargo xtask size | protected-paths --base B --head H [--repo D] | lint-editable [--repo D]");
             ExitCode::from(2)
         }
     }
