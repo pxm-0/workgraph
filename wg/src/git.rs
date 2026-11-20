@@ -190,6 +190,32 @@ pub fn worktree(
     path.canonicalize().map_err(|e| e.to_string())
 }
 
+/// A release worktree (design §7.4): recreated under `root/rel`, detached at the merge commit
+/// `sha`, whatever an earlier release left there. The owner's checkout is never touched.
+pub fn release_worktree(repo: &Path, root: &Path, rel: &str, sha: &str) -> Result<PathBuf, String> {
+    if sha.len() != 40 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!("{sha:?} is not a commit id"));
+    }
+    let path = root.join(rel);
+    if path.exists() {
+        remove_worktree(repo, root, &path)?;
+    }
+    crate::state_dirs::private_dir(root)?;
+    git(
+        repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            &path.to_string_lossy(),
+            sha,
+        ],
+        &[],
+    )?;
+    path.canonicalize().map_err(|e| e.to_string())
+}
+
 /// Removes a task worktree, only under `root` after canonicalizing (design §14 checklist 2).
 pub fn remove_worktree(repo: &Path, root: &Path, path: &Path) -> Result<(), String> {
     let (root, p) = (

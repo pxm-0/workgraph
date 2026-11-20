@@ -116,7 +116,12 @@ pub fn build(dirs: &Dirs, id: &str) -> Result<Value, String> {
     // Every run the shift started, claimed ones too: an interrupted run a resume replaced, or one
     // that ended in a kernel error, still paid for its calls.
     let mut runs = BTreeMap::new();
-    for t in of("task_claimed").iter().chain(&tasks) {
+    let releases = of("release_finished");
+    for t in of("task_claimed")
+        .iter()
+        .chain(&tasks)
+        .chain(&of("release_started"))
+    {
         if let Some(r) = t["run"].as_str() {
             runs.insert(r.to_string(), format!("{}#{}", s(t, "repo"), t["issue"]));
         }
@@ -148,6 +153,12 @@ pub fn build(dirs: &Dirs, id: &str) -> Result<Value, String> {
             "decisions": pick("needs-decision"),
             "approvals": approvals,
             "parked": pick("parked"),
+            "releases": releases.iter().filter(|r| r["outcome"] == "release-ready").cloned().collect::<Vec<_>>(),
+        },
+        "releases": {
+            "finished": releases,
+            "parked": of("release_parked"),
+            "waiting": of("release_waits"),
         },
         "tasks": tasks,
         "stuck": pick("stuck"),
@@ -290,13 +301,17 @@ pub fn markdown(r: &Value) -> String {
         None => String::new(),
     };
     format!(
-        "# Shift {}\n\nStopped: {}{stale}\n\n## Needs you\n\n### Incidents\n{}\n{}\n\n### Decisions\n{}\n\n### Approvals\n{}\n\n### Parked\n{}\n\n## Stuck\n{}\n\n## Skipped\n{}\n{}\n\n## Sandbox\n\n{}\n\n## Rules\n{}\n\n## Spend\n\nTotal ${} (calls with unknown cost: {})\n\n```json\n{}\n```\n",
+        "# Shift {}\n\nStopped: {}{stale}\n\n## Needs you\n\n### Incidents\n{}\n{}\n\n### Decisions\n{}\n\n### Approvals\n{}\n\n### Releases at the ready-to-release gate\n{}\n\n### Parked\n{}\n\n## Stuck\n{}\n\n## Skipped\n{}\n{}\n\n## Sandbox\n\n{}\n\n## Rules\n{}\n\n## Spend\n\nTotal ${} (calls with unknown cost: {})\n\n```json\n{}\n```\n",
         s(r, "shift"),
         r["stopped"],
         list(&n["incidents"], &task_line),
         if r["shiftIncidents"].as_array().is_some_and(|a| !a.is_empty()) { shift_incidents } else { String::new() },
         list(&n["decisions"], &decision),
         list(&n["approvals"], &approval),
+        list(&n["releases"], &|e| format!(
+            "- {}#{} (PR #{}, merge {}): prepared in run {}; record ready-to-release yourself, then deploy by hand. The factory never deploys.",
+            s(e, "repo"), e["issue"], e["pr"], s(e, "merge"), s(e, "run")
+        )),
         list(&n["parked"], &parked),
         list(&r["stuck"], &task_line),
         list(&r["skippedRepos"], &|e| format!("- repo {}: {}", s(e, "repo"), s(e, "why"))),
@@ -329,7 +344,8 @@ pub fn write(dirs: &Dirs, id: &str) -> Result<Value, String> {
         "stopped": r["stopped"],
         "needsYou": { "incidents": count("incidents") + r["shiftIncidents"].as_array().map_or(0, Vec::len),
                       "decisions": count("decisions"),
-                      "approvals": count("approvals"), "parked": count("parked") },
+                      "approvals": count("approvals"), "parked": count("parked"),
+                      "releases": count("releases") },
         "spendUsd": r["spend"]["usd"],
     }))
 }
@@ -389,6 +405,17 @@ mod tests {
                 "pr": if n == 1 { json!("https://x/pull/7") } else { json!(null) },
                 "escalations": [{ "id": "E1", "severity": "high", "question": "q?", "recommendation": "r" }] })).unwrap();
         }
+        j.append(
+            "release_started",
+            json!({ "repo": "o/r", "issue": 6, "run": "r-6", "merge": "m" }),
+        )
+        .unwrap();
+        j.append(
+            "release_finished",
+            json!({ "repo": "o/r", "issue": 6, "pr": 8, "merge": "abc",
+            "outcome": "release-ready", "run": "r-6" }),
+        )
+        .unwrap();
         let led = |run: &str, provider: &str, cost: Value| {
             json!({ "run": run, "label": "read", "stage": "read",
             "provider": provider, "model_id": "opus", "cost_micros": cost })
@@ -403,6 +430,7 @@ mod tests {
                 led("r-2", "openrouter", json!("unknown")),
                 led("other", "subscription", json!(9)),
                 led("r-5", "subscription", json!(2000)),
+                led("r-6", "subscription", json!(4000)),
             ]
             .join("\n"),
         )
@@ -416,18 +444,19 @@ mod tests {
         let out = write(&dirs, "20261120-0130").unwrap();
         assert_eq!(
             out["needsYou"],
-            json!({ "incidents": 1, "decisions": 1, "approvals": 1, "parked": 1 })
+            json!({ "incidents": 1, "decisions": 1, "approvals": 1, "parked": 1, "releases": 1 })
         );
         assert_eq!(
             out["spendUsd"],
-            json!(0.0035),
-            "a claimed run that never finished still counts"
+            json!(0.0075),
+            "a claimed run that never finished, and a release run, still count"
         );
         let r: Value =
             serde_json::from_str(&std::fs::read_to_string(dir.join("report.json")).unwrap())
                 .unwrap();
         assert_eq!(r["spend"]["callsWithUnknownCost"], 1);
-        assert_eq!(r["spend"]["byProvider"]["subscription/opus"]["calls"], 2);
+        assert_eq!(r["spend"]["byProvider"]["subscription/opus"]["calls"], 3);
+        assert_eq!(r["needsYou"]["releases"][0]["issue"], 6);
         assert_eq!(
             r["spend"]["byTask"]["o/r#2/anthropic-api"]["usd"],
             json!(0.0005)
@@ -441,7 +470,8 @@ mod tests {
         assert!(
             at("### Incidents") < at("### Decisions")
                 && at("### Decisions") < at("### Approvals")
-                && at("### Approvals") < at("### Parked")
+                && at("### Approvals") < at("### Releases at the ready-to-release gate")
+                && at("o/r#6 (PR #8, merge abc)") < at("### Parked")
                 && at("### Parked") < at("## Spend")
         );
         assert!(

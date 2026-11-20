@@ -3,4 +3,5 @@
 pub mod cli;
 pub mod contract;
 pub mod finalize;
+pub mod reverify;
 pub mod tamper;

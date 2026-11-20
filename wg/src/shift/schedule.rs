@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use std::path::Path;
 
 pub const JOB: &str = "dev.pxm0.workgraph.shift";
-pub const LABELS: [&str; 9] = [
+pub const LABELS: [&str; 10] = [
     "wg:queued",
     "wg:p1",
     "wg:in-shift",
@@ -19,6 +19,7 @@ pub const LABELS: [&str; 9] = [
     "wg:incident",
     "wg:verified",
     "wg:awaiting-approval",
+    "wg:release-ready",
 ];
 
 fn xml(s: &str) -> String {

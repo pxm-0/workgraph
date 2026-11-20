@@ -32,6 +32,8 @@ pub struct Pr {
     pub url: String,
     pub state: String,
     pub head_oid: String,
+    /// The merge commit of a merged PR (`pr view` only), 40 hex digits.
+    pub merge_commit: Option<String>,
 }
 
 fn pr_of(v: &Value) -> Result<Pr, String> {
@@ -46,6 +48,10 @@ fn pr_of(v: &Value) -> Result<Pr, String> {
         url,
         state: s("state"),
         head_oid: s("headRefOid"),
+        merge_commit: v["mergeCommit"]["oid"]
+            .as_str()
+            .filter(|o| o.len() == 40 && o.chars().all(|c| c.is_ascii_hexdigit()))
+            .map(str::to_string),
     })
 }
 
@@ -332,7 +338,7 @@ impl Gh {
             "-R",
             repo,
             "--json",
-            "number,url,state,headRefOid",
+            "number,url,state,headRefOid,mergeCommit",
         ])?;
         pr_of(&v)
     }

@@ -185,7 +185,8 @@ pub fn recover(dirs: &Dirs, cfg: &Config, gh: &Gh) -> Result<Value, String> {
     Ok(json!({ "recovered": out }))
 }
 
-/// Removes worktrees whose PR merged or closed, and stuck ones older than 14 days.
+/// Removes worktrees whose PR merged or closed, and stuck ones older than 14 days. A verified
+/// task of a repo with a release line keeps its status, so the line still takes it.
 pub fn gc(dirs: &Dirs, cfg: &Config, gh: &Gh) -> Result<Value, String> {
     let mut removed = Vec::new();
     let mut kept = Vec::new();
@@ -204,10 +205,16 @@ pub fn gc(dirs: &Dirs, cfg: &Config, gh: &Gh) -> Result<Value, String> {
         };
         crate::git::remove_worktree(Path::new(&repo.path), &dirs.worktrees(), path)?;
         removed.push(json!({ "repo": rec.repo, "issue": rec.issue, "worktree": rec.worktree }));
+        // A verified task stays one for the release line, which recreates its own worktree.
+        let awaits_release = repo.release && rec.status == "verified";
         record::save(
             dirs,
             &TaskRecord {
-                status: "gone".into(),
+                status: if awaits_release {
+                    rec.status.clone()
+                } else {
+                    "gone".into()
+                },
                 updated_at: now(),
                 ..rec
             },
