@@ -14,6 +14,7 @@ pub mod github;
 pub mod install;
 pub mod ledger;
 pub mod lint;
+pub mod merge;
 pub mod protected;
 pub mod rate;
 pub mod replay;

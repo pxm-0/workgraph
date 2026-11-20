@@ -114,3 +114,11 @@ path = "tests/eval_capture.rs"
 [[test]]
 name = "self_lane"
 path = "tests/self_lane.rs"
+
+[[test]]
+name = "self_update"
+path = "tests/self_update.rs"
+
+[[test]]
+name = "eval_arm"
+path = "tests/eval_arm.rs"

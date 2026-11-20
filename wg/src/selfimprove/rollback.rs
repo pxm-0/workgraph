@@ -44,20 +44,31 @@ fn restore_memory(dirs: &Dirs, sha12: &str) -> Result<bool, String> {
     Ok(true)
 }
 
-/// Opens the revert PR for factory merge `sha`; returns its URL.
-fn revert_pr(e: &Env, checkout: &Path, sha: &str, why: &str) -> Result<String, String> {
+/// Opens the revert PR for factory merge `sha` from a worktree under `worktrees/` (design §14
+/// checklist 2); returns its URL. A failed cleanup is returned beside it, never dropped.
+fn revert_pr(
+    e: &Env,
+    checkout: &Path,
+    sha: &str,
+    why: &str,
+) -> Result<(String, Option<String>), String> {
     let sha12 = &sha[..12];
     let branch = format!("wg-self/revert-{sha12}");
-    let wt = e.dirs.eval_work().join(format!("revert-{sha12}"));
+    let root = e.dirs.worktrees();
+    let wt = root.join(format!("revert-{sha12}"));
     crate::git::fetch(checkout)?;
     if wt.exists() {
-        git(
-            checkout,
-            &["worktree", "remove", "--force", &wt.to_string_lossy()],
-            &[],
-        )?;
+        crate::git::remove_worktree(checkout, &root, &wt)?;
     }
-    crate::state_dirs::private_dir(&e.dirs.eval_work())?;
+    crate::state_dirs::private_dir(&root)?;
+    // A retry after the push but before the PR reuses the pushed revert.
+    let remote = format!("refs/remotes/origin/{branch}");
+    let pushed = git(checkout, &["rev-parse", "--verify", "-q", &remote], &[]).is_ok();
+    let from = if pushed {
+        remote.as_str()
+    } else {
+        "origin/main"
+    };
     git(
         checkout,
         &[
@@ -67,13 +78,15 @@ fn revert_pr(e: &Env, checkout: &Path, sha: &str, why: &str) -> Result<String, S
             "-B",
             &branch,
             &wt.to_string_lossy(),
-            "origin/main",
+            from,
         ],
         &[],
     )?;
     let made = (|| {
-        git(&wt, &["revert", "--no-edit", sha], &[])?;
-        crate::git::push_task_branch(&wt, &branch)?;
+        if !pushed {
+            git(&wt, &["revert", "--no-edit", sha], &[])?;
+            crate::git::push_task_branch(&wt, &branch)?;
+        }
         e.gh.pr_create(
             e.repo,
             &branch,
@@ -86,53 +99,100 @@ fn revert_pr(e: &Env, checkout: &Path, sha: &str, why: &str) -> Result<String, S
             &[],
         )
     })();
-    // Best effort: the worktree holds nothing the branch does not.
-    let _ = git(
-        checkout,
-        &["worktree", "remove", "--force", &wt.to_string_lossy()],
-        &[],
-    );
-    made
+    let cleanup = crate::git::remove_worktree(checkout, &root, &wt).err();
+    made.map(|url| (url, cleanup))
 }
 
+/// The SHA of the last rollback whose revert PR is still owed.
+fn pending_revert(ledger: &Ledger) -> Result<Option<String>, String> {
+    let all = ledger.entries()?;
+    Ok(all
+        .iter()
+        .rev()
+        .find(|r| r["kind"] == "rolled_back" && r["revert_owed"] == true)
+        .and_then(|r| r["sha"].as_str())
+        .filter(|s| {
+            !all.iter()
+                .any(|o| o["kind"] == "revert_opened" && o["sha"] == *s)
+        })
+        .map(str::to_string))
+}
+
+/// Opens the owed revert PR and records the result: `revert_opened`, or `revert_failed` with the
+/// error, which the next `wg self rollback` retries.
+fn open_revert(e: &Env, ledger: &Ledger, sha: &str, why: &str) -> Result<Value, String> {
+    let Some(c) = e.checkout else {
+        let error = "no checkout of the factory repo is configured";
+        ledger.append("revert_failed", json!({ "sha": sha, "error": error }))?;
+        return Ok(json!({ "sha": sha, "revert_pr": null, "revert_error": error }));
+    };
+    match revert_pr(e, c, sha, why) {
+        Ok((url, cleanup)) => {
+            ledger.append(
+                "revert_opened",
+                json!({ "sha": sha, "url": url, "cleanup_error": cleanup }),
+            )?;
+            Ok(json!({ "sha": sha, "revert_pr": url, "cleanup_error": cleanup }))
+        }
+        Err(error) => {
+            ledger.append("revert_failed", json!({ "sha": sha, "error": error }))?;
+            Ok(json!({ "sha": sha, "revert_pr": null, "revert_error": error }))
+        }
+    }
+}
+
+/// Flips `current` back, then records the rollback before anything that can fail after the flip;
+/// a revert PR that could not open is retried by the next call.
 pub fn rollback(e: &Env, why: &str) -> Result<Value, String> {
     let dirs = e.dirs;
-    let bad = link(dirs, "current").ok_or("nothing is installed")?;
-    let good = link(dirs, "previous")
-        .filter(|p| p != &bad)
-        .ok_or("no previous binary to roll back to")?;
-    point(dirs, "current", &good)?;
-    // `previous` would name the bad binary's predecessor's predecessor; never leave it on the bad one.
-    let _ = std::fs::remove_file(dirs.bin().join("previous"));
-    let restored = restore_memory(dirs, good.trim_start_matches("wg-"))?;
     let ledger = Ledger::at(&dirs.self_ledger());
+    let bad = link(dirs, "current").ok_or("nothing is installed")?;
+    let Some(good) = link(dirs, "previous").filter(|p| p != &bad) else {
+        return match pending_revert(&ledger)? {
+            Some(sha) => open_revert(e, &ledger, &sha, why),
+            None => Err("no previous binary to roll back to".into()),
+        };
+    };
     let sha = ledger
         .of_kind("installed")?
         .iter()
         .rev()
         .find(|i| i["dir"] == bad.as_str())
         .and_then(|i| i["sha"].as_str().map(str::to_string));
-    let st = state::load(&dirs.self_state())?;
-    let st = match &sha {
-        Some(s) => st.denied(s),
-        None => st,
+    state::update(&dirs.self_state(), |st| {
+        let st = match &sha {
+            Some(s) => st.denied(s),
+            None => st.clone(),
+        };
+        Ok(st.paused_by(&format!("rolled back: {why}")))
+    })?;
+    point(dirs, "current", &good)?;
+    // `previous` would name the bad binary's predecessor's predecessor; never leave it on the bad one.
+    let unlinked = std::fs::remove_file(dirs.bin().join("previous"))
+        .err()
+        .map(|e| format!("cannot remove bin/previous: {e}"));
+    let (restored, memory_error) = match restore_memory(dirs, good.trim_start_matches("wg-")) {
+        Ok(r) => (r, None),
+        Err(e) => (false, Some(e)),
     };
-    state::save(
-        &dirs.self_state(),
-        &st.paused_by(&format!("rolled back: {why}")),
-    )?;
     let factory_merge = sha
         .as_deref()
         .map(|s| ledger.merges().map(|m| m.iter().any(|x| x["merge"] == s)))
         .transpose()?
         .unwrap_or(false);
-    let revert = match (&sha, e.checkout, factory_merge) {
-        (Some(s), Some(c), true) => Some(revert_pr(e, c, s, why)?),
-        _ => None,
-    };
-    let out = json!({ "rolled_back": bad, "current": good, "sha": sha, "memory_restored": restored,
-                      "revert_pr": revert, "paused": true, "why": why });
+    let mut out = json!({ "rolled_back": bad, "current": good, "sha": sha, "memory_restored": restored,
+                          "memory_error": memory_error, "unlink_error": unlinked,
+                          "revert_owed": factory_merge, "revert_pr": null, "paused": true, "why": why });
     ledger.append("rolled_back", out.clone())?;
+    if let (Some(s), true) = (&sha, factory_merge) {
+        let r = open_revert(e, &ledger, s, why)?;
+        out["revert_pr"] = r["revert_pr"].clone();
+        for k in ["revert_error", "cleanup_error"] {
+            if !r[k].is_null() {
+                out[k] = r[k].clone();
+            }
+        }
+    }
     Ok(out)
 }
 
@@ -152,7 +212,9 @@ pub fn after_shift(e: &Env, shift: &[Value], runs: &[Vec<Value>]) -> Result<Opti
         .iter()
         .find(|x| x["kind"] == "shift_started")
         .and_then(|x| x["binary"].as_str());
-    if ran != Some(&bin_hash[..12]) {
+    // A shift that ended before its work (window closed, preflight, sandbox) judges nothing.
+    let early = shift.iter().any(|x| x["kind"] == "shift_ended_early");
+    if ran != Some(&bin_hash[..12]) || early {
         return Ok(None);
     }
     let judged = ledger

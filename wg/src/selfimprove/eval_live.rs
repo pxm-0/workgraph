@@ -4,8 +4,9 @@
 //! without a dollar ceiling (D3); every arm's spend goes to the self-ledger.
 //!
 //! - Stage 1: every fixture, both arms. A fixture whose escalation set or Haruspex gate sequence
-//!   differs between arms, whose candidate reply was schema-invalid, or that base passes and the
-//!   candidate fails, fails the PR.
+//!   differs between arms, whose candidate Reading lost criteria, required checks or every unit,
+//!   whose candidate reply was schema-invalid, or that base passes and the candidate fails, fails
+//!   the PR.
 //! - Stage 2: at most 4 fixtures in a fixed random order, one at a time, both arms; it stops at
 //!   the first fixture base passes and the candidate fails twice.
 //! - Pass: both stages clean, candidate cost at most 1.15 x base, zero guard incidents.
@@ -45,6 +46,47 @@ pub struct ArmResult {
     pub incidents: u32,
     /// Spend by provider, for the self-ledger.
     pub by_provider: BTreeMap<String, u64>,
+    /// The Reading's shape: how many units, its criteria ids and the task's required checks.
+    pub units: u32,
+    pub criteria: Vec<String>,
+    pub required_checks: Vec<String>,
+}
+
+/// The Reading-shape part of an [`ArmResult`], sorted so the arms compare as sets.
+pub fn shape(reading: Option<&wg_factory::api::Reading>, required: &[String]) -> ArmResult {
+    let sorted = |mut v: Vec<String>| {
+        v.sort();
+        v.dedup();
+        v
+    };
+    ArmResult {
+        units: reading.map_or(0, |r| r.units.len() as u32),
+        criteria: sorted(
+            reading
+                .map(|r| r.criteria.iter().map(|c| c.id.clone()).collect())
+                .unwrap_or_default(),
+        ),
+        required_checks: sorted(required.to_vec()),
+        ..ArmResult::default()
+    }
+}
+
+/// What the candidate's Reading lost against base's: criteria, required checks, or every unit.
+fn shape_lost(b: &ArmResult, c: &ArmResult) -> Option<String> {
+    let lost = |base: &[String], cand: &[String]| -> Vec<String> {
+        base.iter().filter(|x| !cand.contains(x)).cloned().collect()
+    };
+    let criteria = lost(&b.criteria, &c.criteria);
+    let checks = lost(&b.required_checks, &c.required_checks);
+    if !criteria.is_empty() {
+        Some(format!("the Reading lost criteria {criteria:?}"))
+    } else if !checks.is_empty() {
+        Some(format!("the Reading lost required checks {checks:?}"))
+    } else if b.units > 0 && c.units == 0 {
+        Some(format!("the Reading's {} units became none", b.units))
+    } else {
+        None
+    }
 }
 
 pub trait Arms {
@@ -170,6 +212,8 @@ pub fn evaluate(fixtures: &[Fixture], arms: &dyn Arms, seed: u64) -> Result<Outc
                 "the gate sequence {:?} became {:?}",
                 b.gates, c.gates
             ))
+        } else if let Some(w) = shape_lost(&b, &c) {
+            Some(w)
         } else if !c.schema_ok {
             Some("a schema-invalid reply".to_string())
         } else if b.passed && !c.passed {
@@ -265,8 +309,10 @@ pub fn arm_result(
             .entry(l["provider"].as_str().unwrap_or("unknown").to_string())
             .or_insert(0) += c;
     }
+    // An eval never publishes: a `done` fixture's finished build ends `ready_for_review`.
+    let reached = status == expected || (expected == "done" && status == "ready_for_review");
     ArmResult {
-        passed: status == expected && hidden_ok,
+        passed: reached && hidden_ok,
         status,
         escalations,
         gates,
@@ -274,6 +320,7 @@ pub fn arm_result(
         cost_micros: cost,
         incidents: journal.iter().filter(|e| e["kind"] == "incident").count() as u32,
         by_provider,
+        ..ArmResult::default()
     }
 }
 

@@ -77,9 +77,45 @@ fn a_bad_sha_is_installed_the_canary_fails_and_everything_rolls_back() {
     )
     .unwrap();
 
+    // GitHub is down while the revert PR opens: the rollback still completes and records it.
+    f.set_gh(|s| s["fail"] = json!({ "pr create": 3 }));
     let (code, v) = f.wg(&["self", "canary", "--shift", "20261121-0130"]);
     assert_eq!(code, 0, "{v}");
     assert_eq!(v["healthy"], false, "{v}");
+    assert!(
+        v["rollback"]["revert_error"].is_string() && v["rollback"]["revert_pr"].is_null(),
+        "{v}"
+    );
+    let kinds: Vec<String> = f
+        .ledger()
+        .entries()
+        .unwrap()
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        kinds.ends_with(&["rolled_back".into(), "revert_failed".into()]),
+        "{kinds:?}"
+    );
+    // The owner's retry opens the owed revert PR from the pushed branch.
+    let (code, retry) = f.wg(&["self", "rollback"]);
+    assert_eq!(code, 0, "{retry}");
+    assert!(
+        retry["revert_pr"]
+            .as_str()
+            .is_some_and(|u| u.contains("/pull/")),
+        "{retry}"
+    );
+    assert!(
+        !f.home
+            .join(".workgraph-work/worktrees")
+            .join(format!("revert-{}", &bad[..12]))
+            .exists(),
+        "the revert worktree lived under worktrees/ and is gone"
+    );
+    assert_eq!(sh(&f.repo, "git worktree list | wc -l"), "1");
+    let (code, done) = f.wg(&["self", "rollback"]);
+    assert_eq!(code, 2, "nothing is owed any more: {done}");
     assert!(
         v["rollback"]["why"]
             .as_str()
@@ -171,5 +207,52 @@ fn install_refuses_unverified_artifacts_and_unfinished_ci() {
     assert!(
         !f.home.join(".workgraph/bin/current").exists(),
         "nothing was installed"
+    );
+}
+
+/// The first shift on a new binary stopped before its work (window closed, preflight): that is no
+/// crash, and the binary is judged by the next shift that runs it.
+#[test]
+fn a_shift_that_ended_early_never_rolls_back_a_new_binary() {
+    let f = fx("early", "");
+    let good = sh(&f.repo, "git rev-parse HEAD");
+    let target = format!("wg-{}", wg::selfimprove::install::target());
+    let a = artifact(&f.base, "good", &good, "good");
+    f.set_gh(|s| s["runs"] = json!([{ "databaseId": 1, "headSha": good, "conclusion": "success", "event": "push", "artifacts": { &target: a } }]));
+    assert_eq!(f.wg(&["self", "install", "--sha", &good]).0, 0);
+    let work = f.base.join("next");
+    sh(
+        &f.base,
+        &format!("git clone -q {} {}", f.origin.display(), work.display()),
+    );
+    sh(&work, "git config user.name t && git config user.email t@example.invalid && echo n >> docs/a.md && git commit -qam next && git push -q origin main");
+    let next = sh(&work, "git rev-parse HEAD");
+    let b = artifact(&f.base, "next", &next, "next");
+    f.set_gh(|s| s["runs"] = json!([{ "databaseId": 2, "headSha": next, "conclusion": "success", "event": "push", "artifacts": { &target: b } }]));
+    assert_eq!(f.wg(&["self", "install", "--sha", &next]).0, 0);
+    let bin = f.home.join(".workgraph/bin");
+    let hash = wg::haruspex::cli::sha256_file(&bin.join(format!("wg-{}/wg", &next[..12]))).unwrap();
+    let shift = f.home.join(".workgraph/shifts/20261121-0130");
+    fs::create_dir_all(&shift).unwrap();
+    let lines = [
+        json!({ "seq": 1, "kind": "shift_started", "binary": &hash[..12] }),
+        json!({ "seq": 2, "kind": "stopped", "why": "window closed" }),
+        json!({ "seq": 3, "kind": "shift_ended_early", "why": "window closed" }),
+    ];
+    fs::write(
+        shift.join("journal.jsonl"),
+        lines.iter().map(|l| format!("{l}\n")).collect::<String>(),
+    )
+    .unwrap();
+    let (code, v) = f.wg(&["self", "canary", "--shift", "20261121-0130"]);
+    assert_eq!((code, v["healthy"].clone()), (0, json!(true)), "{v}");
+    assert_eq!(
+        fs::read_link(bin.join("current")).unwrap(),
+        PathBuf::from(format!("wg-{}", &next[..12])),
+        "the healthy binary stays"
+    );
+    assert!(
+        f.ledger().of_kind("canary").unwrap().is_empty(),
+        "not judged: the next shift on it is the canary"
     );
 }

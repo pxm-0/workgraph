@@ -134,8 +134,8 @@ pub fn self_(args: &[String]) -> Result<Value, String> {
         "pause" => {
             let a = parse(rest, &[])?;
             a.only(&["reason"])?;
-            let st = state::load(&dirs.self_state())?.paused_by(a.get("reason").unwrap_or("paused by the owner"));
-            state::save(&dirs.self_state(), &st)?;
+            let why = a.get("reason").unwrap_or("paused by the owner");
+            let st = state::update(&dirs.self_state(), |s| Ok(s.paused_by(why)))?;
             Ledger::at(&dirs.self_ledger()).append("paused", json!({ "reason": st.pause_reason }))?;
             Ok(json!({ "paused": true }))
         }
@@ -144,13 +144,10 @@ pub fn self_(args: &[String]) -> Result<Value, String> {
             a.only(&["enable-merge"])?;
             let ledger = Ledger::at(&dirs.self_ledger());
             let rules = crate::selfimprove::protected::compiled();
-            let st = state::load(&dirs.self_state())?.resumed(
-                a.on("enable-merge"),
-                rate::shadow_count(&ledger)?,
-                rules.shadow_prs,
-                crate::journal::now(),
-            )?;
-            state::save(&dirs.self_state(), &st)?;
+            let shadow = rate::shadow_count(&ledger)?;
+            let st = state::update(&dirs.self_state(), |s| {
+                s.resumed(a.on("enable-merge"), shadow, rules.shadow_prs, crate::journal::now())
+            })?;
             ledger.append("resumed", json!({ "merge_enabled": st.merge_enabled }))?;
             Ok(json!({ "paused": false, "merge_enabled": st.merge_enabled }))
         }

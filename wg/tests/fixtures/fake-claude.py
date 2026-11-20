@@ -147,6 +147,7 @@ if label.startswith("read"):
 elif label.startswith("challenge"):
     reply = {"added": [], "assign": [], "escalations": []}
 elif label.startswith("work:"):
+    record["files_seen"] = sorted(os.listdir("."))  # an eval arm's hidden tests are never here yet
     record["hook_edit_unit_file"] = hook("Edit", {"file_path": "calc.py"})
     record["hook_edit_other_file"] = hook("Edit", {"file_path": "check.py"})
     record["hook_chained_bash"] = hook("Bash", {"command": "python3 check.py; touch escaped"})

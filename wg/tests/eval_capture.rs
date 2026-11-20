@@ -126,3 +126,50 @@ fn replay_runs_from_the_cli_against_a_base_checkouts_cases() {
         "{v}"
     );
 }
+
+#[test]
+fn a_history_holding_an_env_file_is_never_captured() {
+    let eval = std::env::temp_dir().join(format!("wg-eval-env-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&eval);
+    fs::create_dir_all(&eval).unwrap();
+    sh(&eval, "git init -q --bare -b main");
+    let f = fx(
+        "captureenv",
+        &format!("eval_remote = \"{}\"", eval.display()),
+    );
+    let work = f.base.join("feature");
+    sh(
+        &f.base,
+        &format!("git clone -q {} {}", f.origin.display(), work.display()),
+    );
+    // A secret committed once and deleted later is still in every bundle of that history.
+    sh(
+        &work,
+        "git config user.name t && git config user.email t@example.invalid \
+               && echo 'TOKEN=x' > .env.local && echo 'TOKEN=' > .env.example && git add -A && git commit -qm oops \
+               && git rm -q .env.local && git commit -qm 'remove it' \
+               && echo 'pub fn sub() {}' >> wg-factory/src/plan/mod.rs \
+               && git commit -qam 'feat: add sub (#8)' && git push -q origin main",
+    );
+    let merge = sh(&work, "git rev-parse HEAD");
+    f.set_gh(|s| {
+        s["origins"]["pxm-0/workgraph-eval"] = json!(eval);
+        s["prs"] = json!([{ "repo": REPO, "number": 32, "url": "https://github.com/pxm-0/workgraph/pull/32",
+            "state": "MERGED", "headRefName": "wg/8-add-sub", "headRefOid": merge, "mergeCommit": merge, "base": "main",
+            "title": "feat: add sub", "body": "Add sub.", "draft": false, "labels": [] }]);
+    });
+    let (code, v) = f.wg(&[
+        "eval",
+        "capture",
+        "--pr",
+        "https://github.com/pxm-0/workgraph/pull/32",
+    ]);
+    assert_eq!(code, 2, "{v}");
+    assert!(v["error"].as_str().unwrap().contains(".env.local"), "{v}");
+    assert_eq!(
+        sh(&eval, "git for-each-ref refs/heads | wc -l"),
+        "0",
+        "nothing was pushed"
+    );
+    let _ = fs::remove_dir_all(&eval);
+}

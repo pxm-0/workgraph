@@ -289,3 +289,187 @@ fn the_no_std_build_refuses_extern_crate_std() {
     assert!(!ok && err.contains("can't find crate for `std`"), "{err}");
     let _ = std::fs::remove_dir_all(&base);
 }
+
+fn comments(f: &Fx, pr: u64) -> usize {
+    f.gh_state()["prs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["number"] == pr)
+        .and_then(|p| p["comments"].as_array().map(Vec::len))
+        .unwrap_or(0)
+}
+
+fn decisions(f: &Fx, pr: u64) -> usize {
+    f.ledger()
+        .of_kind("decision")
+        .unwrap()
+        .iter()
+        .filter(|d| d["pr"] == pr)
+        .count()
+}
+
+#[test]
+fn an_unchanged_head_is_decided_once_and_its_eval_is_never_rerun() {
+    let f = fx("once", "");
+    let (docs, _) = f.pr("docs-once", "echo 'x' >> docs/a.md", true);
+    let (prompt, head) = f.pr("prompt-once", "echo 'Be brief.' >> prompts/work.md", true);
+    // `wg eval live` already evaluated this head: the gate reuses it, no store needed.
+    f.ledger()
+        .append(
+            "eval",
+            json!({ "pr": prompt, "head": head, "passed": true, "reason": "10 fixtures clean" }),
+        )
+        .unwrap();
+    for _ in 0..3 {
+        assert_eq!(f.gate(docs)["outcome"], "shadow");
+        assert_eq!(f.gate(prompt)["outcome"], "shadow");
+    }
+    for pr in [docs, prompt] {
+        assert_eq!(
+            (decisions(&f, pr), comments(&f, pr)),
+            (1, 1),
+            "one decision and one comment per head"
+        );
+    }
+    assert_eq!(
+        f.ledger().of_kind("eval").unwrap().len(),
+        1,
+        "no eval rerun"
+    );
+    assert_eq!(
+        f.gh_state()["labels"][REPO],
+        json!(["wg:self-shadow"]),
+        "the gate creates its label before using it"
+    );
+    // A failed eval of the head refuses it, still without running again.
+    let (bad, bad_head) = f.pr("prompt-bad", "echo 'Be vague.' >> prompts/work.md", true);
+    f.ledger()
+        .append(
+            "eval",
+            json!({ "pr": bad, "head": bad_head, "passed": false, "reason": "stage 1, fixture f1: x" }),
+        )
+        .unwrap();
+    let v = f.gate(bad);
+    assert_eq!(v["outcome"], "refused", "{v}");
+    assert!(
+        v["reason"].as_str().unwrap().contains("eval: stage 1"),
+        "{v}"
+    );
+}
+
+#[test]
+fn a_new_head_past_the_eval_runs_is_held_for_the_owner() {
+    let f = fx("evalruns", "");
+    let (pr, _) = f.pr("prompt-runs", "echo 'Be brief.' >> prompts/work.md", true);
+    for h in ["1", "2"] {
+        f.ledger()
+            .append(
+                "eval",
+                json!({ "pr": pr, "head": h.repeat(40), "passed": true, "reason": "x" }),
+            )
+            .unwrap();
+    }
+    let v = f.gate(pr);
+    assert_eq!(v["outcome"], "held", "{v}");
+    assert!(
+        v["reason"]
+            .as_str()
+            .unwrap()
+            .contains("used its 2 eval runs"),
+        "{v}"
+    );
+}
+
+#[test]
+fn unknown_mergeability_waits_and_a_conflict_is_held() {
+    let f = fx("mergeable", "");
+    let (pr, _) = f.pr("docs-new", "echo 'x' >> docs/a.md", true);
+    let set = |m: &str| {
+        f.set_gh(|s| {
+            for p in s["prs"].as_array_mut().unwrap() {
+                p["mergeable"] = json!(m);
+            }
+        })
+    };
+    set("UNKNOWN");
+    let v = f.gate(pr);
+    assert_eq!(v["outcome"], "pending", "{v}");
+    assert_eq!(
+        (decisions(&f, pr), f.labels(pr)),
+        (0, vec!["wg:self".to_string()])
+    );
+    set("CONFLICTING");
+    let v = f.gate(pr);
+    assert_eq!(v["outcome"], "held", "{v}");
+    assert!(f.labels(pr).contains(&"wg:self-held".to_string()));
+}
+
+#[test]
+fn a_merge_is_judged_by_github_and_recorded_whatever_the_exit_code() {
+    let f = fx("mergeexit", "");
+    f.enable_merge();
+    // The merge call fails and nothing merged: refused, and no merge counts.
+    let (failed, _) = f.pr("merge-fails", "echo 'x' >> docs/a.md", true);
+    f.set_gh(|s| s["fail"] = json!({ "pr merge": 3 }));
+    let v = f.gate(failed);
+    assert_eq!(v["outcome"], "refused", "{v}");
+    assert!(
+        v["reason"].as_str().unwrap().contains("the merge failed"),
+        "{v}"
+    );
+    assert!(f.ledger().merges().unwrap().is_empty());
+    f.close(failed);
+    // The merge lands, then the call exits non-zero (and its retry fails): still a merge.
+    let (pr, _) = f.pr("merge-lands", "echo 'y' >> docs/a.md", true);
+    f.set_gh(|s| s["merge_exits_nonzero"] = json!(true));
+    let v = f.gate(pr);
+    assert_eq!(v["outcome"], "merged", "{v}");
+    let merges = f.ledger().merges().unwrap();
+    let commit = f.gh_state()["prs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["number"] == pr)
+        .unwrap()["mergeCommit"]
+        .clone();
+    assert_eq!((merges.len(), &merges[0]["merge"]), (1, &commit));
+}
+
+#[test]
+fn a_merge_commit_github_names_late_is_recorded_and_holds_the_limits_meanwhile() {
+    let f = fx("mergelate", "");
+    f.enable_merge();
+    let (pr, _) = f.pr("merge-late", "echo 'x' >> docs/a.md", true);
+    f.set_gh(|s| s["merge_commit_late"] = json!(true));
+    let (code, v) = f.wg(&["self", "gate", "--pr", &pr.to_string()]);
+    assert_eq!(code, 2, "{v}");
+    assert!(
+        v["error"].as_str().unwrap().contains("no merge commit yet"),
+        "{v}"
+    );
+    let merges = f.ledger().merges().unwrap();
+    assert!(
+        merges.len() == 1 && merges[0]["merge"].is_null(),
+        "{merges:?}"
+    );
+    let (next, _) = f.pr("merge-next", "echo 'y' >> docs/a.md", true);
+    let v = f.gate(next);
+    assert_eq!(
+        v["outcome"], "pending",
+        "the unnamed merge holds the spacing: {v}"
+    );
+    assert!(
+        v["reason"].as_str().unwrap().contains("between merges"),
+        "{v}"
+    );
+    f.set_gh(|s| s["merge_commit_late"] = json!(false));
+    f.gate(next);
+    let merges = f.ledger().merges().unwrap();
+    assert_eq!(merges.len(), 1, "{merges:?}");
+    assert_eq!(merges[0]["pr"], pr);
+    assert!(
+        merges[0]["merge"].as_str().is_some_and(|m| m.len() == 40),
+        "{merges:?}"
+    );
+}

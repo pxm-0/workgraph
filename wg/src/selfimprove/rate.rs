@@ -54,8 +54,8 @@ pub fn owner_reverts(
     Ok(out)
 }
 
-fn pause(e: &Env, st: &SelfState, why: &str) -> Result<Outcome, String> {
-    state::save(&e.dirs.self_state(), &st.paused_by(why))?;
+fn pause(e: &Env, why: &str) -> Result<Outcome, String> {
+    state::update(&e.dirs.self_state(), |s| Ok(s.paused_by(why)))?;
     Ok(Outcome::Held(format!("the lane is now paused: {why}")))
 }
 
@@ -70,7 +70,6 @@ pub fn check(
     if let Some((rev, merge)) = reverts.first() {
         return pause(
             e,
-            st,
             &format!("the owner reverted self merge {merge} in {rev}"),
         )
         .map(Some);
@@ -110,10 +109,179 @@ pub fn check(
     if since_resume >= rules.drift_checkpoint_every {
         return pause(
             e,
-            st,
             &format!("drift checkpoint: {since_resume} self merges since the last resume"),
         )
         .map(Some);
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::selfimprove::gate::{LiveEval, Report};
+    use crate::state_dirs::Dirs;
+    use serde_json::json;
+
+    struct NoEval;
+    impl LiveEval for NoEval {
+        fn run(&self, _: u64, _: &str, _: &Path) -> Result<Report, String> {
+            Err("the rate rules never evaluate".into())
+        }
+    }
+
+    fn sh(dir: &Path, script: &str) {
+        let out = std::process::Command::new("sh")
+            .args(["-c", script])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{script}: {out:?}");
+    }
+
+    type Setup = fn(&Dirs, &Ledger);
+    /// Name, setup, `enabled`, merges this shift, (hours between merges, drift checkpoint), the
+    /// expected (outcome, reason), and whether the lane is paused after.
+    type Row = (
+        &'static str,
+        Box<dyn Fn(&Dirs, &Ledger)>,
+        bool,
+        u32,
+        (u32, u32),
+        Option<(&'static str, &'static str)>,
+        bool,
+    );
+
+    /// Gate step 6 (design §12.3, §15 "a table test per rule"): one row per rule, with whether
+    /// the rule pauses the lane.
+    #[test]
+    fn step6_has_one_row_per_rule() {
+        let base = std::env::temp_dir().join(format!("wg-rate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let co = base.join("co");
+        std::fs::create_dir_all(&co).unwrap();
+        let reverted = "f".repeat(40);
+        sh(&co, &format!("git init -q -b main && git -c user.name=t -c user.email=t@x.invalid commit -q --allow-empty -m init \
+            && git -c user.name=o -c user.email=o@x.invalid commit -q --allow-empty -m 'Revert' -m 'This reverts commit {reverted}.' \
+            && git update-ref refs/remotes/origin/main HEAD"));
+        let merged = |m: String| {
+            move |_: &Dirs, l: &Ledger| {
+                l.append("merged", json!({ "pr": 1, "head": "h", "merge": m }))
+                    .unwrap();
+            }
+        };
+        let none: Setup = |_, _| {};
+        let rows: Vec<Row> = vec![
+            ("clear", Box::new(none), true, 0, (24, 10), None, false),
+            (
+                "disabled",
+                Box::new(none),
+                false,
+                0,
+                (24, 10),
+                Some(("held", "enabled is false")),
+                false,
+            ),
+            (
+                "paused",
+                Box::new(|d: &Dirs, _: &Ledger| {
+                    state::save(&d.self_state(), &SelfState::default().paused_by("drill")).unwrap()
+                }),
+                true,
+                0,
+                (24, 10),
+                Some(("held", "is paused (drill)")),
+                true,
+            ),
+            (
+                "stop",
+                Box::new(|d: &Dirs, _: &Ledger| {
+                    crate::state_dirs::private_dir(d.stop_file().parent().unwrap()).unwrap();
+                    std::fs::write(d.stop_file(), "").unwrap();
+                }),
+                true,
+                0,
+                (24, 10),
+                Some(("held", "STOP file exists")),
+                false,
+            ),
+            (
+                "per shift",
+                Box::new(none),
+                true,
+                1,
+                (24, 10),
+                Some(("pending", "one self merge per shift")),
+                false,
+            ),
+            (
+                "spacing",
+                Box::new(merged("a".repeat(40))),
+                true,
+                0,
+                (24, 10),
+                Some(("pending", "24 h between merges")),
+                false,
+            ),
+            (
+                "drift",
+                Box::new(merged("a".repeat(40))),
+                true,
+                0,
+                (0, 1),
+                Some(("held", "drift checkpoint")),
+                true,
+            ),
+            (
+                "revert",
+                Box::new(merged(reverted.clone())),
+                true,
+                0,
+                (0, 10),
+                Some(("held", "reverted self merge")),
+                true,
+            ),
+        ];
+        for (i, (row, setup, enabled, merges, (hours, drift), want, paused)) in
+            rows.into_iter().enumerate()
+        {
+            let dirs = Dirs {
+                home: base.join(format!("h{i}")),
+            };
+            let ledger = Ledger::at(&dirs.self_ledger());
+            setup(&dirs, &ledger);
+            let cfg =
+                crate::config::parse(&format!("[self_improve]\nenabled = {enabled}\n")).unwrap();
+            let gh = crate::gh::Gh::new("/nonexistent/gh", base.join("gh"));
+            let e = Env {
+                dirs: &dirs,
+                cfg: &cfg,
+                gh: &gh,
+                checkout: &co,
+                merges_this_shift: merges,
+                eval: &NoEval,
+            };
+            let rules = Rules {
+                min_hours_between_merges: hours,
+                drift_checkpoint_every: drift,
+                ..super::super::protected::compiled()
+            };
+            let st = state::load(&dirs.self_state()).unwrap();
+            let got = check(&e, &ledger, &rules, &st).unwrap();
+            match (want, &got) {
+                (None, None) => {}
+                (Some((name, why)), Some(o)) => {
+                    assert_eq!(o.name(), name, "{row}: {o:?}");
+                    assert!(o.reason().contains(why), "{row}: {o:?}");
+                }
+                _ => panic!("{row}: {got:?}"),
+            }
+            assert_eq!(
+                state::load(&dirs.self_state()).unwrap().paused,
+                paused,
+                "{row}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

@@ -174,6 +174,42 @@ fn an_owner_queued_self_issue_becomes_a_ready_self_pr_the_gate_shadows() {
         "{journal:?}"
     );
     assert_eq!(f.prs().len(), 1);
+    // The gate ran again on the same head: nothing new was decided, labelled or said.
+    let decisions = self_ledger(&f)
+        .iter()
+        .filter(|e| e["kind"] == "decision")
+        .count();
+    let pr = &f.prs()[0];
+    assert_eq!(
+        (decisions, pr["comments"].as_array().map_or(0, Vec::len)),
+        (1, 1),
+        "{pr}"
+    );
+}
+
+#[test]
+fn a_resumed_self_task_records_its_head_so_the_gate_shadows_it() {
+    let Some(cli) = cli() else { return };
+    let f = self_fx("selfresume", &cli, &[SELF]);
+    self_issue(&f, 5, "SELF-DOCS STOP-MID Document what add does.", "pxm-0");
+    let out = f.shift();
+    let id = out["shift"].as_str().unwrap().to_string();
+    assert!(f.prs().is_empty(), "parked mid-task: {out}");
+    assert_eq!(f.labels(SELF, 5), ["wg:self", "wg:in-shift"]);
+    std::fs::remove_file(f.home.join(".workgraph/STOP")).unwrap();
+    let (code, v) = f.wg(&["shift", "resume", &id]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["resumed"][0]["outcome"], "pr-open", "{v}");
+    let pr = f.prs()[0]["number"].as_u64().unwrap();
+    let head = sh(&f.origin(SELF), "git rev-parse wg-self/5-document-add");
+    let ledger = self_ledger(&f);
+    let authored = ledger.iter().find(|e| e["kind"] == "authored").unwrap();
+    assert_eq!(
+        (authored["head"].as_str(), authored["pr"].as_u64()),
+        (Some(head.as_str()), Some(pr))
+    );
+    let (code, v) = f.wg(&["self", "gate", "--pr", &pr.to_string()]);
+    assert_eq!((code, v["outcome"].as_str()), (0, Some("shadow")), "{v}");
 }
 
 #[test]

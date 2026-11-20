@@ -35,6 +35,17 @@ pub fn save(path: &Path, s: &SelfState) -> Result<(), String> {
     crate::shift::record::write_atomic(path, &text)
 }
 
+/// Load, change and save under the self-ledger's lock, so two writers never lose an update.
+pub fn update(
+    path: &Path,
+    change: impl FnOnce(&SelfState) -> Result<SelfState, String>,
+) -> Result<SelfState, String> {
+    let _held = super::ledger::exclusive(path)?;
+    let next = change(&load(path)?)?;
+    save(path, &next)?;
+    Ok(next)
+}
+
 impl SelfState {
     pub fn paused_by(&self, why: &str) -> SelfState {
         SelfState {

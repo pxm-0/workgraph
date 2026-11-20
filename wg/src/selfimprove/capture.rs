@@ -96,6 +96,7 @@ pub fn capture(
     let src = Path::new(&rc.path);
     crate::git::fetch(src)?;
     let base = git(src, &["rev-parse", &format!("{merge}^1")], &[])?;
+    secrets_free(src, &base)?;
     let name = format!("{n}-{}", crate::untrusted::issue::slug(&title));
     let branch = format!("fixture/{name}");
     if !crate::git::fixture_branch(&branch) {
@@ -192,6 +193,23 @@ pub fn capture(
     Ok(
         json!({ "fixture": name, "branch": branch, "base": base, "hidden": hidden, "draft_pr": draft }),
     )
+}
+
+/// The bundle carries the whole history up to `base` into a second repo and into every eval arm,
+/// so a `.env*` file (other than `.env.example`) anywhere in it refuses the capture (design §14
+/// checklist 3, as the sandbox bundle excludes it).
+fn secrets_free(src: &Path, base: &str) -> Result<(), String> {
+    let paths = git(src, &["log", "--format=", "--name-only", base], &[])?;
+    let found: Vec<&str> = paths
+        .lines()
+        .filter(|p| crate::sandbox::bundle::excluded(p) && !p.is_empty())
+        .collect();
+    match found.first() {
+        None => Ok(()),
+        Some(p) => Err(format!(
+            "refused: {p} is in the history the fixture would bundle; .env files never leave the Mac"
+        )),
+    }
 }
 
 #[cfg(test)]

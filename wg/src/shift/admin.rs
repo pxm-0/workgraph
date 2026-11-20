@@ -105,7 +105,9 @@ pub fn resume(dirs: &Dirs, cfg: &Config, id: &str) -> Result<Value, String> {
             .as_ref()
             .is_some_and(|r| r.body_sha256 != issue::body_sha256(&i))
         {
-            intake::relabel(dirs, &gh, &repo, n, &[&cfg.shift.label], &[IN_SHIFT])?;
+            // A self issue goes back to the owner's wg:self queue, never the dev queue.
+            let queue = super::selflane::lane_shift(cfg, rc).label;
+            intake::relabel(dirs, &gh, &repo, n, &[&queue], &[IN_SHIFT])?;
             gh.comment(
                 &repo,
                 n,
@@ -124,6 +126,7 @@ pub fn resume(dirs: &Dirs, cfg: &Config, id: &str) -> Result<Value, String> {
             continue;
         }
         let d = work_one(&env, rc, &i, true)?;
+        super::selflane::authored(&env, rc, n, &d)?;
         resumed.push(json!({ "repo": repo, "issue": n, "outcome": d.kind.name(), "run": d.run }));
         if matches!(d.kind, Kind::Incident) {
             break;
@@ -159,14 +162,10 @@ pub fn recover(dirs: &Dirs, cfg: &Config, gh: &Gh) -> Result<Value, String> {
         if states != [IN_SHIFT] {
             continue;
         }
-        intake::relabel(
-            dirs,
-            gh,
-            &rec.repo,
-            rec.issue,
-            &[&cfg.shift.label],
-            &[IN_SHIFT],
-        )?;
+        let queue = cfg.repo(&rec.repo).map_or(cfg.shift.label.clone(), |rc| {
+            super::selflane::lane_shift(cfg, rc).label
+        });
+        intake::relabel(dirs, gh, &rec.repo, rec.issue, &[&queue], &[IN_SHIFT])?;
         gh.comment(
             &rec.repo,
             rec.issue,
