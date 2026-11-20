@@ -9,6 +9,7 @@ pub mod owner;
 pub mod record;
 pub mod release;
 pub mod report;
+pub mod report_self;
 pub mod run;
 pub mod runctx;
 pub mod sandbox;

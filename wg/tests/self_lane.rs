@@ -131,6 +131,23 @@ fn an_owner_queued_self_issue_becomes_a_ready_self_pr_the_gate_shadows() {
             .any(|e| e["kind"] == "self_gate" && e["outcome"] == "shadow"),
         "{journal:?}"
     );
+    let report = f.report(&id);
+    assert_eq!(
+        report["selfImprovement"]["shadow"][0]["pr"], pr["number"],
+        "{report}"
+    );
+    let md = std::fs::read_to_string(f.home.join(".workgraph/shifts").join(&id).join("report.md"))
+        .unwrap();
+    assert!(
+        md.contains("### Self-improvement") && md.contains("would merge (shadow mode)"),
+        "{md}"
+    );
+    assert!(
+        authored["spend"]["by_provider_micros"]["subscription"]
+            .as_u64()
+            .is_some(),
+        "{authored}"
+    );
     let run = f.record(SELF, 5)["runs"][0].as_str().unwrap().to_string();
     assert!(
         f.check_targets(&run)

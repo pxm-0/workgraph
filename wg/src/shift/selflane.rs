@@ -206,12 +206,31 @@ fn one_task(e: &Env, repo: &RepoCfg, ledger: &Ledger) -> Result<Value, String> {
         let rec = super::record::load(e.dirs, &repo.name, i.number)?.ok_or("no task record")?;
         let head = crate::git::head(std::path::Path::new(&rec.worktree))?;
         let pr = rec.pr.ok_or("the self PR has no number")?;
+        let spend = run_spend(e, d.run.as_deref().unwrap_or(""))?;
         ledger.append(
             "authored",
-            json!({ "repo": repo.name, "pr": pr, "head": head, "run": d.run, "branch": rec.branch, "issue": i.number }),
+            json!({ "repo": repo.name, "pr": pr, "head": head, "run": d.run, "branch": rec.branch, "issue": i.number, "spend": spend }),
         )?;
         out["pr"] = json!(pr);
     }
     e.journal.append("self_lane", json!({ "task": out }))?;
     Ok(out)
+}
+
+/// A run's spend by provider, from the cost ledger (micro-dollars; unknown costs counted apart).
+fn run_spend(e: &Env, run: &str) -> Result<Value, String> {
+    let lines = crate::journal::read(&e.dirs.ledger()).unwrap_or_default();
+    let mut by: serde_json::Map<String, Value> = serde_json::Map::new();
+    let mut unknown = 0;
+    for l in lines.iter().filter(|l| l["run"] == run) {
+        match l["cost_micros"].as_u64() {
+            Some(c) => {
+                let p = l["provider"].as_str().unwrap_or("unknown").to_string();
+                let now = by.get(&p).and_then(Value::as_u64).unwrap_or(0);
+                by.insert(p, json!(now + c));
+            }
+            None => unknown += 1,
+        }
+    }
+    Ok(json!({ "by_provider_micros": by, "calls_with_unknown_cost": unknown }))
 }

@@ -169,6 +169,7 @@ pub fn build(dirs: &Dirs, id: &str) -> Result<Value, String> {
         "runs": notes,
         "spend": spend(dirs, &runs)?,
         "shiftIncidents": of("incident"),
+        "selfImprovement": super::report_self::section(dirs, &events)?,
         "sandbox": {
             "doctor": of("sandbox_doctor").last().cloned(),
             "argus": of("argus_fingerprint"),
@@ -335,13 +336,14 @@ pub fn markdown(r: &Value) -> String {
         None => String::new(),
     };
     format!(
-        "# Shift {}\n\nStopped: {}{stale}\n\n## Needs you\n\n### Incidents\n{}\n{}\n\n### Decisions\n{}\n\n### Approvals\n{}\n\n### Releases at the ready-to-release gate\n{}\n\n### Parked\n{}\n\n## Stuck\n{}\n\n### Releases stuck\n{}\n\n## Skipped\n{}\n{}\n\n## Sandbox\n\n{}\n\n## Rules\n{}\n\n## Spend\n\nTotal ${} (calls with unknown cost: {})\n\n```json\n{}\n```\n",
+        "# Shift {}\n\nStopped: {}{stale}\n\n## Needs you\n\n### Incidents\n{}\n{}\n\n### Decisions\n{}\n\n### Approvals\n{}\n\n### Self-improvement\n{}\n\n### Releases at the ready-to-release gate\n{}\n\n### Parked\n{}\n\n## Stuck\n{}\n\n### Releases stuck\n{}\n\n## Skipped\n{}\n{}\n\n## Sandbox\n\n{}\n\n## Rules\n{}\n\n## Spend\n\nTotal ${} (calls with unknown cost: {})\n\n```json\n{}\n```\n",
         s(r, "shift"),
         r["stopped"],
         list(&n["incidents"], &task_line),
         if r["shiftIncidents"].as_array().is_some_and(|a| !a.is_empty()) { shift_incidents } else { String::new() },
         list(&n["decisions"], &decision),
         list(&n["approvals"], &approval),
+        super::report_self::markdown(&r["selfImprovement"]),
         list(&n["releases"], &|e| format!(
             "- {}#{} (PR #{}, merge {}): prepared in run {}; record ready-to-release yourself, then deploy by hand. The factory never deploys.",
             s(e, "repo"), e["issue"], e["pr"], s(e, "merge"), s(e, "run")
@@ -372,6 +374,10 @@ pub fn write(dirs: &Dirs, id: &str) -> Result<Value, String> {
     std::fs::write(dir.join("report.md"), markdown(&r))
         .map_err(|e| format!("cannot write the shift report: {e}"))?;
     let count = |k: &str| r["needsYou"][k].as_array().map_or(0, Vec::len);
+    let self_count: usize = ["held", "shadow", "rolledBack"]
+        .iter()
+        .map(|k| r["selfImprovement"][k].as_array().map_or(0, Vec::len))
+        .sum();
     Ok(json!({
         "shift": id,
         "report": dir.join("report.md"),
@@ -380,7 +386,8 @@ pub fn write(dirs: &Dirs, id: &str) -> Result<Value, String> {
         "needsYou": { "incidents": count("incidents") + r["shiftIncidents"].as_array().map_or(0, Vec::len),
                       "decisions": count("decisions"),
                       "approvals": count("approvals"), "parked": count("parked"),
-                      "releases": count("releases") },
+                      "releases": count("releases"),
+                      "selfImprovement": self_count },
         "spendUsd": r["spend"]["usd"],
     }))
 }
@@ -490,7 +497,7 @@ mod tests {
         let out = write(&dirs, "20261120-0130").unwrap();
         assert_eq!(
             out["needsYou"],
-            json!({ "incidents": 1, "decisions": 1, "approvals": 1, "parked": 1, "releases": 1 })
+            json!({ "incidents": 1, "decisions": 1, "approvals": 1, "parked": 1, "releases": 1, "selfImprovement": 0 })
         );
         assert_eq!(
             out["spendUsd"],
