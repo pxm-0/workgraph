@@ -19,8 +19,12 @@ pub struct TaskRecord {
     pub installed: bool,
     pub runs: Vec<String>,
     pub body_sha256: String,
-    /// `in-shift`, `pr-open`, `needs-decision`, `stuck`, `parked`, `incident`, `verified`, `gone`.
+    /// `in-shift`, `pr-open`, `needs-decision`, `stuck`, `parked`, `incident`, `approved` (finalize
+    /// passed, the push or `gh pr ready` still to do), `verified`, `gone`.
     pub status: String,
+    /// The local evidence commit `wg approve` made, while the record is `approved`.
+    #[serde(default)]
+    pub approved_head: Option<String>,
     pub pr: Option<u64>,
     pub pr_url: Option<String>,
     pub claimed_at: u64,
@@ -85,6 +89,15 @@ pub fn all(dirs: &Dirs) -> Result<Vec<TaskRecord>, String> {
     }
     out.sort_by_key(|r| (r.claimed_at, r.issue));
     Ok(out)
+}
+
+/// The issues of `repo` that have a task record (each later take of one is a rerun).
+pub fn issues_of(dirs: &Dirs, repo: &str) -> Result<Vec<u64>, String> {
+    Ok(all(dirs)?
+        .into_iter()
+        .filter(|r| r.repo == repo)
+        .map(|r| r.issue)
+        .collect())
 }
 
 /// The record of the task whose PR is `pr` in `repo`.

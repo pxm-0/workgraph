@@ -2,7 +2,8 @@
 """A stand-in for `gh` (design §15.3): serves issues, label timelines, body edits and PRs from a JSON
 state file named by FAKE_GH_STATE, applies label edits, comments and PRs to it, and logs every argv.
 Label edits are made by FAKE_GH_ACTOR (the owner's token), PR heads are read from the local bare
-origin named in the state."""
+origin named in the state. `fail` maps a command ("pr ready") to how many more calls of it fail,
+and `touch` maps one to a file it creates when it runs (a STOP file mid-publish, say)."""
 import json
 import os
 import subprocess
@@ -39,7 +40,8 @@ def issue(repo, n):
 
 
 def public(i):
-    return {k: i[k] for k in ["number", "title", "body", "author", "labels", "url", "createdAt"]} | {"updatedAt": i["createdAt"]}
+    return {k: i[k] for k in ["number", "title", "body", "author", "labels", "url", "createdAt"]} | {
+        "updatedAt": i["createdAt"], "state": i.get("state", "OPEN")}
 
 
 def head(repo, branch):
@@ -52,6 +54,15 @@ def pr_view(p):
     p["headRefOid"] = head(p["repo"], p["headRefName"])
     return {k: p[k] for k in ["number", "url", "state", "headRefOid"]}
 
+
+command = " ".join(args[:2])
+fails = state.get("fail", {})
+if fails.get(command, 0) > 0:
+    fails[command] -= 1
+    sys.stderr.write(f"fake gh: {command} fails as scripted\n")
+    save_and_exit(None, 1)
+if command in state.get("touch", {}):
+    open(state["touch"][command], "w").close()
 
 if args[:2] == ["auth", "status"]:
     save_and_exit("Logged in")

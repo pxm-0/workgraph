@@ -17,7 +17,7 @@ use std::path::Path;
 
 const DAY: u64 = 24 * 3600;
 
-/// `(repo, issue)` of tasks the shift claimed but never finished.
+/// `(repo, issue)` of tasks the shift claimed but never finished, or parked as resumable.
 pub fn interrupted(events: &[Value]) -> Vec<(String, u64)> {
     let key = |e: &Value| {
         (
@@ -29,7 +29,7 @@ pub fn interrupted(events: &[Value]) -> Vec<(String, u64)> {
     for e in events {
         match e["kind"].as_str() {
             Some("task_claimed") if !open.contains(&key(e)) => open.push(key(e)),
-            Some("task_finished") => open.retain(|k| *k != key(e)),
+            Some("task_finished") if e["resumable"] != true => open.retain(|k| *k != key(e)),
             _ => {}
         }
     }
@@ -118,7 +118,7 @@ pub fn resume(dirs: &Dirs, cfg: &Config, id: &str) -> Result<Value, String> {
                 rate_limited: false,
                 escalations: json!([]),
             };
-            finished(&j, &repo, n, &d)?;
+            finished(&j, &repo, &i, &d)?;
             resumed.push(json!({ "repo": repo, "issue": n, "outcome": "parked" }));
             continue;
         }
@@ -129,10 +129,14 @@ pub fn resume(dirs: &Dirs, cfg: &Config, id: &str) -> Result<Value, String> {
         }
     }
     let report = super::report::write(dirs, id)?;
-    Ok(json!({ "shift": id, "resumed": resumed, "report": report["report"] }))
+    let reexecuted = std::env::var_os("WG_RESUME_REEXEC").is_some();
+    Ok(
+        json!({ "shift": id, "resumed": resumed, "report": report["report"], "reexecuted": reexecuted }),
+    )
 }
 
-/// Claims older than 24 hours with no PR and no live shift go back to the queue.
+/// Claims older than 24 hours with no PR and no live shift go back to the queue, but only an issue
+/// whose one state label is still `wg:in-shift`: any other means someone already decided its fate.
 pub fn recover(dirs: &Dirs, cfg: &Config, gh: &Gh) -> Result<Value, String> {
     if let Some(pid) = lock::holder(&dirs.shift_lock()).filter(|p| lock::alive(*p)) {
         return Ok(json!({ "skipped": format!("a shift (pid {pid}) is running") }));
@@ -143,6 +147,15 @@ pub fn recover(dirs: &Dirs, cfg: &Config, gh: &Gh) -> Result<Value, String> {
             continue;
         }
         if gh.pr_for_head(&rec.repo, &rec.branch)?.is_some() {
+            continue;
+        }
+        let labels = gh.issue(&rec.repo, rec.issue)?.labels;
+        let states: Vec<&str> = labels
+            .iter()
+            .map(String::as_str)
+            .filter(|l| l.starts_with("wg:") && *l != intake::P1)
+            .collect();
+        if states != [IN_SHIFT] {
             continue;
         }
         intake::relabel(
@@ -229,6 +242,8 @@ mod tests {
     #[test]
     fn interrupted_tasks_are_claimed_and_not_finished() {
         let e = |kind: &str, n: u64| json!({ "kind": kind, "repo": "o/r", "issue": n });
+        let mut parked = e("task_finished", 4);
+        parked["resumable"] = json!(true);
         let events = [
             e("task_claimed", 1),
             e("task_finished", 1),
@@ -236,10 +251,16 @@ mod tests {
             e("task_claimed", 3),
             e("task_finished", 3),
             e("task_claimed", 3),
+            e("task_claimed", 4),
+            parked,
         ];
         assert_eq!(
             interrupted(&events),
-            vec![("o/r".to_string(), 2), ("o/r".to_string(), 3)]
+            vec![
+                ("o/r".to_string(), 2),
+                ("o/r".to_string(), 3),
+                ("o/r".to_string(), 4)
+            ]
         );
     }
 }

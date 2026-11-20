@@ -65,7 +65,8 @@ fn toy(base: &Path, name: &str) -> (PathBuf, PathBuf) {
         "import glob, runpy\nfor f in sorted(glob.glob('test_*.py')):\n    runpy.run_path(f)\n",
     )
     .unwrap();
-    fs::write(repo.join(".gitignore"), "__pycache__/\n").unwrap();
+    // A coverage build's `wg guard` hook leaves profile files where it runs.
+    fs::write(repo.join(".gitignore"), "__pycache__/\n*.profraw\n").unwrap();
     fs::write(
         repo.join("compose.dev.yml"),
         "services:\n  workspace:\n    image: x\n",
@@ -176,6 +177,15 @@ impl Fx {
             .current_dir(&self.base)
             .env("HOME", &self.home)
             .env("FAKE_GH_STATE", &self.state)
+            // `<base>/bin` first: a test may put a fake `docker` there.
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    self.base.join("bin").display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
             .env_remove("WG_AGENT");
         c
     }
@@ -237,6 +247,49 @@ impl Fx {
 
     pub fn ledger(&self) -> Vec<Value> {
         self.journal(&self.home.join(".workgraph/cost.jsonl"))
+    }
+
+    pub fn toml(&self) -> PathBuf {
+        self.home.join(".workgraph/factory.toml")
+    }
+
+    /// Appends tables to factory.toml (providers, auth).
+    pub fn append_toml(&self, text: &str) {
+        let t = fs::read_to_string(self.toml()).unwrap();
+        fs::write(self.toml(), format!("{t}\n{text}\n")).unwrap();
+    }
+
+    /// Sets `key = value` (raw TOML) in the `[[repo]]` table of `repo`.
+    pub fn set_repo(&self, repo: &str, key: &str, value: &str) {
+        let text = fs::read_to_string(self.toml()).unwrap();
+        let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+        let name = format!("name = \"{repo}\"");
+        let start = (1..lines.len())
+            .find(|&i| lines[i] == name && lines[i - 1] == "[[repo]]")
+            .unwrap();
+        let end = (start..lines.len())
+            .find(|&i| lines[i].is_empty())
+            .unwrap_or(lines.len());
+        let line = format!("{key} = {value}");
+        match (start..end).find(|&i| lines[i].starts_with(&format!("{key} = "))) {
+            Some(i) => lines[i] = line,
+            None => lines.insert(end, line),
+        }
+        fs::write(self.toml(), lines.join("\n") + "\n").unwrap();
+    }
+
+    /// Runs `script` in `repo`'s checkout, then pushes main to its origin.
+    pub fn push(&self, repo: &str, script: &str) {
+        sh(
+            &self.repo(repo),
+            &format!("{script} && git commit -qm change && git push -q origin main"),
+        );
+    }
+
+    pub fn record_path(&self, repo: &str, n: u64) -> PathBuf {
+        self.home
+            .join(".workgraph/tasks")
+            .join(format!("{}#{n}.json", repo.replace('/', "__")))
     }
 
     pub fn record(&self, repo: &str, n: u64) -> Value {

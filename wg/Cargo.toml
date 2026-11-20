@@ -36,6 +36,10 @@ name = "hostile"
 path = "tests/hostile.rs"
 
 [[test]]
+name = "hostile_publish"
+path = "tests/hostile_publish.rs"
+
+[[test]]
 name = "runner"
 path = "tests/runner.rs"
 
@@ -58,6 +62,14 @@ path = "tests/admin.rs"
 [[test]]
 name = "shift_e2e"
 path = "tests/shift_e2e.rs"
+
+[[test]]
+name = "shift_outcomes"
+path = "tests/shift_outcomes.rs"
+
+[[test]]
+name = "shift_resume"
+path = "tests/shift_resume.rs"
 
 [[test]]
 name = "intake"

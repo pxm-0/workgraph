@@ -40,6 +40,8 @@ pub struct Kernel {
     pub contract: Option<Contract>,
     pub seen_sigs: Vec<String>,
     pub pins: std::collections::BTreeMap<String, String>,
+    /// See `driver::Start::baseline_floor`.
+    pub baseline_floor: Option<Vec<String>>,
 }
 
 fn esc(id: &str, question: String, recommendation: &str) -> Escalation {
@@ -188,21 +190,11 @@ impl Kernel {
         )))
     }
 
-    /// Every escalation the kernel knows, in run.js's order: Reading, Challenge, DIRTY, then its own.
-    pub fn all_escalations(&self) -> Vec<Escalation> {
-        let Some(r) = &self.reading else {
-            return vec![];
-        };
-        let mut out: Vec<Escalation> = self
-            .read_escalations
+    /// The Reading's units, in the factory's model (for the scope helpers).
+    pub fn units(&self) -> Vec<Unit> {
+        self.reading
             .iter()
-            .filter(|e| r.escalations.iter().any(|x| x.id == e.id))
-            .cloned()
-            .collect();
-        out.extend(self.challenge_escalations.iter().cloned());
-        let units: Vec<Unit> = r
-            .units
-            .iter()
+            .flat_map(|r| r.units.iter())
             .map(|u| Unit {
                 id: u.id.clone(),
                 goal: u.goal.clone(),
@@ -215,8 +207,22 @@ impl Kernel {
                 tier: wg_factory::api::Tier::Sonnet,
                 counts_for_tier: false,
             })
+            .collect()
+    }
+
+    /// Every escalation the kernel knows, in run.js's order: Reading, Challenge, DIRTY, then its own.
+    pub fn all_escalations(&self) -> Vec<Escalation> {
+        let Some(r) = &self.reading else {
+            return vec![];
+        };
+        let mut out: Vec<Escalation> = self
+            .read_escalations
+            .iter()
+            .filter(|e| r.escalations.iter().any(|x| x.id == e.id))
+            .cloned()
             .collect();
-        let overlap = dirty_overlap(&units, &self.user_changes);
+        out.extend(self.challenge_escalations.iter().cloned());
+        let overlap = dirty_overlap(&self.units(), &self.user_changes);
         if !overlap.is_empty() && !self.decided.iter().any(|d| d == "DIRTY") {
             out.push(dirty_escalation(&overlap));
         }
@@ -277,12 +283,15 @@ impl Kernel {
         Ok(())
     }
 
-    /// The gate check set: required checks minus those the kernel saw fail at baseline.
+    /// The gate check set: required checks minus those the kernel saw fail at baseline, and on a
+    /// rerun only those that also failed at the task's first clean baseline.
     pub fn record_baseline(&mut self, results: &[CheckResult]) {
+        let floor = self.baseline_floor.clone();
         self.left_out = results
             .iter()
             .filter(|r| !r.passed())
             .map(|r| r.name().to_string())
+            .filter(|n| floor.as_ref().is_none_or(|f| f.contains(n)))
             .collect();
         self.gate = self
             .required

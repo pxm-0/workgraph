@@ -237,9 +237,21 @@ fn call_inner(ctx: &RunCtx, limited: &Mutex<Vec<String>>, req: &Request) -> Resu
     };
     loop {
         if let Some(rec) = ctx.replay.take(&label) {
-            ctx.journal.append(
+            let seq = ctx.journal.append(
                 "llm_replayed",
                 json!({ "label": label, "from": ctx.replay.from, "provider": rec.provider }),
+            )?;
+            // Recorded again in this run, as a live answer is, so a later resume of this run
+            // replays it too instead of paying for it a third time.
+            write(
+                &ctx.run_dir
+                    .join("logs")
+                    .join(format!("{}.json", file_stem(seq, &label))),
+                &json!({ "label": label, "stdout": rec.stdout, "replayed": true }).to_string(),
+            )?;
+            ctx.journal.append(
+                "llm_finished",
+                json!({ "label": label, "call_seq": seq, "outcome": "ok", "provider": rec.provider, "replayed": true }),
             )?;
             let first_party = ctx
                 .cfg

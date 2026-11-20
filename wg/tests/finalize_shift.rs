@@ -1,6 +1,7 @@
 //! `wg approve` and `wg approval-summary` on shift PRs, in the task worktree with real Haruspex
 //! (design §15.3): the head check, the check-command pin, a clean tree, refusal without tokens at
-//! the current tree, refusal inside an agent, then the approve round trip to a ready PR.
+//! the current tree, refusal inside an agent, then the approve round trip to a ready PR, resumed
+//! after `gh pr ready` failed once finalize had passed.
 
 mod shift_support;
 
@@ -72,9 +73,25 @@ fn approve_makes_a_shift_pr_ready_with_haruspex_verification_recorded() {
     );
     sh(&wt, "git reset -q --hard HEAD~1");
 
+    // finalize passes and the evidence commit is made, then `gh pr ready` fails (every retry).
+    let mut st = f.state();
+    st["fail"] = serde_json::json!({ "pr ready": 3 });
+    f.set_state(&st);
+    let (code, out) = f.wg(&approve);
+    assert_eq!(code, 2, "{out}");
+    assert!(
+        out["error"].as_str().unwrap().contains("fails as scripted"),
+        "{out}"
+    );
+    assert_eq!(f.record("o/r", 1)["status"], "approved");
+    assert_eq!(f.labels("o/r", 1), ["wg:pr-open"]);
+    assert_eq!(f.prs()[0]["draft"], true);
+
+    // Running it again skips finalize and finishes the push, the ready step and the label.
     let (code, out) = f.wg(&approve);
     assert_eq!(code, 0, "{out}");
     assert_eq!(out["passed"], true, "{out}");
+    assert!(out["resumed"].is_string(), "{out}");
     assert_eq!(out["ready"], true);
     assert_eq!(f.labels("o/r", 1), ["wg:verified"]);
     let pr = &f.prs()[0];
@@ -94,7 +111,7 @@ fn approve_makes_a_shift_pr_ready_with_haruspex_verification_recorded() {
     );
     assert_eq!(f.record("o/r", 1)["status"], "verified");
 
-    // A project.json command changed after Read: the pin stops the chain before verify.
+    // A project.json command changed after Read: the pin refuses before any approval is recorded.
     let wt2 = PathBuf::from(f.record("o/r", 2)["worktree"].as_str().unwrap());
     let project = wt2.join(".haruspex/project.json");
     let text = std::fs::read_to_string(&project)
@@ -102,9 +119,19 @@ fn approve_makes_a_shift_pr_ready_with_haruspex_verification_recorded() {
         .replace("python3 check.py", "python3 -c 'pass'");
     std::fs::write(&project, text).unwrap();
     let (code, out) = f.wg(&["approve", "--repo", "o/r", "--pr", "101", "--by", "tester"]);
-    assert_eq!(code, 0, "{out}");
-    assert_eq!(out["passed"], false);
-    assert_eq!(out["blockedAt"], "check pins");
+    assert_eq!(code, 2, "{out}");
+    assert!(
+        out["error"]
+            .as_str()
+            .unwrap()
+            .contains("check test changed in project.json since Read"),
+        "{out}"
+    );
+    let state2 = std::fs::read_to_string(wt2.join(".haruspex/state.json")).unwrap_or_default();
+    assert!(
+        !state2.contains("\"tester\""),
+        "no approval recorded: {state2}"
+    );
     assert_eq!(f.labels("o/r", 2), ["wg:pr-open"], "not verified");
     let (code, out) = f.wg(&["approve", "--repo", "o/r", "--pr", "999", "--by", "tester"]);
     assert_eq!(code, 2);

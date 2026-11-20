@@ -32,6 +32,9 @@ pub struct Start {
     pub pipeline: PipelineDef,
     pub start_branch: String,
     pub initializing: bool,
+    /// Checks that failed at the first clean baseline of this task (a rerun on a kept worktree):
+    /// only these may leave the gate, so an earlier run's edits never shrink it (design §4.1).
+    pub baseline_floor: Option<Vec<String>>,
 }
 
 /// How a run ended. Made once per run.
@@ -75,6 +78,7 @@ pub fn run_task(ctx: &RunCtx, start: Start, step: Step) -> Result<Ran, String> {
         user_changes: start.user_changes_before.clone(),
         initializing: start.initializing,
         start_branch: start.start_branch.clone(),
+        baseline_floor: start.baseline_floor.clone(),
         approvals: ctx.ports.hx.approvals()?,
         managed: ctx.ports.hx.managed_hash()?,
         ..Kernel::default()
@@ -112,7 +116,12 @@ pub fn run_task(ctx: &RunCtx, start: Start, step: Step) -> Result<Ran, String> {
         let Some(ev) = l.queue.pop_front() else {
             break End::Failed("the factory stopped without finishing".into());
         };
-        if let Some(why) = ctx.shift.as_ref().and_then(|s| (s.stop)()) {
+        // A publish's answer is always fed: once the draft PR exists the task is a PR, whatever
+        // stops the shift now.
+        let answering_publish =
+            matches!(ev, Event::Published { .. } | Event::PublishRefused { .. });
+        let stop = ctx.shift.as_ref().filter(|_| !answering_publish);
+        if let Some(why) = stop.and_then(|s| (s.stop)()) {
             ctx.journal.append("parked", json!({ "reason": why }))?;
             break End::Parked(format!("shift stopped: {why}"));
         }
@@ -232,6 +241,10 @@ impl Loop<'_> {
                         j.append("pr_opened", json!({ "url": url }))?;
                         self.published = Some(url.clone());
                         self.queue.push_back(Event::Published { url });
+                    }
+                    Err(why) if why.starts_with("incident") => {
+                        j.append("incident", json!({ "at": "publish", "why": why }))?;
+                        return Ok(Some(End::Incident(why)));
                     }
                     Err(why) => {
                         j.append("warning", json!({ "refused": format!("publish: {why}") }))?;

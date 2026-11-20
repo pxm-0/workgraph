@@ -35,9 +35,10 @@ means it refused: show it and stop.
      answers and queues the issue for the next shift.
    - **Approvals.** For each draft PR, offer `/workgraph:work approve <owner/repo>#<pr>` and follow
      that skill's section 7 when the owner says yes.
-   - **Parked.** Say why each parked (rate limited, call cap, the shift stopped, the issue changed
-     after the claim). They are back in the queue; nothing to do unless the owner wants to change
-     them.
+   - **Parked.** Say why each parked (rate limited, call cap, the issue changed after the claim):
+     those are back in the queue; nothing to do unless the owner wants to change them. A task the
+     shift stopped mid-run stays claimed (`wg:in-shift`): offer `<wg> shift resume <id>`, which
+     replays the answers it already paid for.
 3. Then, briefly: stuck tasks with their reason, skipped repos and issues (an untrusted labeller or
    editor is expected noise), and spend: total, by provider and model, unknown-cost calls.
 

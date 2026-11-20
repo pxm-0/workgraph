@@ -1,5 +1,6 @@
 //! `wg doctor --live`: one small haiku call on the default provider, with no tools, in a throwaway
-//! directory, through the same argv, env, settings and guard as a real run.
+//! directory, through the same argv, env, settings and guard as a real run. A shift's preflight
+//! probes every provider a stage names too (design §7.3 step 3).
 
 use crate::budget::{Ledger, Spend};
 use crate::claude::argv::{argv, Input};
@@ -19,6 +20,33 @@ pub fn probe(cfg: &Config, dirs: &Dirs) -> Result<String, String> {
         .auth
         .get(&cfg.auth.default)
         .ok_or("the default provider is not defined")?;
+    probe_provider(cfg, dirs, provider)
+}
+
+/// The default provider and each other provider `[auth.stages]` names, one call each.
+pub fn probe_all(cfg: &Config, dirs: &Dirs) -> Result<Vec<String>, String> {
+    let mut ids = vec![cfg.auth.default.clone()];
+    for p in cfg.auth.stages.values() {
+        if !ids.contains(p) {
+            ids.push(p.clone());
+        }
+    }
+    ids.iter()
+        .map(|id| {
+            let p = cfg
+                .auth
+                .get(id)
+                .ok_or_else(|| format!("provider {id} is not defined"))?;
+            probe_provider(cfg, dirs, p).map_err(|e| format!("provider {id}: {e}"))
+        })
+        .collect()
+}
+
+fn probe_provider(
+    cfg: &Config,
+    dirs: &Dirs,
+    provider: &crate::claude::providers::Provider,
+) -> Result<String, String> {
     let id = format!("doctor-{}", crate::tokens_store::random_hex(4)?);
     let dir = dirs.run(&id);
     let tmp = dirs.run_tmp(&id);

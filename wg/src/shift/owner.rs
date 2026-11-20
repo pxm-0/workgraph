@@ -112,7 +112,8 @@ pub fn summary(dirs: &Dirs, cfg: &Config, gh: &Gh, repo: &str, pr: u64) -> Resul
 
 /// The owner's approval of a shift PR: HEAD must be the PR head, then the finalize chain runs on
 /// the run's kernel tokens; on pass the branch is pushed, the PR marked ready and the issue
-/// labelled `wg:verified`.
+/// labelled `wg:verified`. Resumable: once finalize passed (record `approved`), a rerun after a
+/// failed push or `gh pr ready` skips finalize and only pushes the evidence commit it recorded.
 pub fn approve(
     dirs: &Dirs,
     cfg: &Config,
@@ -123,32 +124,54 @@ pub fn approve(
 ) -> Result<Value, String> {
     repo_cfg(cfg, repo)?;
     let rec = record::by_pr(dirs, repo, pr)?;
-    let worktree = Path::new(&rec.worktree);
+    let worktree_path = std::path::PathBuf::from(&rec.worktree);
+    let worktree = worktree_path.as_path();
     let view = gh.pr_view(repo, pr)?;
     if view.state != "OPEN" {
         return Err(format!("approve refused: PR #{pr} is {}", view.state));
     }
     let head = crate::git::head(worktree)?;
-    if head != view.head_oid {
-        return Err(format!(
-            "approve refused: the worktree HEAD {head} is not the PR head {}",
-            view.head_oid
-        ));
-    }
-    let run = rec.runs.last().ok_or("the task has no run")?;
-    let mut out = crate::cli::finalize::finalize_at(
-        dirs,
-        cfg,
-        worktree,
-        run,
-        by,
-        &format!("chore: approve #{} after the build", rec.issue),
-        "chore: record Haruspex verification",
-    )?;
+    let run = rec.runs.last().ok_or("the task has no run")?.clone();
+    let (mut out, rec) = if rec.status == "approved" {
+        let evidence = rec.approved_head.clone().unwrap_or_default();
+        if head != evidence {
+            return Err(format!(
+                "approve refused: the worktree HEAD {head} is not the evidence commit {evidence} the approval made"
+            ));
+        }
+        let pushed = json!({ "passed": true, "runId": run, "resumed": "finalize had passed; pushing its evidence commit" });
+        (pushed, rec)
+    } else {
+        if head != view.head_oid {
+            return Err(format!(
+                "approve refused: the worktree HEAD {head} is not the PR head {}",
+                view.head_oid
+            ));
+        }
+        let mut out = crate::cli::finalize::finalize_at(
+            dirs,
+            cfg,
+            worktree,
+            &run,
+            by,
+            &format!("chore: approve #{} after the build", rec.issue),
+            "chore: record Haruspex verification",
+        )?;
+        if out["passed"] != true {
+            out["pr"] = json!(pr);
+            return Ok(out);
+        }
+        // Recorded before the push: a failed push or `gh pr ready` is retried by running again.
+        let rec = TaskRecord {
+            status: "approved".into(),
+            approved_head: Some(crate::git::head(worktree)?),
+            updated_at: crate::journal::now(),
+            ..rec
+        };
+        record::save(dirs, &rec)?;
+        (out, rec)
+    };
     out["pr"] = json!(pr);
-    if out["passed"] != true {
-        return Ok(out);
-    }
     crate::git::push_task_branch(worktree, &rec.branch)?;
     gh.pr_ready(repo, pr)?;
     intake::relabel(dirs, gh, repo, rec.issue, &[VERIFIED], &[PR_OPEN])?;
@@ -156,6 +179,7 @@ pub fn approve(
         dirs,
         &TaskRecord {
             status: "verified".into(),
+            approved_head: None,
             updated_at: crate::journal::now(),
             ..rec
         },

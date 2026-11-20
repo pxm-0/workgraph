@@ -179,4 +179,5 @@ owner approves each one here. Find `wg` as in section 6.
    task worktree, approves and records the build gate, verifies, records the verification gate,
    commits the evidence, pushes the task branch, marks the PR ready and labels the issue
    `wg:verified`. If `passed` is false, show `blockedAt` and that step's `outputTail`; an `error`
-   is a refusal, show it.
+   is a refusal, show it. If the push or `gh pr ready` failed after finalize passed, the error says
+   so and running the same command again finishes them without finalizing twice.

@@ -6,7 +6,11 @@ exit codes) next to the manifest, never any value of a key.
 
 Shift tests steer it through the task text: NEEDS-DECISION makes the Reading raise a critical
 escalation E-CRIT, RATE-LIMIT makes a worker hit a 429, and SLOW makes the first worker wait until
-its parent dies (the kill-and-resume test), then exit without touching anything."""
+its parent dies (the kill-and-resume test), then exit without touching anything. STOP-MID makes the
+first worker create the STOP file as it works (and STOP-TWICE the first reviewer too), FAIL-CHECK
+writes a test no fixer makes pass, WORKFLOW writes a test that drops a GitHub workflow when it runs,
+INCIDENT makes the worker run `wg shift run` through the guard hook, and WRONG-BRANCH makes it
+switch branches."""
 import json
 import os
 import subprocess
@@ -76,6 +80,21 @@ def envelope(reply):
                        "modelUsage": {f"claude-{model}-5-5": {"outputTokens": 5}}})
 
 
+home = os.environ["HOME"]
+
+
+def once(name):
+    p = os.path.join(home, name)
+    if os.path.exists(p):
+        return False
+    open(p, "w").close()
+    return True
+
+
+def stop_the_shift():
+    open(os.path.join(home, ".workgraph", "STOP"), "w").close()
+
+
 if label == "doctor":
     print(envelope({"ok": True}))
     sys.exit(0)
@@ -91,6 +110,13 @@ if label.startswith("work:") and "SLOW" in prompt and not os.path.exists(slow_ma
         if os.getppid() != parent:
             sys.exit(1)
         time.sleep(0.1)
+
+if label.startswith("work:") and "STOP-MID" in prompt and once("stopped-at-work"):
+    stop_the_shift()
+    if "STOP-TWICE" in prompt:
+        open(os.path.join(home, "stop-at-review"), "w").close()
+if label.startswith("review") and os.path.exists(os.path.join(home, "stop-at-review")) and once("stopped-at-review"):
+    stop_the_shift()
 
 if label.startswith("read"):
     record["init"] = run(["python3", cli, "init", "."]).returncode
@@ -113,11 +139,22 @@ elif label.startswith("work:"):
     record["hook_edit_other_file"] = hook("Edit", {"file_path": "check.py"})
     record["hook_chained_bash"] = hook("Bash", {"command": "python3 check.py; touch escaped"})
     record["hook_approved_check"] = hook("Bash", {"command": "python3 check.py"})
+    test = "from calc import add\nassert add(2, 3) == 5, 'add is wrong'\n"
+    if "FAIL-CHECK" in prompt:
+        test = "from calc import add\nassert add(2, 3) == 6, 'add(2, 3) is not 6'\n"
+    if "WORKFLOW" in prompt:
+        test += "import os\nos.makedirs('.github/workflows', exist_ok=True)\nopen('.github/workflows/x.yml', 'w').write('on: push\\n')\n"
     with open("test_calc.py", "w") as f:
-        f.write("from calc import add\nassert add(2, 3) == 5, 'add is wrong'\n")
+        f.write(test)
     with open("calc.py", "w") as f:
         f.write("def add(a, b):\n    return a + b\n")
+    if "INCIDENT" in prompt:
+        record["hook_owner_command"] = hook("Bash", {"command": "wg shift run"})
+    if "WRONG-BRANCH" in prompt:
+        run(["git", "checkout", "-q", "-b", "wg/99-elsewhere"])
     reply = {"summary": "add now adds"}
+elif label.startswith("fix:"):
+    reply = {"summary": "tried, but nothing changed"}
 elif label.startswith("review"):
     with open(task_path()) as f:
         task = json.load(f)

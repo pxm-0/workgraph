@@ -43,15 +43,22 @@ pub fn created(dirs: &Dirs, repo: &str) -> Vec<u64> {
 }
 
 /// A `wg:*` state label other than the queue label and the priority label.
-fn other_state(i: &Issue, queue: &str) -> Option<String> {
+pub fn other_state(i: &Issue, queue: &str) -> Option<String> {
     i.labels
         .iter()
         .find(|l| l.starts_with("wg:") && l.as_str() != queue && l.as_str() != P1)
         .cloned()
 }
 
-/// The queued issues of `repo` that are work: `wg:p1` first, then oldest.
-pub fn intake(gh: &Gh, s: &Shift, repo: &str, created: &[u64]) -> Result<Intake, String> {
+/// The queued issues of `repo` that are work: `wg:p1` first, then oldest. `reruns` are the issues
+/// with a task record, checked for untrusted edits back to their first queue label.
+pub fn intake(
+    gh: &Gh,
+    s: &Shift,
+    repo: &str,
+    created: &[u64],
+    reruns: &[u64],
+) -> Result<Intake, String> {
     let (issues, bad) = gh.issues(repo, &s.label)?;
     let mut out = Intake {
         skipped: bad.into_iter().map(|why| (0, why)).collect(),
@@ -69,10 +76,12 @@ pub fn intake(gh: &Gh, s: &Shift, repo: &str, created: &[u64]) -> Result<Intake,
             ))
         } else {
             // A GitHub failure on one issue skips that issue, not the repo.
-            gh.label_events(repo, i.number)
-                .and_then(|ev| Ok((ev, gh.body_edits(repo, i.number)?)))
-                .and_then(|(ev, ed)| {
-                    issue::trusted(&i, &s.label, &ev, &ed, &s.trusted_actors).map(|_| ())
+            gh.timeline(repo, i.number)
+                .and_then(|(ev, renames)| {
+                    let edits = gh.body_edits(repo, i.number)?;
+                    let all: Vec<_> = edits.into_iter().chain(renames).collect();
+                    let first = reruns.contains(&i.number);
+                    issue::trusted(&i, &s.label, &ev, &all, &s.trusted_actors, first).map(|_| ())
                 })
                 .err()
         };
@@ -89,6 +98,26 @@ pub fn intake(gh: &Gh, s: &Shift, repo: &str, created: &[u64]) -> Result<Intake,
         )
     });
     Ok(out)
+}
+
+/// Why a picked issue is no longer work just before its claim (intake may have run hours ago):
+/// closed, no longer queued, another state label, or its title or body changed since intake.
+pub fn still_queued(gh: &Gh, s: &Shift, repo: &str, picked: &Issue) -> Option<String> {
+    let now = match gh.issue(repo, picked.number) {
+        Ok(i) => i,
+        Err(e) => return Some(format!("cannot read it again before the claim: {e}")),
+    };
+    if now.state != "OPEN" {
+        return Some("closed before its claim".into());
+    }
+    if !now.labels.contains(&s.label) {
+        return Some(format!("no longer carries {}", s.label));
+    }
+    if let Some(l) = other_state(&now, &s.label) {
+        return Some(format!("now carries {l}"));
+    }
+    (issue::body_sha256(&now) != issue::body_sha256(picked))
+        .then(|| "its title or body changed after intake".to_string())
 }
 
 /// Absolute label edits, recorded in the intake ledger.

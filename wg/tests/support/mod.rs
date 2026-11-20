@@ -73,6 +73,14 @@ pub struct Opts {
     pub shift: bool,
     /// In a shift, the stop condition reports this once `stop_after` steps have run.
     pub stop: Option<(usize, &'static str)>,
+    /// The checks that failed at the task's first clean baseline (a rerun).
+    pub baseline_floor: Option<Vec<&'static str>>,
+    /// The tree fingerprint the repo reports; a test changes it to model an edit.
+    pub tree: Arc<Mutex<String>>,
+    /// In a shift, `max_parallel_units`.
+    pub max_parallel: usize,
+    /// How long each Worker call takes, to observe parallelism.
+    pub work_ms: u64,
 }
 
 impl Default for Opts {
@@ -103,6 +111,10 @@ impl Default for Opts {
             guard_incident: None,
             shift: false,
             stop: None,
+            baseline_floor: None,
+            tree: Arc::new(Mutex::new("tree-1".into())),
+            max_parallel: 1,
+            work_ms: 0,
         }
     }
 }
@@ -119,6 +131,9 @@ pub struct Call {
 
 pub struct FakeProc {
     pub calls: Mutex<Vec<Call>>,
+    pub in_flight: std::sync::atomic::AtomicUsize,
+    pub max_in_flight: std::sync::atomic::AtomicUsize,
+    pub work_ms: u64,
     pub reply: Reply,
     pub raw: Raw,
     pub guard_incident: Option<&'static str>,
@@ -156,6 +171,13 @@ impl Proc for FakeProc {
         }
         if let Some(raw) = (self.raw)(s) {
             return raw;
+        }
+        if s.label.starts_with("work:") && self.work_ms > 0 {
+            use std::sync::atomic::Ordering::SeqCst;
+            let now = self.in_flight.fetch_add(1, SeqCst) + 1;
+            self.max_in_flight.fetch_max(now, SeqCst);
+            std::thread::sleep(Duration::from_millis(self.work_ms));
+            self.in_flight.fetch_sub(1, SeqCst);
         }
         let v = (self.reply)(&s.label, &s.stdin);
         if let Some(raw) = v.as_str() {
@@ -202,6 +224,7 @@ impl CheckExec for FakeChecks {
 }
 
 pub struct FakeRepo {
+    pub tree: Arc<Mutex<String>>,
     pub last: Arc<Mutex<String>>,
     pub changed: HashMap<&'static str, Vec<&'static str>>,
 }
@@ -216,7 +239,7 @@ impl Repo for FakeRepo {
             .unwrap_or_default())
     }
     fn tree(&self) -> Result<String, String> {
-        Ok("tree-1".into())
+        Ok(self.tree.lock().unwrap().clone())
     }
 }
 
@@ -267,6 +290,7 @@ pub fn fake_hx(units: &[Value], checks: &[(&str, &str)]) -> FakeHx {
 }
 
 pub struct Out {
+    pub max_in_flight: usize,
     pub result: Value,
     pub calls: Vec<String>,
     pub proc_calls: Vec<Call>,
@@ -376,6 +400,9 @@ pub fn run_with(o: Opts, step: Step) -> Out {
         raw: o.raw.clone(),
         guard_incident: o.guard_incident,
         calls: Mutex::new(vec![]),
+        in_flight: Default::default(),
+        max_in_flight: Default::default(),
+        work_ms: o.work_ms,
         reply: Box::new(move |label, prompt| {
             if let Some(v) = answer(label, prompt) {
                 return v;
@@ -410,6 +437,7 @@ pub fn run_with(o: Opts, step: Step) -> Out {
         fail_to_start: o.checks_fail_to_start,
     };
     let repo_port = FakeRepo {
+        tree: o.tree.clone(),
         last,
         changed: o.changed.clone(),
     };
@@ -452,7 +480,7 @@ pub fn run_with(o: Opts, step: Step) -> Out {
                 base: "main".into(),
                 attribution: "Co-Authored-By: t".into(),
                 shift_id: "20261120-0130".into(),
-                max_parallel: 1,
+                max_parallel: o.max_parallel,
                 stop: Box::new(move || {
                     let n = steps.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     stop.and_then(|(after, why)| (n >= after).then(|| why.to_string()))
@@ -492,6 +520,9 @@ pub fn run_with(o: Opts, step: Step) -> Out {
         },
         start_branch: "main".into(),
         initializing: false,
+        baseline_floor: o
+            .baseline_floor
+            .map(|v| v.iter().map(|s| s.to_string()).collect()),
     };
     let ran: Ran = driver::run_task(&ctx, start, step).expect("the run completes");
     wg::cli::run::persist(&ctx, &dirs, &ran).unwrap();
@@ -508,6 +539,7 @@ pub fn run_with(o: Opts, step: Step) -> Out {
         None
     };
     Out {
+        max_in_flight: proc.max_in_flight.load(std::sync::atomic::Ordering::SeqCst),
         result,
         calls,
         proc_calls: proc.calls.into_inner().unwrap(),

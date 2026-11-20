@@ -68,11 +68,11 @@ fn preflight(dirs: &Dirs, cfg: &Config, gh: &Gh) -> Result<(), String> {
             }
         }
     }
-    crate::cli::live::probe(cfg, dirs).map(|_| ())
+    crate::cli::live::probe_all(cfg, dirs).map(|_| ())
 }
 
 /// Per-repo preflight: fetchable, the dev stack exists on the default branch, the compose
-/// override files exist, and no unallowlisted project agent config.
+/// override files exist, and no unallowlisted project agent config on the default branch.
 fn repo_problem(repo: &RepoCfg) -> Option<String> {
     let path = Path::new(&repo.path);
     if let Err(e) = crate::git::fetch(path) {
@@ -95,7 +95,10 @@ fn repo_problem(repo: &RepoCfg) -> Option<String> {
     {
         return Some(format!("the factory compose override {f} does not exist"));
     }
-    None
+    match task::config_problem(repo, |rel| crate::git::blob_sha256(path, &rev, rel)) {
+        Ok(p) => p.map(|p| format!("{p} on {rev}")),
+        Err(e) => Some(format!("cannot read {rev}: {e}")),
+    }
 }
 
 pub struct Counters {
@@ -130,14 +133,29 @@ pub fn stop_after(d: &Done) -> Option<String> {
     }
 }
 
-/// Records one task's outcome in the shift journal.
-pub fn finished(j: &Journal, repo: &str, issue: u64, d: &Done) -> Result<(), String> {
+/// Records one task's outcome in the shift journal. A resumable park stays open for resume.
+pub fn finished(j: &Journal, repo: &str, i: &Issue, d: &Done) -> Result<(), String> {
     j.append(
         "task_finished",
-        json!({ "repo": repo, "issue": issue, "run": d.run, "outcome": d.kind.name(), "reason": d.reason,
-                "pr": d.pr_url, "escalations": d.escalations }),
+        json!({ "repo": repo, "issue": i.number, "title": i.title, "run": d.run, "outcome": d.kind.name(),
+                "reason": d.reason, "pr": d.pr_url, "escalations": d.escalations, "resumable": d.resumable() }),
     )
     .map(|_| ())
+}
+
+/// Marks the task record stuck after a kernel error, so `recover` never requeues it.
+fn record_stuck(e: &Env, repo: &str, n: u64) -> Result<(), String> {
+    match super::record::load(e.dirs, repo, n)? {
+        Some(rec) => super::record::save(
+            e.dirs,
+            &super::record::TaskRecord {
+                status: "stuck".into(),
+                updated_at: now(),
+                ..rec
+            },
+        ),
+        None => Ok(()),
+    }
 }
 
 /// Works `issue`, turning a kernel error into a stuck outcome so the issue never stays claimed.
@@ -157,6 +175,10 @@ pub fn work_one(e: &Env, repo: &RepoCfg, i: &Issue, resume: bool) -> Result<Done
                 rate_limited: false,
                 escalations: json!([]),
             };
+            if let Err(e2) = record_stuck(e, &repo.name, i.number) {
+                e.journal
+                    .append("error", json!({ "issue": i.number, "error": e2 }))?;
+            }
             // Best effort: the claim stays visible as wg:in-shift if GitHub is down too.
             if let Err(e2) = intake::relabel(
                 e.dirs,
@@ -182,7 +204,7 @@ pub fn work_one(e: &Env, repo: &RepoCfg, i: &Issue, resume: bool) -> Result<Done
             d
         }
     };
-    finished(e.journal, &repo.name, i.number, &d)?;
+    finished(e.journal, &repo.name, i, &d)?;
     Ok(d)
 }
 
@@ -234,12 +256,15 @@ pub fn run(dirs: &Dirs, cfg: &Config) -> Result<Value, String> {
             j.append("repo_skipped", json!({ "repo": repo.name, "why": why }))?;
             continue;
         }
-        let picked = match intake::intake(
-            &gh,
-            &cfg.shift,
-            &repo.name,
-            &intake::created(dirs, &repo.name),
-        ) {
+        let picked = match super::record::issues_of(dirs, &repo.name).and_then(|reruns| {
+            intake::intake(
+                &gh,
+                &cfg.shift,
+                &repo.name,
+                &intake::created(dirs, &repo.name),
+                &reruns,
+            )
+        }) {
             Ok(p) => p,
             Err(why) => {
                 j.append(
@@ -259,6 +284,14 @@ pub fn run(dirs: &Dirs, cfg: &Config) -> Result<Value, String> {
             if let Some(why) = stop_before_next(cfg, &c, &dirs.stop_file(), deadline) {
                 j.append("stopped", json!({ "why": why }))?;
                 break 'repos;
+            }
+            // Intake ran maybe hours ago: the owner may have closed, un-queued or edited it since.
+            if let Some(why) = intake::still_queued(&gh, &cfg.shift, &repo.name, i) {
+                j.append(
+                    "issue_skipped",
+                    json!({ "repo": repo.name, "issue": i.number, "why": why }),
+                )?;
+                continue;
             }
             let d = work_one(&env, repo, i, false)?;
             c.tasks += 1;
