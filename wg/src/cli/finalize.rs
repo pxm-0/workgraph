@@ -22,21 +22,37 @@ pub fn run(args: &[String]) -> Result<Value, String> {
     not_an_agent("wg finalize")?;
     let (run, by) = (a.need("run")?, a.need("by")?);
     let (message, evidence_message) = (a.need("message")?, a.need("evidence-message")?);
-    if by.trim().is_empty() {
-        return Err("--by must name the approver".into());
-    }
     let dirs = Dirs::from_env()?;
     let cfg = super::run::load_config(&dirs)?;
     let repo = super::run::repo_root()?;
-    let run_dir = super::run::run_dir_for(&dirs, run)?;
+    finalize_at(&dirs, &cfg, &repo, run, by, message, evidence_message)
+}
+
+/// The finalize chain for run `run` in `repo` (the repo root, or a shift task's worktree): every
+/// token re-checked at the current tree, then `finalize_run` with the owner's approval. Changes the
+/// process's directory to `repo`, where the chain's git and Haruspex steps run.
+pub fn finalize_at(
+    dirs: &Dirs,
+    cfg: &crate::config::Config,
+    repo: &std::path::Path,
+    run: &str,
+    by: &str,
+    message: &str,
+    evidence_message: &str,
+) -> Result<Value, String> {
+    if by.trim().is_empty() {
+        return Err("--by must name the approver".into());
+    }
+    std::env::set_current_dir(repo).map_err(|e| format!("cannot enter {}: {e}", repo.display()))?;
+    let run_dir = super::run::run_dir_for(dirs, run)?;
     let key = tokens_store::key(&dirs.key())?;
     let (meta, checks, review) = tokens_store::load(&run_dir.join("tokens.jsonl"), &key)?;
     if meta.repo != repo.to_string_lossy() {
         return refuse(format!("run {run} belongs to {}", meta.repo));
     }
     let pin = cfg.haruspex.clone().ok_or("no Haruspex CLI is pinned")?;
-    let hx = PinnedHaruspex::new(&pin, &repo, &[dirs.work(), dirs.state()])?;
-    let tree = git::tree_fingerprint(&repo)?;
+    let hx = PinnedHaruspex::new(&pin, repo, &[dirs.work(), dirs.state()])?;
+    let tree = git::tree_fingerprint(repo)?;
     if meta.gate.is_empty() {
         return refuse("the run has no gate checks");
     }
@@ -71,9 +87,9 @@ pub fn run(args: &[String]) -> Result<Value, String> {
     if let Some(w) = contract::weakened(&meta.contract, &now, &meta.decided) {
         return refuse(format!("incident: {w}"));
     }
-    let head = git::head(&repo)?;
+    let head = git::head(repo)?;
     let approval = HumanApproval::new(&meta.task_id, &head, by);
-    let staged: Vec<String> = git::dirty_in(&repo)?
+    let staged: Vec<String> = git::dirty_in(repo)?
         .into_iter()
         .filter(|p| !meta.exclude.contains(p))
         .collect();

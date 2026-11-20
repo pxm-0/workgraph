@@ -1,0 +1,519 @@
+//! One shift task (design §7.3 steps 5-8, §7.4): claim, the worktree, the install step, a run of
+//! the dev chain with publish, and the outcome written back to the issue and the task record.
+
+use super::config::{RepoCfg, PROJECT_CONFIG};
+use super::intake::{self, IN_SHIFT};
+use super::record::{self, TaskRecord};
+use crate::budget::Ledger;
+use crate::claude::replay::Replay;
+use crate::config::Config;
+use crate::engine::driver::{self, End, Start};
+use crate::engine::{RunCtx, ShiftCtx};
+use crate::gh::Gh;
+use crate::haruspex::cli::PinnedHaruspex;
+use crate::journal::{now, Journal};
+use crate::ports::{GitRepo, Ports, RealProc, ShellChecks};
+use crate::state_dirs::{private_dir, Dirs};
+use crate::untrusted::issue::{self, Issue};
+use crate::{git, memory_store, tokens_store};
+use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+const INSTALL_TIMEOUT: Duration = Duration::from_secs(1800);
+
+/// What a shift needs to work its tasks.
+pub struct Env<'a> {
+    pub dirs: &'a Dirs,
+    pub cfg: &'a Config,
+    pub gh: &'a Gh,
+    pub shift_id: &'a str,
+    pub journal: &'a Journal,
+    /// Unix seconds after which no new step starts (`[shift].until`).
+    pub deadline: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    Pr,
+    NeedsDecision,
+    Stuck,
+    Parked,
+    Incident,
+}
+
+impl Kind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Kind::Pr => "pr-open",
+            Kind::NeedsDecision => "needs-decision",
+            Kind::Stuck => "stuck",
+            Kind::Parked => "parked",
+            Kind::Incident => "incident",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Done {
+    pub kind: Kind,
+    pub run: Option<String>,
+    pub reason: String,
+    pub pr_url: Option<String>,
+    /// No provider left: the shift stops intake.
+    pub rate_limited: bool,
+    pub escalations: Value,
+}
+
+fn done(kind: Kind, run: Option<&str>, reason: impl Into<String>) -> Done {
+    Done {
+        kind,
+        run: run.map(str::to_string),
+        reason: reason.into(),
+        pr_url: None,
+        rate_limited: false,
+        escalations: json!([]),
+    }
+}
+
+/// Why the shift must stop now: the STOP file or the end of the window.
+pub fn stop_reason(stop_file: &Path, deadline: u64) -> Option<String> {
+    if stop_file.exists() {
+        return Some("the STOP file exists".into());
+    }
+    (now() >= deadline).then(|| "the shift window closed".into())
+}
+
+/// Project agent config in the worktree that the owner did not allowlist (design §5.1).
+pub fn project_config_problem(repo: &RepoCfg, worktree: &Path) -> Result<Option<String>, String> {
+    for rel in PROJECT_CONFIG {
+        let p = worktree.join(rel);
+        if !p.exists() {
+            continue;
+        }
+        let sha = crate::haruspex::cli::sha256_file(&p)?;
+        if !repo
+            .allow_project_config
+            .iter()
+            .any(|a| a.path == rel && a.sha256 == sha)
+        {
+            return Ok(Some(format!(
+                "RepoNotCompliant: project agent config {rel}"
+            )));
+        }
+    }
+    Ok(None)
+}
+
+fn compose(repo: &RepoCfg, cmd: &str) -> String {
+    match &repo.factory_compose {
+        Some(p) => format!("{p} {cmd}"),
+        None => cmd.to_string(),
+    }
+}
+
+fn fence(text: &str) -> String {
+    format!("```text\n{}\n```", text.replace("```", "'''"))
+}
+
+/// The issue comment for an outcome. LLM-written text is fenced as data, never markdown.
+fn comment(repo: &str, n: u64, d: &Done) -> String {
+    match d.kind {
+        Kind::Pr => format!("Draft PR: {}", d.pr_url.as_deref().unwrap_or("")),
+        Kind::NeedsDecision => {
+            let qs: Vec<String> = d
+                .escalations
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|e| {
+                    format!(
+                        "**{}** ({}). Recommended: {}\n{}",
+                        crate::ids::one_line(e["id"].as_str().unwrap_or(""), 32),
+                        e["severity"].as_str().unwrap_or(""),
+                        fence(e["recommendation"].as_str().unwrap_or("")),
+                        fence(e["question"].as_str().unwrap_or(""))
+                    )
+                })
+                .collect();
+            format!(
+                "workgraph needs a decision before any edit.\n\n{}\n\nThe owner answers with `/workgraph:shift decide {repo}#{n}`; comments are never read as decisions.",
+                qs.join("\n\n")
+            )
+        }
+        Kind::Incident => {
+            let class = ["guard", "approval", "contract", "managed", "token"]
+                .into_iter()
+                .find(|c| d.reason.contains(c))
+                .unwrap_or("integrity");
+            format!("An incident aborted this task (class: {class}). The shift stopped; details are in the owner's journal.")
+        }
+        Kind::Stuck | Kind::Parked => {
+            format!("workgraph {}:\n\n{}", d.kind.name(), fence(&d.reason))
+        }
+    }
+}
+
+/// Labels and comment for the outcome, then the record (design §7.3 step 8).
+fn write_back(
+    e: &Env,
+    repo: &str,
+    n: u64,
+    rec: TaskRecord,
+    d: &Done,
+) -> Result<TaskRecord, String> {
+    let (add, label_out): (&str, &str) = match d.kind {
+        Kind::Pr => ("wg:pr-open", "pr-open"),
+        Kind::NeedsDecision => ("wg:needs-decision", "needs-decision"),
+        Kind::Stuck => ("wg:stuck", "stuck"),
+        Kind::Parked => (e.cfg.shift.label.as_str(), "parked"),
+        Kind::Incident => ("wg:incident", "incident"),
+    };
+    intake::relabel(e.dirs, e.gh, repo, n, &[add], &[IN_SHIFT])?;
+    e.gh.comment(repo, n, &comment(repo, n, d))?;
+    let pr = d
+        .pr_url
+        .as_deref()
+        .and_then(|u| u.rsplit('/').next())
+        .and_then(|s| s.parse().ok());
+    let rec = TaskRecord {
+        status: label_out.into(),
+        pr: pr.or(rec.pr),
+        pr_url: d.pr_url.clone().or(rec.pr_url),
+        updated_at: now(),
+        ..rec
+    };
+    record::save(e.dirs, &rec)?;
+    Ok(rec)
+}
+
+/// Works one issue. `resume` replays the record's last run and skips the claim.
+pub fn work(e: &Env, repo: &RepoCfg, i: &Issue, resume: bool) -> Result<Done, String> {
+    let existing = record::load(e.dirs, &repo.name, i.number)?;
+    if !resume {
+        intake::claim(e.dirs, e.gh, &e.cfg.shift, &repo.name, i.number, e.shift_id)?;
+    }
+    let branch = existing
+        .as_ref()
+        .map(|r| r.branch.clone())
+        .unwrap_or_else(|| format!("wg/{}-{}", i.number, issue::slug(&i.title)));
+    let rel = format!(
+        "{}/{}",
+        record::slug(&repo.name),
+        branch.trim_start_matches("wg/")
+    );
+    let worktree = git::worktree(
+        Path::new(&repo.path),
+        &e.dirs.worktrees(),
+        &rel,
+        &branch,
+        &repo.default_branch,
+    )?;
+    let rec = TaskRecord {
+        repo: repo.name.clone(),
+        issue: i.number,
+        title: i.title.clone(),
+        worktree: worktree.to_string_lossy().into_owned(),
+        branch: branch.clone(),
+        body_sha256: issue::body_sha256(i),
+        status: "in-shift".into(),
+        claimed_at: now(),
+        updated_at: now(),
+        shift: e.shift_id.to_string(),
+        ..existing.clone().unwrap_or_default()
+    };
+    record::save(e.dirs, &rec)?;
+    if let Some(problem) = project_config_problem(repo, &worktree)? {
+        let d = done(Kind::Stuck, None, problem);
+        write_back(e, &repo.name, i.number, rec, &d)?;
+        return Ok(d);
+    }
+    let rec = match (&repo.install, rec.installed) {
+        (Some(install), false) => {
+            let (code, tail) = crate::exec::run::run_shell_in(
+                &compose(repo, install),
+                &worktree,
+                &crate::exec::env::scrubbed(),
+                INSTALL_TIMEOUT,
+            );
+            e.journal.append(
+                "install",
+                json!({ "repo": repo.name, "issue": i.number, "exit": code }),
+            )?;
+            if code != 0 {
+                let d = done(
+                    Kind::Stuck,
+                    None,
+                    format!("install failed (exit {code}):\n{tail}"),
+                );
+                write_back(e, &repo.name, i.number, rec, &d)?;
+                return Ok(d);
+            }
+            TaskRecord {
+                installed: true,
+                ..rec
+            }
+        }
+        _ => rec,
+    };
+    let replay = match (resume, rec.runs.last()) {
+        (true, Some(last)) => {
+            match Replay::load(
+                &e.dirs.run(last),
+                &crate::claude::replay::binary_hash(),
+                &crate::assets::hash(),
+            ) {
+                Ok(r) => r,
+                Err(why) => {
+                    e.journal.append("warning", json!({ "issue": i.number, "warning": format!("rerun from scratch: {why}") }))?;
+                    Replay::none()
+                }
+            }
+        }
+        _ => Replay::none(),
+    };
+    let run_id = format!("r-{}", tokens_store::random_hex(6)?);
+    let rec = TaskRecord {
+        runs: rec.runs.iter().cloned().chain([run_id.clone()]).collect(),
+        ..rec
+    };
+    record::save(e.dirs, &rec)?;
+    e.journal.append(
+        "task_claimed",
+        json!({ "repo": repo.name, "issue": i.number, "run": run_id, "resume": resume }),
+    )?;
+    let (d, ran_rec) = run(e, repo, i, rec, &worktree, &run_id, replay)?;
+    write_back(e, &repo.name, i.number, ran_rec, &d)?;
+    Ok(d)
+}
+
+fn run(
+    e: &Env,
+    repo: &RepoCfg,
+    i: &Issue,
+    rec: TaskRecord,
+    worktree: &Path,
+    run_id: &str,
+    replay: Replay,
+) -> Result<(Done, TaskRecord), String> {
+    let dirs = e.dirs;
+    let run_dir = dirs.run(run_id);
+    for d in [
+        run_dir.join("logs"),
+        run_dir.join("guard"),
+        dirs.run_tmp(run_id),
+    ] {
+        private_dir(&d)?;
+    }
+    let pin = e.cfg.haruspex.clone().ok_or("no Haruspex CLI is pinned")?;
+    let hx = PinnedHaruspex::new(&pin, worktree, &[dirs.work(), dirs.state()])?;
+    let slug = record::slug(&repo.name);
+    let memory_path = dirs.memory(&slug);
+    let _lock = memory_store::Lock::take(&memory_path)?;
+    let pipeline = crate::pipelines::load(crate::assets::DEV_PIPELINE, e.cfg.max_calls_per_task)?;
+    let stop_file = dirs.stop_file();
+    let deadline = e.deadline;
+    let ctx = RunCtx {
+        ports: Ports {
+            proc: &RealProc,
+            checks: &ShellChecks {
+                root: worktree.to_path_buf(),
+                prefix: repo.factory_compose.clone(),
+            },
+            repo: &GitRepo {
+                root: worktree.to_path_buf(),
+            },
+            hx: &hx,
+        },
+        cfg: e.cfg,
+        dirs: dirs.clone(),
+        run_id: run_id.to_string(),
+        run_dir: run_dir.clone(),
+        run_tmp: dirs.run_tmp(run_id),
+        repo: worktree.to_path_buf(),
+        repo_name: repo.name.clone(),
+        journal: Journal::open(&run_dir.join("journal.jsonl"), run_id)?,
+        ledger: Ledger::new(&dirs.ledger(), run_id, e.cfg.max_calls_per_task),
+        wg_exe: std::env::current_exe().map_err(|e| format!("cannot find wg itself: {e}"))?,
+        haruspex_cli: hx.cli.to_string_lossy().into_owned(),
+        plugins: crate::claude::auth::plugin_profile(&dirs.home, &e.cfg.keep_plugins),
+        user: std::env::var("USER").unwrap_or_default(),
+        replay,
+        shift: Some(ShiftCtx {
+            gh: e.gh.clone(),
+            issue: i.number,
+            branch: rec.branch.clone(),
+            base: repo.default_branch.clone(),
+            attribution: e.cfg.shift.attribution.clone(),
+            shift_id: e.shift_id.to_string(),
+            max_parallel: e.cfg.shift.max_parallel_units as usize,
+            stop: Box::new(move || stop_reason(&stop_file, deadline)),
+        }),
+    };
+    ctx.journal.append(
+        "run_started",
+        json!({ "repo": worktree, "slug": slug, "binary": crate::claude::replay::binary_hash(),
+                "version": env!("CARGO_PKG_VERSION"), "assets": crate::assets::hash(), "pipeline": "dev",
+                "shift": e.shift_id, "task": format!("{}#{}", repo.name, i.number),
+                "replay_from": ctx.replay.from, "replayable": ctx.replay.len() }),
+    )?;
+    let decisions_path = dirs.decisions(&slug, i.number);
+    let decisions_path = decisions_path.to_string_lossy();
+    let start = Start {
+        task: issue::fenced(i),
+        title: i.title.clone(),
+        decisions: crate::cli::run::decisions(
+            Path::new(decisions_path.as_ref())
+                .exists()
+                .then_some(decisions_path.as_ref()),
+        )?,
+        resume_task: rec.task_id.clone(),
+        initialized_earlier: rec.initialized,
+        // The owner's checkout is never touched, so nothing in the worktree is the owner's work.
+        user_changes_before: vec![],
+        memory: memory_store::load(&memory_path),
+        memory_path,
+        pipeline,
+        start_branch: rec.branch.clone(),
+        initializing: !worktree.join(".haruspex").exists(),
+    };
+    let ran = driver::run_task(&ctx, start, &wg_factory::engine::step)?;
+    crate::cli::run::persist(&ctx, dirs, &ran)?;
+    let out = crate::report::output(&ctx, &ran)?;
+    std::fs::write(run_dir.join("output.json"), out.to_string())
+        .map_err(|e| format!("cannot write the run output: {e}"))?;
+    std::fs::write(run_dir.join("report.md"), crate::report::markdown(&out))
+        .map_err(|e| format!("cannot write the report: {e}"))?;
+    ctx.journal.append(
+        "run_finished",
+        json!({ "status": out["status"], "pr": ran.published }),
+    )?;
+    let task_id = Some(ran.kernel.task_id())
+        .filter(|t| !t.is_empty())
+        .or(rec.task_id.clone());
+    let rec = TaskRecord {
+        task_id,
+        initialized: rec.initialized || out["initialized"] == true,
+        ..rec
+    };
+    Ok((outcome(&ran, &out, run_id), rec))
+}
+
+/// Failing check tails from the kernel's own results, for a stuck comment.
+fn tails(ran: &driver::Ran) -> String {
+    let mut seen: Vec<&str> = Vec::new();
+    let mut out = Vec::new();
+    for c in ran.kernel.checks.iter().rev() {
+        if !seen.contains(&c.name()) {
+            seen.push(c.name());
+            if !c.passed() {
+                out.push(format!(
+                    "{} (exit {}):\n{}",
+                    c.name(),
+                    c.exit_code(),
+                    c.output_tail()
+                ));
+            }
+        }
+    }
+    out.join("\n\n")
+}
+
+fn outcome(ran: &driver::Ran, out: &Value, run_id: &str) -> Done {
+    let run = Some(run_id);
+    let note = out["note"].as_str().unwrap_or("").to_string();
+    match &ran.end {
+        End::Finish(_) if ran.published.is_some() => Done {
+            pr_url: ran.published.clone(),
+            ..done(Kind::Pr, run, "draft PR opened")
+        },
+        End::NeedsDecision(_) => Done {
+            escalations: out["escalations"].clone(),
+            ..done(Kind::NeedsDecision, run, "needs a decision")
+        },
+        End::Incident(why) => done(Kind::Incident, run, why.clone()),
+        End::Parked(why) => Done {
+            rate_limited: why.starts_with("rate limited"),
+            ..done(Kind::Parked, run, why.clone())
+        },
+        End::Failed(why) => done(Kind::Stuck, run, format!("{why}\n\n{}", tails(ran))),
+        End::Finish(_) => {
+            let status = out["status"].as_str().unwrap_or("");
+            let why = if note.is_empty() {
+                status.to_string()
+            } else {
+                note
+            };
+            done(
+                Kind::Stuck,
+                run,
+                format!("{why}\n\n{}", tails(ran)).trim().to_string(),
+            )
+        }
+    }
+}
+
+/// The run dir of a task's last run.
+pub fn last_run(dirs: &Dirs, rec: &TaskRecord) -> Option<PathBuf> {
+    rec.runs.last().map(|r| dirs.run(r))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn comments_fence_agent_text_and_name_only_the_incident_class() {
+        let mut d = done(Kind::NeedsDecision, None, "x");
+        d.escalations = json!([{ "id": "E1", "severity": "critical", "question": "drop ```table``` @everyone?", "recommendation": "no" }]);
+        let c = comment("o/r", 3, &d);
+        assert!(
+            c.contains("```text\ndrop '''table''' @everyone?\n```"),
+            "{c}"
+        );
+        assert!(c.contains("/workgraph:shift decide o/r#3"));
+        let i = comment(
+            "o/r",
+            3,
+            &done(
+                Kind::Incident,
+                None,
+                "guard incident in work:a: rm -rf secret path",
+            ),
+        );
+        assert!(i.contains("class: guard") && !i.contains("secret path"));
+        assert!(comment("o/r", 3, &done(Kind::Stuck, None, "why")).contains("```text\nwhy\n```"));
+        let mut pr = done(Kind::Pr, None, "");
+        pr.pr_url = Some("https://x/pull/4".into());
+        assert_eq!(comment("o/r", 3, &pr), "Draft PR: https://x/pull/4");
+    }
+
+    #[test]
+    fn stop_reasons_and_project_config() {
+        let dir = std::env::temp_dir().join(format!("wg-task-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".claude")).unwrap();
+        assert_eq!(stop_reason(&dir.join("STOP"), now() + 60), None);
+        assert!(stop_reason(&dir.join("STOP"), now())
+            .unwrap()
+            .contains("window"));
+        std::fs::write(dir.join("STOP"), "").unwrap();
+        assert!(stop_reason(&dir.join("STOP"), now() + 60)
+            .unwrap()
+            .contains("STOP"));
+        let repo: RepoCfg = toml::from_str("name = \"o/r\"\npath = \"/x\"").unwrap();
+        assert_eq!(project_config_problem(&repo, &dir).unwrap(), None);
+        std::fs::write(dir.join(".mcp.json"), "{}").unwrap();
+        assert!(project_config_problem(&repo, &dir)
+            .unwrap()
+            .unwrap()
+            .contains(".mcp.json"));
+        let sha = crate::haruspex::cli::sha256_file(&dir.join(".mcp.json")).unwrap();
+        let allowed: RepoCfg = toml::from_str(&format!(
+            "name = \"o/r\"\npath = \"/x\"\nallow_project_config = [{{ path = \".mcp.json\", sha256 = \"{sha}\" }}]"
+        ))
+        .unwrap();
+        assert_eq!(project_config_problem(&allowed, &dir).unwrap(), None);
+        assert_eq!(compose(&allowed, "run x"), "run x");
+    }
+}
