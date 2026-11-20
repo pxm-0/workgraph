@@ -23,18 +23,18 @@ jobs:
           repository: pxm-0/haruspex
           path: haruspex
       - name: Build the dev image
-        run: docker compose -f compose.dev.yml build dev
+        run: docker compose -f compose.dev.yml build workspace
       - name: Format
-        run: $DEV dev cargo fmt --all --check
+        run: $DEV workspace cargo fmt --all --check
       - name: Clippy
-        run: $DEV dev cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: $DEV workspace cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: wg-factory builds without std
-        run: $DEV dev cargo build -p wg-factory --locked --target thumbv7em-none-eabihf
+        run: $DEV workspace cargo build -p wg-factory --locked --target thumbv7em-none-eabihf
       - name: Tests (finalize against the real Haruspex CLI)
-        run: $DEV -e HARUSPEX_CLI=/workspace/haruspex/scripts/haruspex.py dev cargo test --workspace --locked
+        run: $DEV -e HARUSPEX_CLI=/workspace/haruspex/scripts/haruspex.py workspace cargo test --workspace --locked
       - name: Coverage of wg, at least 80% of lines
-        run: $DEV -e HARUSPEX_CLI=/workspace/haruspex/scripts/haruspex.py dev cargo llvm-cov -p wg --locked --fail-under-lines 80
+        run: $DEV -e HARUSPEX_CLI=/workspace/haruspex/scripts/haruspex.py workspace cargo llvm-cov -p wg --locked --fail-under-lines 80
       - name: File size
-        run: $DEV dev cargo xtask size
+        run: $DEV workspace cargo xtask size
       - name: Workflow control-flow tests
-        run: $DEV dev sh -c 'node --test tests/*.test.mjs'
+        run: $DEV workspace sh -c 'node --test tests/*.test.mjs'

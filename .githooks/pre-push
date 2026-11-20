@@ -16,7 +16,7 @@ set -- docker compose -f compose.dev.yml run --rm -T
 if [ -n "${HARUSPEX_DIR:-}" ]; then
   set -- "$@" -v "$HARUSPEX_DIR:/haruspex:ro" -e HARUSPEX_CLI=/haruspex/scripts/haruspex.py
 fi
-"$@" dev sh -c '
+"$@" workspace sh -c '
   set -e
   cargo fmt --all --check
   cargo clippy --workspace --all-targets --locked -- -D warnings

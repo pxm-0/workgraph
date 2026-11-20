@@ -72,21 +72,22 @@ claude plugin install workgraph@workgraph
 
 Builds and tests run in the compose dev stack (`compose.dev.yml`, image from
 `.devcontainer/Dockerfile`, pinned by digest), the same image CI uses. It publishes no ports, and
-the cargo registry and build output live in the named volumes `cargo-registry` and `cargo-target`.
+the cargo registry and build output live in the named volumes `cargo-registry` and `cargo-target`
+(one build directory per checkout, so worktrees never share a `wg` binary).
 Open the repo in the devcontainer, or run commands through the stack:
 
 ```
-docker compose -f compose.dev.yml run --rm dev cargo test --workspace
-docker compose -f compose.dev.yml run --rm dev cargo clippy --workspace --all-targets -- -D warnings
-docker compose -f compose.dev.yml run --rm dev cargo xtask size        # no .rs file over 800 lines
-docker compose -f compose.dev.yml run --rm dev sh -c 'node --test tests/*.test.mjs'
+docker compose -f compose.dev.yml run --rm workspace cargo test --workspace
+docker compose -f compose.dev.yml run --rm workspace cargo clippy --workspace --all-targets -- -D warnings
+docker compose -f compose.dev.yml run --rm workspace cargo xtask size        # no .rs file over 800 lines
+docker compose -f compose.dev.yml run --rm workspace sh -c 'node --test tests/*.test.mjs'
 ```
 
 The finalize tests need the Haruspex CLI; without it they skip. Mount a checkout read-only:
 
 ```
 docker compose -f compose.dev.yml run --rm -v /abs/path/haruspex:/haruspex:ro \
-  -e HARUSPEX_CLI=/haruspex/scripts/haruspex.py dev cargo test --workspace
+  -e HARUSPEX_CLI=/haruspex/scripts/haruspex.py workspace cargo test --workspace
 ```
 
 `node --test` runs the real workflow script against fake agents, with no dependencies.

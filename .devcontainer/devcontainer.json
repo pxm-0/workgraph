@@ -1,10 +1,10 @@
-// Devcontainer (Argus docs/DEV_ENV_PROTOCOL.md): the toolchain runs in compose.dev.yml's `dev`
+// Devcontainer (Argus docs/DEV_ENV_PROTOCOL.md): the toolchain runs in compose.dev.yml's `workspace`
 // service, the same image the git hook and CI use. No ports are forwarded.
 {
   "name": "workgraph",
   "dockerComposeFile": ["../compose.dev.yml"],
-  "service": "dev",
-  "runServices": ["dev"],
+  "service": "workspace",
+  "runServices": ["workspace"],
   "workspaceFolder": "/workspace",
   "shutdownAction": "stopCompose",
   "postCreateCommand": "cargo fetch --locked",
