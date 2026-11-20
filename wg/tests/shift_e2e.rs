@@ -43,7 +43,7 @@ fn a_shift_turns_queued_issues_into_draft_prs_decisions_and_a_report() {
     assert_eq!(out["tasks"], 3, "{out}");
     assert_eq!(
         out["needsYou"],
-        json!({ "incidents": 0, "decisions": 1, "approvals": 2, "parked": 0, "releases": 0 })
+        json!({ "incidents": 0, "decisions": 1, "approvals": 2, "parked": 0, "releases": 0, "selfImprovement": 0 })
     );
 
     // Labels: queued → in-shift → outcome; the untrusted labeller's issue is untouched.
