@@ -9,8 +9,9 @@ escalation E-CRIT, RATE-LIMIT makes a worker hit a 429, and SLOW makes the first
 its parent dies (the kill-and-resume test), then exit without touching anything. STOP-MID makes the
 first worker create the STOP file as it works (and STOP-TWICE the first reviewer too), FAIL-CHECK
 writes a test no fixer makes pass, WORKFLOW writes a test that drops a GitHub workflow when it runs,
-INCIDENT makes the worker run `wg shift run` through the guard hook, and WRONG-BRANCH makes it
-switch branches."""
+INCIDENT makes the worker run `wg shift run` through the guard hook, WRONG-BRANCH makes it
+switch branches, and RISKY makes the unit risky (it also touches auth_token.py) so the worker runs
+its check through `wg sandbox exec`, the one Bash it is granted."""
 import json
 import os
 import subprocess
@@ -129,6 +130,9 @@ if label.startswith("read"):
              "units": [{"id": "fix", "goal": "make add add", "files": ["calc.py", "test_calc.py"], "dependsOn": [],
                         "criteria": ["AC-001"], "size": "small", "risky": False}],
              "escalations": []}
+    if "RISKY" in prompt:
+        reply["units"][0].update({"files": ["calc.py", "test_calc.py", "auth_token.py"], "risky": True,
+                                  "riskReason": "touches the auth token"})
     if "NEEDS-DECISION" in prompt and "E-CRIT" not in prompt:  # a decided escalation is not raised again
         reply["escalations"] = [{"id": "E-CRIT", "severity": "critical", "question": "Drop the legacy table?",
                                  "recommendation": "Keep it", "options": ["Keep it", "Drop it"]}]
@@ -150,6 +154,14 @@ elif label.startswith("work:"):
         f.write("def add(a, b):\n    return a + b\n")
     if "INCIDENT" in prompt:
         record["hook_owner_command"] = hook("Bash", {"command": "wg shift run"})
+    if "RISKY" in prompt:
+        with open("auth_token.py", "w") as f:
+            f.write("TOKEN_TTL = 3600\n")
+        exec_prefix = next(p for p in manifest["bash"]["prefixes"] if " sandbox exec --unit " in p)
+        command = exec_prefix + " -- python3 check.py"
+        record["hook_sandbox_exec"] = hook("Bash", {"command": command})
+        done = run(["/bin/sh", "-c", command])
+        record["sandbox_exec"] = {"code": done.returncode, "out": json.loads(done.stdout.splitlines()[-1])}
     if "WRONG-BRANCH" in prompt:
         run(["git", "checkout", "-q", "-b", "wg/99-elsewhere"])
     reply = {"summary": "add now adds"}

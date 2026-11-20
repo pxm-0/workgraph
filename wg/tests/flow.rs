@@ -596,11 +596,7 @@ fn t20a_sandbox_unavailable_a_risky_unit_and_its_dependants_are_skipped_with_the
     );
     assert_eq!(ids(&o.result["skipped"]), ["a", "b"]);
     let why = o.result["skipped"][0]["why"].as_str().unwrap();
-    assert!(
-        why.contains("risky") && why.contains("sandbox unavailable"),
-        "{why}"
-    );
-    assert_eq!(o.result["tainted"], false);
+    assert!(why.starts_with("risky, sandbox unavailable") && o.result["tainted"] == false);
 }
 
 #[test]
