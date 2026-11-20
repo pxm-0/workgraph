@@ -78,3 +78,15 @@ path = "tests/intake.rs"
 [[test]]
 name = "finalize_shift"
 path = "tests/finalize_shift.rs"
+
+[[test]]
+name = "sandbox_flow"
+path = "tests/sandbox_flow.rs"
+
+[[test]]
+name = "sandbox_podman"
+path = "tests/sandbox_podman.rs"
+
+[[test]]
+name = "shift_sandbox"
+path = "tests/shift_sandbox.rs"
