@@ -1,7 +1,19 @@
 # ADR-001: the `claude -p` contract (Phase 0 spike)
 
-Status: accepted, 2026-11-20. Inputs to Phase 1a. Design: `docs/design/factory.md` (§5, §16
-Phase 0, §17 D5 and D6) on `feat/factory-design`.
+Status: **accepted with open items**, 2026-11-20. Inputs to Phase 1a. Design: `docs/design/factory.md`
+(§5, §16 Phase 0, §17 D5 and D6) on `feat/factory-design`.
+
+Open items: §16 lists these as Phase 0 work, and this spike did not deliver them. Each is a tracked
+issue that blocks the Phase 1a work that depends on it, and §16 needs the design owner's amendment
+to match (listed under "Open items" at the end):
+
+- no fixture for a subscription usage limit or an API rate limit (§5), so `RateLimited` is unpinned;
+- the gateway dry-run test of the argv, env and settings `wg` builds (§9) moved to Phase 1a;
+- "a guard built to panic still blocks" (§12), no key in the Bash env (8d), the helper re-run
+  cadence on a valid key (8c) and the usage-limit signature per path (8e) are not observed;
+- the permission layer was tested against `&&` and `;` only (§10c);
+- child calls wrote into the owner's `~/.claude` (Method), so the 8d sentinel session must be rerun
+  under isolation.
 
 ## Method
 
@@ -14,10 +26,25 @@ Phase 0, §17 D5 and D6) on `feat/factory-design`.
   token): `env_clear()` in the runner is required, not just tidy.
 - Models: haiku for everything except `multi_model_usage` (sonnet, which spawned a haiku
   subagent). Writing `B` below for the base `claude -p --no-session-persistence --model haiku`.
+- **Not isolated from the owner's `~/.claude`.** `run.sh` passed the real `HOME`, so every child
+  loaded the owner's user-scope settings and plugins, and their hooks wrote into `~/.claude`: 36 of
+  the 42 fixture sessions left `~/.claude/session-data/2026-11-20-<id8>-session.tmp` (ecc's session
+  hook), the spike's tool calls are in `~/.claude/bash-commands.log`,
+  `~/.claude/cost-tracker.log` and `~/.claude/metrics/tool-usage.jsonl`, and Claude Code created
+  one `~/.claude/projects/<slug>-scratchpad-spike-<repo>` directory per spike repo (15, empty but
+  for one subagent `.meta.json`) despite `--no-session-persistence`. The owner can find every line
+  with `grep -rl scratchpad/spike ~/.claude` and remove them. `~/.claude/settings.json` was also
+  modified mid-run (16:59:27) by something unknown; it holds no spike strings. Phase 1a must keep
+  child calls out of the owner's `~/.claude` (an `enabledPlugins` profile that turns off logging
+  plugins such as ecc's session and cost hooks, or a dedicated config dir), and the 8d sentinel
+  session reruns under that isolation, as §16's "a spike-only session" requires.
 - Fixtures: `wg/tests/fixtures/claude/<case>.json` (the result envelope, redacted) and, where the
-  `stream-json` init event matters, `<case>.init.json` (an excerpt). One line per case in
-  `wg/tests/fixtures/claude/README.md`. `wg/tests/claude_fixtures.rs` parses every one and pins the
-  fields §5.3 relies on.
+  `stream-json` init event matters, `<case>.init.json` (the whole init event, redacted, not
+  reshaped). One line per case in `wg/tests/fixtures/claude/README.md`.
+  `wg/tests/claude_fixtures.rs` parses every one and pins the fields §5.3 relies on.
+- Evidence: the spike scripts (`run.sh`, `stages.sh`, `extract.py`), hooks, project-config files,
+  argv per case and the marker and stub logs are in `wg/tests/fixtures/claude/spike/`, redacted;
+  the fixtures README lists which markers exist per case.
 - **Spend:** 45 calls (5 more were rejected at argv parsing), `total_cost_usd` summed **$0.75** (notional, subscription). $0.56 is in the
   fixtures; the rest is one probe and two calls rerun after an argv mistake.
 
@@ -40,9 +67,11 @@ Also present and useful: `terminal_reason` ("completed", "api_error", "max_turns
 Fixture: `success_structured.json`. Verdict: **confirmed**.
 
 Side finding (`schema_max_turns_1.json`, same argv with `--max-turns 1`): it succeeds with
-`num_turns` 2. The structured-output turn is not counted against `--max-turns`; the Learner fixtures
-show `num_turns` 4 at `--max-turns 3`. Phase 1a: ledger `num_turns` as reported and do not treat
-`num_turns > max_turns` as an anomaly.
+`num_turns` 2. Observed: `num_turns` can exceed `--max-turns` by **at least 2** with `subtype`
+"success": both Challenger calls report 10 at `--max-turns 8` (§7), the t2 Reader 9 at 8 and the
+Learners 4 at 3. The cause is not established (one extra structured-output turn would explain only
++1). Phase 1a: ledger `num_turns` as reported, do not treat `num_turns > max_turns` as an anomaly,
+and never derive limits from `max_turns + 1`. Pinned by `num_turns_can_exceed_max_turns`.
 
 ## 2. `is_error`
 
@@ -80,7 +109,16 @@ Fixture: `max_turns.json`. Verdict: **confirmed**.
 ## 5. Subscription usage limit and API rate limit
 
 Not triggerable on purpose without exhausting the owner's plan or holding an API key (there is
-none in the keychain). **No fixture was invented.** Verdict: **not observed** for both.
+none in the keychain). **No fixture was invented.** Verdict: **not observed** for both `is_error`
+envelopes.
+
+Signal recorded: every stream-json run (18 of 18) emitted a `rate_limit_event` before the result,
+with `rate_limit_info.status` ("allowed"), `rateLimitType` ("five_hour"), `resetsAt`, overage
+fields and `unifiedWindows.{five_hour,seven_day}.{utilization,status,resetsAt}` (utilization 0.34
+and 0.18 here). Fixture: `rate_limit_event.json` (`overageDisabledReason` redacted). It is the
+candidate detector for §5.3's subscription usage limit: a `status` other than "allowed", or a window
+at utilization 1, should accompany the limited envelope. The first real limited call confirms or
+refutes it; it is only in stream-json output, so the runner would need `stream-json` to read it.
 
 What would confirm them: a call made while the subscription is limited (the owner's next natural
 limit; record the envelope with the runner's argv), and an `anthropic-api` call answered 429. Until
@@ -102,7 +140,7 @@ tokens) is pinned by the test.
 
 ## 7. Per-stage cost fixtures
 
-Ran (`stages.sh`, haiku for every stage to keep spend small; the real tiers are opus, sonnet and the
+Ran (`spike/stages.sh`, haiku for every stage to keep spend small; the real tiers are opus, sonnet and the
 allocated tier, so these size turns and shape, not dollars):
 
 `B --output-format json --permission-mode dontAsk --setting-sources user --strict-mcp-config
@@ -162,7 +200,7 @@ Consequences: a bad or revoked key costs four minutes per call before failing, s
 not trigger fallback churn across the shift.
 
 **8c. Helper re-run cadence.** The helper ran 11 times in 8b (once per attempt after a 401) and
-once per request in the gateway runs (§9). Verdict: **partly observed**: re-run after every failed
+once per request in the gateway runs (§9): 15 timestamps in `spike/markers/helper.log`. Verdict: **partly observed**: re-run after every failed
 request; the cadence on a successful key (Claude Code caches helper output) is **not observed**,
 and needs a valid key.
 
@@ -190,14 +228,14 @@ env, `--settings` with the dummy helper, `--setting-sources user --strict-mcp-co
 
 | Case | `--model` | Stub saw | Envelope |
 |---|---|---|---|
-| `gateway_loopback_dry_run` | `sonnet` | `HEAD /api/hello`, then 2 × `POST /v1/messages?beta=true` with `model` `claude-sonnet-5-5`, key in `x-api-key` | `is_error` true, 404, cost 0, init `apiKeySource` "apiKeyHelper" |
-| `gateway_loopback_provider_model` | `openai/gpt-5.1` | the same, `model` `openai/gpt-5.1` unchanged | `is_error` true, 404, cost 0 |
+| `gateway_loopback_dry_run` | `sonnet` | requests not retained in the stub log (overwritten); the init event's `model` is `claude-sonnet-5-5` | `is_error` true, 404, cost 0, init `apiKeySource` "apiKeyHelper" |
+| `gateway_loopback_provider_model` | `openai/gpt-5.1` | `HEAD /api/hello`, then 2 × `POST /v1/messages?beta=true` with `model` `openai/gpt-5.1` unchanged, key in `x-api-key` (`spike/markers/gateway.log`) | `is_error` true, 404, cost 0 |
 
 Verdicts:
 - `ANTHROPIC_BASE_URL` plus `apiKeyHelper` route the call and the helper's key to the gateway:
   **confirmed** (loopback).
-- Tier aliases resolve **client-side** (`sonnet` became `claude-sonnet-5-5`) and arbitrary ids pass
-  through: **confirmed**. So a gateway profile must map tiers to the provider's own ids and pass
+- Tier aliases resolve **client-side** (`sonnet` is `claude-sonnet-5-5` in the init event before
+  any request) and arbitrary ids pass through (stub log): **confirmed**. So a gateway profile must map tiers to the provider's own ids and pass
   them with `--model` (§7.1's tier map), or the gateway must alias Anthropic ids.
 - Background haiku calls on a gateway: **not observed** (a failing one-turn call issued none).
 - `structured_output` through `--json-schema`, tool use and skills on a gateway: **not observed**.
@@ -205,6 +243,13 @@ Verdicts:
   §1, §6 and the skill case against them (as §16 prescribes).
 
 ## 10. Permissions
+
+Precondition for every verdict here and in §11: the owner's `~/.claude/settings.json` had **no
+`permissions` block** (no `allow`, `deny`, `ask` or `defaultMode`). The factory keeps
+`--setting-sources user`, so a later user-scope `permissions.allow` entry would merge into every
+role's allowlist, and a user `defaultMode` could change what `dontAsk` means. Phase 1a: `wg doctor`
+and the runner refuse to start when user-scope settings carry `permissions.allow`, `permissions.ask`
+or `permissions.defaultMode` (a spike case with a user allow entry would confirm the merge).
 
 **10a. `--permission-mode dontAsk` denies what is not allowlisted.** Ran: `B --output-format json
 --max-turns 6 --allowedTools Read --permission-mode dontAsk`, asking for a Bash `touch`, a Write
@@ -232,7 +277,11 @@ write roots (§5.4) stay the primary check.
 --verbose --max-turns 8 --permission-mode dontAsk --allowedTools 'Bash(git status:*)'`, asking
 for `git status && touch <spike>/markers/escaped_and` and `git status; touch
 <spike>/markers/escaped_semi` (a marker instead of `rm`). Both denied by the permission layer; no
-marker exists. Fixture: `perm_bash_chain.json`. Verdict: **confirmed**.
+marker exists. Fixture: `perm_bash_chain.json`. Verdict: **confirmed for `&&` and `;` only**. Not
+tested: `|`, `$(...)`, backticks, a newline and `>`; and the run has no positive control (a plain
+`git status` never ran under `Bash(git status:*)`), so it cannot tell "refuses chaining" from "the
+rule matched nothing". Open: a run with a marker per metacharacter plus a plain allowed command in
+the same session, or the real `wg guard` panic test passing in Phase 1a.
 
 **10d. `Skill(<name>)` blocks other skills.** Ran: `B --output-format stream-json --verbose
 --max-turns 6 --permission-mode dontAsk --allowedTools 'Skill(karpathy-guidelines)'`, invoking
@@ -315,8 +364,10 @@ fail closed on any exception). Asked for `echo wg sandbox exec -- x; touch
 <spike>/markers/escaped_guard` and `echo wg sandbox exec -- ok`. The guard log shows a deny for the
 first and an allow for the second; the first never ran (marker absent), the second printed.
 Fixture: `guard_metachar.json`. Verdict: **confirmed** (with the stand-in; the real guard's unit
-tests replay this input in Phase 1a). §10c shows the permission layer alone also refuses chaining,
-so the "no Bash at all" fallback is not needed.
+tests replay this input in Phase 1a). The "no Bash at all" fallback is **not ruled out**: §10c
+covers only `&&` and `;` without a positive control, and a guard that panics is not yet shown to
+block (§12). It is ruled out once the permission layer refuses every metacharacter with a positive
+control in the same run, or the real `wg guard` panic test passes.
 
 ## 14. What a GateGuard "ask" does under `-p`
 
@@ -337,11 +388,11 @@ the allowed `echo spike asked` was **denied**, the reason returned as the tool r
 
 | §16 item | Verdict | Phase 1a action |
 |---|---|---|
-| `structured_output` location, cost, `modelUsage` on the subscription | confirmed | parse as §5.3; ledger `num_turns` as reported |
+| `structured_output` location, cost, `modelUsage` on the subscription | confirmed | parse as §5.3; ledger `num_turns` as reported (it can exceed `--max-turns` by 2+) |
 | `is_error` | confirmed | test both `subtype` and `is_error` (API errors say "success") |
 | `error_max_budget_usd` | confirmed | none |
 | `error_max_turns` | confirmed | none |
-| subscription usage limit, API rate limit | not observed | match `api_error_status`, default unknown errors to `Died`; record the first real envelope |
+| subscription usage limit, API rate limit | not observed (`rate_limit_event` recorded) | watch `rate_limit_info.status` and `unifiedWindows`, match `api_error_status`, default unknown errors to `Died`; record the first real envelope |
 | multi-key `modelUsage` | confirmed | dominant key by output tokens |
 | per-stage cost fixtures | confirmed (haiku) | "run exactly" in role prompts |
 | subscription path | confirmed | none |
@@ -350,9 +401,9 @@ the allowed `echo spike asked` was **denied**, the reason returned as the tool r
 | no key in Bash env | not observed | confirm with a valid sentinel key |
 | gateway argv/env (dry run, loopback) | confirmed | tier → provider id map required; builder test in 1a |
 | gateway structured output, tools, skills, background calls | not observed | profiles unusable until a real gateway spike |
-| `dontAsk` denies the rest | confirmed | none |
+| `dontAsk` denies the rest | confirmed (no user `permissions` block) | doctor refuses user-scope `permissions.allow`/`ask`/`defaultMode` |
 | `Edit(<path>)` scoping | refuted as written | emit `Edit(//<abs>)` / `Write(//<abs>)` only |
-| `Bash(<cmd>:*)` refuses chaining | confirmed | none |
+| `Bash(<cmd>:*)` refuses chaining | confirmed for `&&`, `;` only | test `\|`, `$()`, backticks, newline, `>` with a positive control |
 | `Skill(<name>)` blocks other skills | refuted | guard enforces skill names; profile and deny list as depth |
 | `--setting-sources user`, `--strict-mcp-config` | confirmed | keep both; repo refusal stays as depth |
 | `enabledPlugins` profile | confirmed | profile covers every plugin in the live init list |
@@ -360,4 +411,19 @@ the allowed `echo spike asked` was **denied**, the reason returned as the tool r
 | `--settings` hook fires, exit 2 blocks | confirmed | none |
 | guard panics still block | not observed | integration test of `wg guard` |
 | guard abort contained by allowlist | confirmed | none |
-| allowlist plus metacharacter rule refuse `x; rm -rf ~` | confirmed (stand-in) | replay in guard unit tests |
+| allowlist plus metacharacter rule refuse `x; rm -rf ~` | confirmed (stand-in) | replay in guard unit tests; "no Bash" fallback stays open |
+| child calls stay out of the owner's `~/.claude` | refuted (they wrote to it) | profile or config dir that isolates children; rerun 8d under it |
+
+## Open items
+
+Tracked as GitHub issues; each blocks the Phase 1a work named. The design owner amends factory.md
+§16 Phase 0 to move them out of Phase 0.
+
+| Item | Blocks |
+|---|---|
+| Record a subscription usage-limit and an API 429 envelope (with `rate_limit_event`) | `RateLimited` classification and fallback |
+| Gateway builder dry-run test pins argv, env and settings | the gateway profile builder |
+| `wg guard` built to panic still blocks (`catch_unwind`, exit 2) | the guard; the "no Bash" fallback decision |
+| Permission layer vs `\|`, `$()`, backticks, newline, `>` with a positive control | the "no Bash" fallback decision |
+| Child calls isolated from the owner's `~/.claude`; rerun 8d (no key in Bash env) and 8c (helper cadence on a valid key) there | any key-bearing profile |
+| Doctor refuses user-scope `permissions.allow`/`ask`/`defaultMode` | the runner's first real call |
