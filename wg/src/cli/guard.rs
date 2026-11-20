@@ -76,6 +76,22 @@ fn handle(args: &[String]) -> Result<(), String> {
     }
 }
 
+/// What the call targeted: the Bash command, the file or the skill, for the owner's audit.
+fn input_summary(input: &Value) -> String {
+    [
+        "command",
+        "file_path",
+        "notebook_path",
+        "path",
+        "pattern",
+        "skill",
+    ]
+    .iter()
+    .find_map(|k| input[*k].as_str())
+    .unwrap_or("")
+    .to_string()
+}
+
 /// Appends the decision to `guard.jsonl`; a log that cannot be written denies the call.
 fn log(m: &Manifest, hook: &Value, v: &Verdict) -> Result<(), String> {
     let (decision, reason, effect) = match v {
@@ -87,6 +103,7 @@ fn log(m: &Manifest, hook: &Value, v: &Verdict) -> Result<(), String> {
         "ts": crate::journal::now(),
         "label": m.label,
         "tool": hook["tool_name"],
+        "input": crate::ids::one_line(&input_summary(&hook["tool_input"]), 300),
         "decision": decision,
         "effect": effect,
         "reason": reason,
