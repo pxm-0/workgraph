@@ -358,7 +358,8 @@ mod tests {
     fn a_good_job_passes_and_each_rule_rejects_one_change() {
         let yes = |_: &str| true;
         assert_eq!(validate(&job(), &yes), Ok(()));
-        let cases: Vec<(Box<dyn Fn(&mut Job)>, &str)> = vec![
+        type Change = Box<dyn Fn(&mut Job)>;
+        let cases: Vec<(Change, &str)> = vec![
             (Box::new(|j| j.v = 2), "protocol"),
             (Box::new(|j| j.job = "j-XYZ".into()), "job id"),
             (Box::new(|j| j.nonce = "a b".into()), "nonce"),

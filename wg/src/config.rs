@@ -198,6 +198,20 @@ impl Config {
         self.repos.iter().find(|r| r.name == name)
     }
 
+    /// The `[[repo]]` a checkout or one of its worktrees belongs to, by its git common dir.
+    pub fn repo_at(&self, dir: &Path) -> Option<&RepoCfg> {
+        let common = crate::git::git(
+            dir,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            &[],
+        )
+        .ok()?;
+        let root = Path::new(&common).parent()?.canonicalize().ok()?;
+        self.repos
+            .iter()
+            .find(|r| Path::new(&r.path).canonicalize().is_ok_and(|p| p == root))
+    }
+
     /// The approved entry for a check of `repo`; later entries override earlier ones.
     pub fn check(&self, repo: &str, name: &str) -> Option<&CheckEntry> {
         self.checks
