@@ -352,6 +352,8 @@ pub enum LlmFailure {
     Refused,
 }
 
+// One value per step, moved once; boxing the large variant would only add noise to every match.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     Started(RunInput),
@@ -429,6 +431,8 @@ pub struct Outcome {
     pub proposals: Vec<Proposal>,
 }
 
+// One value per step, moved once; boxing the large variant would only add noise to every match.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     Llm(LlmCall),

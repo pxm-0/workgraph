@@ -15,13 +15,38 @@ pub fn tail(text: &str) -> String {
 
 /// Run one shell command with stdout and stderr interleaved; kill its whole process group on timeout.
 pub fn run_shell(cmd: &str, timeout: Duration) -> (i64, String) {
-    let child = Command::new("sh")
+    shell(cmd, None, timeout)
+}
+
+/// `run_shell` in `dir` with exactly `env` (nothing inherited).
+pub fn run_shell_in(
+    cmd: &str,
+    dir: &std::path::Path,
+    env: &[(String, String)],
+    timeout: Duration,
+) -> (i64, String) {
+    shell(cmd, Some((dir, env)), timeout)
+}
+
+fn shell(
+    cmd: &str,
+    within: Option<(&std::path::Path, &[(String, String)])>,
+    timeout: Duration,
+) -> (i64, String) {
+    let mut command = Command::new("sh");
+    command
         .arg("-c")
         .arg(format!("{{ {cmd}\n}} 2>&1"))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .process_group(0)
-        .spawn();
+        .process_group(0);
+    if let Some((dir, env)) = within {
+        command
+            .current_dir(dir)
+            .env_clear()
+            .envs(env.iter().map(|(k, v)| (k, v)));
+    }
+    let child = command.spawn();
     let mut child = match child {
         Ok(c) => c,
         Err(e) => return (127, format!("failed to start: {e}")),
