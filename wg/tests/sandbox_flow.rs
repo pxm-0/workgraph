@@ -210,3 +210,86 @@ fn a_hostile_factory_cannot_give_a_risky_worker_host_checks() {
         "no sandbox: refused"
     );
 }
+
+fn targets(o: &Out) -> Vec<(String, String)> {
+    o.journal
+        .iter()
+        .filter(|e| e["kind"] == "checks_run")
+        .map(|e| {
+            (
+                e["label"].as_str().unwrap().to_string(),
+                e["target"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+/// A rerun of a task an earlier run tainted (its kept worktree holds code built in the sandbox):
+/// even the baseline runs there, and without a sandbox the task parks (design §8.1).
+#[test]
+fn a_task_tainted_by_an_earlier_run_stays_tainted_from_its_baseline() {
+    let o = run(Opts {
+        units: vec![unit("c", json!({}))],
+        tainted_earlier: true,
+        sandbox: Some(SandboxSpec::default()),
+        config_extra: sandbox_repo(),
+        ..Opts::default()
+    });
+    let t = targets(&o);
+    assert_eq!(t[0], ("check:baseline".into(), "sim_sandbox".into()));
+    assert!(t.iter().all(|(_, x)| x == "sim_sandbox"), "{t:?}");
+    let parked = run(Opts {
+        units: vec![unit("c", json!({}))],
+        tainted_earlier: true,
+        ..Opts::default()
+    });
+    assert_eq!(parked.result["status"], "parked");
+    assert!(targets(&parked).is_empty(), "nothing on the Mac");
+}
+
+/// A risky unit's files already changed before the baseline (a kept worktree, whatever the earlier
+/// runs recorded): the task is tainted before its baseline runs.
+#[test]
+fn a_risky_units_leftover_edits_taint_the_task_before_the_baseline() {
+    let o = run(Opts {
+        units: vec![unit(
+            "a",
+            json!({ "risky": true, "riskReason": "migration", "files": ["db/migrations/"] }),
+        )],
+        changed: HashMap::from([("", vec!["db/migrations/1.sql"])]),
+        sandbox: Some(SandboxSpec::default()),
+        config_extra: sandbox_repo(),
+        ..Opts::default()
+    });
+    assert_eq!(
+        targets(&o)[0],
+        ("check:baseline".into(), "sim_sandbox".into())
+    );
+    assert_eq!(o.result["tainted"], true);
+}
+
+/// A plain unit checked before a risky one of the same layer: the layer runs at once in one
+/// worktree, so the plain Worker gets no host check either (design §8.1).
+#[test]
+fn a_plain_unit_beside_a_risky_one_in_a_layer_gets_no_host_bash() {
+    let o = run(Opts {
+        units: vec![
+            unit("c", json!({})),
+            unit(
+                "a",
+                json!({ "risky": true, "riskReason": "migration", "files": ["db/migrations/"] }),
+            ),
+        ],
+        sandbox: Some(SandboxSpec::default()),
+        config_extra: sandbox_repo(),
+        ..Opts::default()
+    });
+    let argv = |label: &str| o.call(label).argv.join(" ");
+    assert!(
+        !argv("work:c").contains("Bash(npm test:*)"),
+        "{}",
+        argv("work:c")
+    );
+    assert!(argv("work:c").contains("sandbox exec --unit c:*"));
+    assert!(argv("work:a").contains("sandbox exec --unit a:*"));
+}

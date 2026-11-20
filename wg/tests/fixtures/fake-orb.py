@@ -6,7 +6,10 @@
 scratch dir and runs each step with `sh -c` there (a test double: no isolation), `poll` answers the
 result, `doctor` and `reap` answer like a healthy agent. `orb run -m M systemctl ...` prints a fixed
 argus fingerprint. A file `orb-down` next to this script makes every agent call fail, as when the
-agent is killed or the sim is gone. Every call is logged to `orb-log.jsonl`."""
+agent is killed or the sim is gone; `orb-down-after` holding N creates it once N jobs were submitted
+(the doctor passed, then the agent dies mid-shift). `orb-pending` holding N makes the next N polls
+answer pending; `orb-dirty` makes every job leave a container behind. Every call is logged to
+`orb-log.jsonl`."""
 import json
 import os
 import subprocess
@@ -53,6 +56,12 @@ if sub == "reap":
     out({"removed": {"pods": 0, "containers": 0, "volumes": 0}, "failed": []})
 if sub == "poll":
     job = rest[rest.index("--job") + 1]
+    pending = os.path.join(here, "orb-pending")
+    if os.path.exists(pending):
+        n = int(open(pending).read() or "0")
+        if n > 0:
+            open(pending, "w").write(str(n - 1))
+            out({"job": job, "pending": True})
     with open(os.path.join(state, job + ".json")) as f:
         print(f.read())
     sys.exit(0)
@@ -69,9 +78,16 @@ if sub == "submit":
         p = subprocess.run(["sh", "-c", s["cmd"]], cwd=work, capture_output=True, text=True, timeout=s["timeout_secs"])
         tail = "\n".join((p.stdout + p.stderr).splitlines()[-40:])
         steps.append({"name": s["name"], "exit": p.returncode, "timed_out": False, "oom": False, "tail": tail})
+    left = 1 if os.path.exists(os.path.join(here, "orb-dirty")) else 0
     result = {"job": job["job"], "nonce": job["nonce"], "steps": steps,
-              "cleanup": {"containers_left": 0, "volumes_left": 0}}
+              "cleanup": {"containers_left": left, "volumes_left": 0}}
     with open(os.path.join(state, job["job"] + ".json"), "w") as f:
         json.dump(result, f)
+    after = os.path.join(here, "orb-down-after")
+    if os.path.exists(after):
+        n = int(open(after).read()) - 1
+        open(after, "w").write(str(n))
+        if n <= 0:
+            open(os.path.join(here, "orb-down"), "w").close()
     out({"job": job["job"], "submitted": True})
 out({"error": f"unknown {sub}"}, 2)

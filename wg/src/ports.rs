@@ -43,6 +43,9 @@ pub trait Sandbox: Sync {
         nonce: &str,
         steps: Vec<crate::sandbox::job::Step>,
     ) -> Result<crate::sandbox::job::JobResult, String>;
+    /// A job run outside the port (a Worker's `wg sandbox exec`) found the sandbox unusable: risky
+    /// work parks from now on. Ports that do not track health ignore it.
+    fn mark_broken(&self, _why: &str) {}
 }
 
 pub struct Ports<'a> {

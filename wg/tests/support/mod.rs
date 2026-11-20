@@ -86,6 +86,8 @@ pub struct Opts {
     pub sandbox: Option<SandboxSpec>,
     /// The diff the repo shows after the check with this label ran (the classifier's input).
     pub diffs: HashMap<&'static str, &'static str>,
+    /// An earlier run of this task built a risky unit (a rerun on its kept worktree).
+    pub tainted_earlier: bool,
 }
 
 /// A fake sim sandbox: ready, or unavailable for a reason; the agent can die at a label.
@@ -191,6 +193,7 @@ impl Default for Opts {
             work_ms: 0,
             sandbox: None,
             diffs: HashMap::new(),
+            tainted_earlier: false,
         }
     }
 }
@@ -622,6 +625,7 @@ pub fn run_with(o: Opts, step: Step) -> Out {
         baseline_floor: o
             .baseline_floor
             .map(|v| v.iter().map(|s| s.to_string()).collect()),
+        tainted_earlier: o.tainted_earlier,
     };
     let ran: Ran = driver::run_task(&ctx, start, step).expect("the run completes");
     wg::cli::run::persist(&ctx, &dirs, &ran).unwrap();

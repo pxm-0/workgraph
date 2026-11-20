@@ -146,6 +146,16 @@ impl Store {
             .map_err(|e| format!("cannot write the result: {e}"))
     }
 
+    /// Marks a job as running (it holds the lock), so a poll can tell it from one still queued.
+    pub fn mark_started(&self, id: &str) -> Result<(), String> {
+        std::fs::write(self.dir(id)?.join("started"), b"")
+            .map_err(|e| format!("cannot mark job {id} started: {e}"))
+    }
+
+    pub fn started(&self, id: &str) -> Result<bool, String> {
+        Ok(self.dir(id)?.join("started").exists())
+    }
+
     /// Concurrency 1 (design §8.3): held for the whole job.
     pub fn lock(&self) -> Result<std::fs::File, String> {
         let f = std::fs::OpenOptions::new()
@@ -226,6 +236,12 @@ mod tests {
             .contains("allowlist"));
         assert!(s.receive(&mut &b"{}\n"[..], &yes).is_err());
         assert_eq!(s.result(&j.job).unwrap(), None);
+        assert!(
+            !s.started(&j.job).unwrap(),
+            "queued until it holds the lock"
+        );
+        s.mark_started(&j.job).unwrap();
+        assert!(s.started(&j.job).unwrap());
         let r = JobResult {
             job: j.job.clone(),
             nonce: j.nonce.clone(),

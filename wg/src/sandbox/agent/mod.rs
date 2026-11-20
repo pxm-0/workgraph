@@ -2,7 +2,8 @@
 //! `/usr/local/lib/wgsbx/wg` on the sim and run as wgsbx through a fixed `orb run` argv.
 //!
 //!   submit                 job line + tar on stdin; stored, started as a transient user unit
-//!   poll --job J           the result, or {"job":J,"pending":true}
+//!   poll --job J           the result, or {"job":J,"pending":true,"queued":<waits for the lock>}
+//!   cancel --job J         stops the job's unit (its cleanup still runs)
 //!   run [--job J]          runs a stored job (the unit), or one from stdin in the foreground
 //!   cleanup --job J        the unit's ExecStopPost: removes what the job left, records a lost run
 //!   reap --older-than S    removes labelled objects older than S seconds
@@ -24,6 +25,7 @@ use store::Store;
 fn run_stored(s: &Store, id: &str) -> Result<Value, String> {
     let job = s.load(id)?;
     let _lock = s.lock()?;
+    s.mark_started(id)?;
     let r = run::execute(&RealPodman, &job, &s.tar(id)?, crate::journal::now());
     s.save_result(&r)?;
     serde_json::to_value(&r).map_err(|e| e.to_string())
@@ -73,7 +75,7 @@ fn poll(s: &Store, id: &str) -> Result<Value, String> {
     }
     let job = s.load(id)?;
     if unit_active(id) {
-        return Ok(json!({ "job": id, "pending": true }));
+        return Ok(json!({ "job": id, "pending": true, "queued": !s.started(id)? }));
     }
     Ok(serde_json::to_value(JobResult {
         job: job.job,
@@ -87,6 +89,24 @@ fn poll(s: &Store, id: &str) -> Result<Value, String> {
         error: Some("the sandbox job is gone without a result".into()),
     })
     .expect("serializes"))
+}
+
+/// Stops a job the Mac gave up on; `ExecStopPost` still cleans up and records a lost run.
+fn cancel(s: &Store, id: &str) -> Result<Value, String> {
+    s.load(id)?;
+    let out = std::process::Command::new("systemctl")
+        .args(["--user", "stop", &format!("wgsbx-{id}")])
+        .env_clear()
+        .envs(podman::env())
+        .output()
+        .map_err(|e| format!("systemctl failed to start: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "systemctl could not stop job {id}: {}",
+            crate::ids::one_line(&String::from_utf8_lossy(&out.stderr), 300)
+        ));
+    }
+    Ok(json!({ "job": id, "cancelled": true }))
 }
 
 /// Starts the stored job detached, so a killed Mac client never skips its cleanup.
@@ -171,6 +191,7 @@ fn dispatch(args: &[String]) -> Result<Value, String> {
         }
         Some("poll") => poll(&Store::home()?, a.need("job")?),
         Some("cleanup") => cleanup(&Store::home()?, a.need("job")?),
+        Some("cancel") => cancel(&Store::home()?, a.need("job")?),
         Some("reap") => {
             a.only(&["older-than"])?;
             let secs: u64 = a.need("older-than")?.parse().map_err(|_| "--older-than takes seconds")?;
@@ -186,7 +207,7 @@ fn dispatch(args: &[String]) -> Result<Value, String> {
             out["job_dirs"] = json!(old.len());
             Ok(out)
         }
-        _ => Err("usage: wg sandbox-agent submit | poll --job J | run [--job J] | cleanup --job J | reap --older-than S | doctor | version".into()),
+        _ => Err("usage: wg sandbox-agent submit | poll --job J | run [--job J] | cleanup --job J | cancel --job J | reap --older-than S | doctor | version".into()),
     }
 }
 
