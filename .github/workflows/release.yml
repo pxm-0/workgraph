@@ -51,6 +51,15 @@ jobs:
           targets: ${{ matrix.target }}
       - name: Build
         run: cargo build --release --locked -p wg --target ${{ matrix.target }}
+      # A pull request keeps its binaries as a short-lived artifact, so real runs of a branch use
+      # exactly what CI built (no cargo on the owner's Mac).
+      - name: Keep the binary (pull request)
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: wg-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/wg
+          retention-days: 7
       - name: Upload binary and checksum
         if: github.event_name == 'push'
         env:
