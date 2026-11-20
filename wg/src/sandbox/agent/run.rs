@@ -94,7 +94,8 @@ fn step(
     let oom = serde_json::from_str::<serde_json::Value>(&inspected.out)
         .ok()
         .and_then(|v| v[0]["State"]["OOMKilled"].as_bool())
-        .unwrap_or(false);
+        .unwrap_or(false)
+        || r.out.contains(podman::OOM_MARK);
     let _ = pm.run(&podman::rm(&cname), None, ADMIN);
     let exit = if r.timed_out {
         124
@@ -256,13 +257,14 @@ pub mod tests {
         let pm = Fake {
             calls: Mutex::new(vec![]),
             rules: vec![
-                ("sh -c fail", ran(3, "boom\n")),
-                ("sh -c hog", ran(137, "Killed")),
+                ("wg-step 60 fail", ran(3, "boom\n")),
+                ("wg-step 60 hog", ran(137, "Killed")),
+                ("wg-step 60 leak", ran(137, "Killed\n[wg: oom_kill]")),
                 (
                     "inspect wgsbx-j-0000000a-s2",
                     ran(0, r#"[{"State":{"OOMKilled":true}}]"#),
                 ),
-                ("sh -c slow", ran(124, "")),
+                ("wg-step 60 slow", ran(124, "")),
             ],
         };
         let mut j = job(&[
@@ -270,6 +272,7 @@ pub mod tests {
             ("fail", "fail"),
             ("hog", "hog"),
             ("slow", "slow"),
+            ("leak", "leak"),
         ]);
         j.services = vec![Service {
             name: "db".into(),
@@ -289,7 +292,8 @@ pub mod tests {
                 (0, false, false),
                 (3, false, false),
                 (137, false, true),
-                (124, true, false)
+                (124, true, false),
+                (137, false, true)
             ]
         );
         assert_eq!(r.steps[1].tail, "boom");
