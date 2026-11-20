@@ -1,4 +1,4 @@
-//! `wg run --experimental` (Phase 1a): one task in the current repo through the dev pipeline.
+//! `wg run`: one task in the current repo through the dev pipeline.
 
 use super::args::{not_an_agent, parse};
 use super::doctor::user_settings_problem;
@@ -66,9 +66,9 @@ pub fn load_config(dirs: &Dirs) -> Result<Config, String> {
 }
 
 pub fn run(args: &[String]) -> Result<Value, String> {
+    // `experimental` still parses as a switch so the Phase 1a flag fails as "unknown flag".
     let a = parse(args, &["experimental", "initialized"])?;
     a.only(&[
-        "experimental",
         "initialized",
         "task-file",
         "task-id",
@@ -77,9 +77,6 @@ pub fn run(args: &[String]) -> Result<Value, String> {
         "run-id",
     ])?;
     not_an_agent("wg run")?;
-    if !a.on("experimental") {
-        return Err("wg run is Phase 1a: pass --experimental (run.js stays the default)".into());
-    }
     let task = std::fs::read_to_string(a.need("task-file")?)
         .map_err(|e| format!("cannot read the task file: {e}"))?;
     let task = task.trim().to_string();

@@ -764,34 +764,22 @@ fn t24_bad_input_fails_fast_before_any_agent_runs() {
     std::fs::write(&task, "  \n").unwrap();
     let t = task.to_str().unwrap();
     let err = |v: Value| v["error"].as_str().unwrap().to_string();
-    assert!(err(wg_run(
-        &home,
-        &["run", "--experimental", "--task-file", t],
-        ""
-    ))
-    .contains("no task given"));
+    assert!(err(wg_run(&home, &["run", "--task-file", t], "")).contains("no task given"));
     std::fs::write(&task, "add a thing").unwrap();
     let sha = "a".repeat(64);
     let rel = format!("[haruspex]\ncli = \"haruspex.py\"\nsha256 = \"{sha}\"\n");
+    assert!(err(wg_run(&home, &["run", "--task-file", t], &rel)).contains("absolute"));
     assert!(err(wg_run(
         &home,
-        &["run", "--experimental", "--task-file", t],
-        &rel
-    ))
-    .contains("absolute"));
-    assert!(err(wg_run(
-        &home,
-        &[
-            "run",
-            "--experimental",
-            "--task-file",
-            t,
-            "--run-id",
-            "x;rm"
-        ],
+        &["run", "--task-file", t, "--run-id", "x;rm"],
         ""
     ))
     .contains("runId"));
-    assert!(err(wg_run(&home, &["run", "--task-file", t], "")).contains("--experimental"));
+    assert!(err(wg_run(
+        &home,
+        &["run", "--experimental", "--task-file", t],
+        ""
+    ))
+    .contains("unknown flag --experimental"));
     assert!(!home.join(".workgraph/runs").exists(), "no run started");
 }

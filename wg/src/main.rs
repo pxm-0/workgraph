@@ -2,7 +2,7 @@
 //! except `wg guard` (a PreToolUse hook: exit 0 allows, 2 denies) and `wg auth key` (an
 //! `apiKeyHelper`: the key alone on stdout). Run it from the repo root.
 //!
-//!   wg run --experimental --task-file F [--task-id T] [--initialized] [--user-changes-file F] [--decisions-file F]
+//!   wg run --task-file F [--task-id T] [--initialized] [--user-changes-file F] [--decisions-file F]
 //!   wg finalize --run R --by NAME --message M --evidence-message M2
 //!   wg config allow-check --repo SLUG --name N --cmd C --factory-cmd C2 | pin-haruspex --cli /abs
 //!   wg doctor [--live] | wg memory import | wg guard --manifest P | wg auth key PROVIDER
