@@ -54,3 +54,15 @@ path = "tests/haruspex_real.rs"
 [[test]]
 name = "admin"
 path = "tests/admin.rs"
+
+[[test]]
+name = "shift_e2e"
+path = "tests/shift_e2e.rs"
+
+[[test]]
+name = "intake"
+path = "tests/intake.rs"
+
+[[test]]
+name = "finalize_shift"
+path = "tests/finalize_shift.rs"

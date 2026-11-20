@@ -2,11 +2,16 @@
 """A scripted stand-in for `claude -p` (design §15.3): it acts by the label in its guard manifest,
 uses the real Haruspex CLI the way a Reader and a Reviewer would, exercises the guard hook from its
 --settings file, and prints a result envelope. It records what it saw (argv flags, env names, hook
-exit codes) next to the manifest, never any value of a key."""
+exit codes) next to the manifest, never any value of a key.
+
+Shift tests steer it through the task text: NEEDS-DECISION makes the Reading raise a critical
+escalation E-CRIT, RATE-LIMIT makes a worker hit a 429, and SLOW makes the first worker wait until
+its parent dies (the kill-and-resume test), then exit without touching anything."""
 import json
 import os
 import subprocess
 import sys
+import time
 
 
 def flag(name):
@@ -65,6 +70,28 @@ def complete_task():
         json.dump(project, f, indent=2)
 
 
+def envelope(reply):
+    return json.dumps({"type": "result", "subtype": "success", "is_error": False, "structured_output": reply,
+                       "total_cost_usd": 0.001, "num_turns": 1, "session_id": "fake",
+                       "modelUsage": {f"claude-{model}-5-5": {"outputTokens": 5}}})
+
+
+if label == "doctor":
+    print(envelope({"ok": True}))
+    sys.exit(0)
+if label.startswith("work:") and "RATE-LIMIT" in prompt:
+    print(json.dumps({"type": "result", "subtype": "success", "is_error": True, "api_error_status": 429,
+                      "result": "rate limited", "session_id": "fake"}))
+    sys.exit(0)
+slow_marker = os.path.join(os.environ["HOME"], "slow-once")
+if label.startswith("work:") and "SLOW" in prompt and not os.path.exists(slow_marker):
+    open(slow_marker, "w").close()
+    parent = os.getppid()
+    for _ in range(600):
+        if os.getppid() != parent:
+            sys.exit(1)
+        time.sleep(0.1)
+
 if label.startswith("read"):
     record["init"] = run(["python3", cli, "init", "."]).returncode
     record["create"] = run(["python3", cli, "task", "create", "Fix add", ".", "--id", "T-001"]).returncode
@@ -76,6 +103,9 @@ if label.startswith("read"):
              "units": [{"id": "fix", "goal": "make add add", "files": ["calc.py", "test_calc.py"], "dependsOn": [],
                         "criteria": ["AC-001"], "size": "small", "risky": False}],
              "escalations": []}
+    if "NEEDS-DECISION" in prompt and "E-CRIT" not in prompt:  # a decided escalation is not raised again
+        reply["escalations"] = [{"id": "E-CRIT", "severity": "critical", "question": "Drop the legacy table?",
+                                 "recommendation": "Keep it", "options": ["Keep it", "Drop it"]}]
 elif label.startswith("challenge"):
     reply = {"added": [], "assign": [], "escalations": []}
 elif label.startswith("work:"):
@@ -107,6 +137,4 @@ if helper:
 
 with open(os.path.join(os.path.dirname(manifest_path), "fake-claude.jsonl"), "a") as f:
     f.write(json.dumps(record) + "\n")
-print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "structured_output": reply,
-                  "total_cost_usd": 0.001, "num_turns": 1, "session_id": "fake",
-                  "modelUsage": {f"claude-{model}-5-5": {"outputTokens": 5}}}))
+print(envelope(reply))
