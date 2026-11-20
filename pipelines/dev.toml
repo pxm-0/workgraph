@@ -1,0 +1,59 @@
+# The dev pipeline (design §6.2): run.js's control flow, interpreted by wg-factory. The kernel
+# validates every key at load and clamps turns and timeouts to its compiled limits.
+[pipeline]
+name = "dev"
+haruspex = true
+
+[[stage]]
+id = "read"
+kind = "read"
+model = "opus"
+effort = "high"
+prompt = "read"
+max_turns = 60
+timeout_secs = 1800
+
+[[stage]]
+id = "challenge"
+kind = "challenge"
+model = "sonnet"
+effort = "high"
+prompt = "challenge"
+max_turns = 30
+timeout_secs = 900
+optional = true
+
+[[stage]]
+id = "escalate"
+kind = "escalate"
+
+[[stage]]
+id = "baseline"
+kind = "baseline"
+
+[[stage]]
+id = "build"
+kind = "build"
+max_units = 5
+max_fix_rounds = 3
+max_turns = 80
+timeout_secs = 1800
+worker_prompt = "work"
+fix_prompt = "fix"
+
+[[stage]]
+id = "review"
+kind = "review"
+model = "opus"
+prompt = "review"
+max_fix_rounds = 1
+max_turns = 60
+timeout_secs = 1800
+
+[[stage]]
+id = "learn"
+kind = "learn"
+model = "sonnet"
+prompt = "learn"
+max_turns = 3
+timeout_secs = 600
