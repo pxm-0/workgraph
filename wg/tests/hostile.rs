@@ -448,3 +448,91 @@ fn the_call_cap_parks_the_task_with_its_edits_kept() {
     assert_eq!(o.result["note"], "call cap");
     assert_eq!(proc_labels(&o), ["read", "challenge", "work:a"]);
 }
+
+fn publish_refusals(o: &Out) -> Vec<String> {
+    refusals(o)
+        .into_iter()
+        .filter(|r| r.starts_with("publish: "))
+        .collect()
+}
+
+#[test]
+fn publish_without_a_passing_review_or_with_a_bad_title_is_refused() {
+    for (title, want) in [
+        ("feat: ship it", "no independent opus review passed"),
+        ("feat: a\nb", "not one conventional-commit line"),
+        ("ship it", "not one conventional-commit line"),
+    ] {
+        let step = move |s: &RunState, ev: &Event| {
+            let (next, cmds) = real(s, ev);
+            match ev {
+                Event::ChecksDone { label, .. } if label == "check:baseline" => (
+                    next,
+                    vec![Command::Publish {
+                        title: title.into(),
+                    }],
+                ),
+                _ => (next, cmds),
+            }
+        };
+        let o = run_with(
+            Opts {
+                units: vec![unit("a", json!({}))],
+                shift: true,
+                ..Opts::default()
+            },
+            &step,
+        );
+        let r = publish_refusals(&o);
+        assert!(r.iter().any(|w| w.contains(want)), "{title}: {r:?}");
+        assert!(!proc_labels(&o).iter().any(|l| l.starts_with("work:")));
+    }
+}
+
+#[test]
+fn an_honest_shift_run_passes_every_publish_invariant_and_in_place_never_publishes() {
+    let o = run_with(
+        Opts {
+            units: vec![unit("a", json!({}))],
+            shift: true,
+            ..Opts::default()
+        },
+        &real,
+    );
+    let r = publish_refusals(&o);
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert!(
+        r[0].contains("git branch"),
+        "past the invariants, at git: {r:?}"
+    );
+    assert_eq!(o.result["status"], "stuck");
+    assert!(o.result["note"]
+        .as_str()
+        .unwrap()
+        .starts_with("publish refused"));
+    let in_place = run_with(
+        Opts {
+            units: vec![unit("a", json!({}))],
+            ..Opts::default()
+        },
+        &real,
+    );
+    assert_eq!(in_place.result["status"], "ready_for_review");
+    assert!(!in_place.journal.iter().any(|e| e["what"] == "publish"));
+}
+
+#[test]
+fn a_shift_stop_parks_the_task_between_steps() {
+    let o = run_with(
+        Opts {
+            units: vec![unit("a", json!({}))],
+            shift: true,
+            stop: Some((3, "the STOP file exists")),
+            ..Opts::default()
+        },
+        &real,
+    );
+    assert_eq!(o.result["status"], "parked");
+    assert_eq!(o.result["note"], "shift stopped: the STOP file exists");
+    assert!(!proc_labels(&o).iter().any(|l| l.starts_with("review")));
+}

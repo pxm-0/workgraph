@@ -287,6 +287,15 @@ pub struct PipelineDef {
     pub review: LlmStage,
     pub review_max_fix_rounds: u32,
     pub learn: LlmStage,
+    /// The `publish` stage (Phase 2): present in a shift, absent in place, where the skill commits.
+    pub publish: Option<PublishDef>,
+}
+
+/// The publish stage: a draft PR with these labels. The kernel checks every invariant first.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PublishDef {
+    pub draft: bool,
+    pub labels: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -309,6 +318,8 @@ pub struct RiskView {
 #[derive(Clone, Debug, PartialEq)]
 pub struct RunInput {
     pub task: String,
+    /// One line naming the task (the issue title in a shift); the factory builds the PR title from it.
+    pub title: String,
     pub decisions: Vec<Decision>,
     pub resume_task: Option<String>,
     pub initialized_earlier: bool,
@@ -379,6 +390,14 @@ pub enum Event {
     RiskUpdated(RiskView),
     /// Escalations only the kernel can raise (CHECKS, contract), sent right after the Reading.
     KernelEscalations(Vec<Escalation>),
+    /// The kernel opened (or found) the draft PR.
+    Published {
+        url: String,
+    },
+    /// The kernel refused to publish: an invariant failed, or the push or PR failed.
+    PublishRefused {
+        why: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -446,6 +465,10 @@ pub enum Command {
     /// The kernel validates it as v1 and sanitizes every rule before saving.
     SaveMemory(Memory),
     Log(String),
+    /// Commit, push `wg/*` and open a draft PR; the kernel checks every invariant (design §4.1).
+    Publish {
+        title: String,
+    },
     /// Terminal.
     Finish(Outcome),
 }

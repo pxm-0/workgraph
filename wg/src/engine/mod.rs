@@ -4,6 +4,7 @@ pub mod command_check;
 pub mod convert;
 pub mod driver;
 pub mod kernel;
+pub mod publish;
 
 use crate::budget::Ledger;
 use crate::config::Config;
@@ -30,4 +31,21 @@ pub struct RunCtx<'a> {
     pub haruspex_cli: String,
     pub plugins: Vec<(String, bool)>,
     pub user: String,
+    /// Set in a shift (Phase 2): what publish and the stop conditions need. `None` in place.
+    pub shift: Option<ShiftCtx>,
+}
+
+/// The shift side of a run: the issue, its task branch and GitHub, and the stop conditions the
+/// driver checks between steps (design §7.3 step 9).
+pub struct ShiftCtx {
+    pub gh: crate::gh::Gh,
+    pub issue: u64,
+    pub branch: String,
+    pub base: String,
+    pub attribution: String,
+    pub shift_id: String,
+    /// LLM calls at once inside one layer.
+    pub max_parallel: usize,
+    /// Why the shift must stop (the STOP file, `until`), checked between steps.
+    pub stop: Box<dyn Fn() -> Option<String> + Sync>,
 }

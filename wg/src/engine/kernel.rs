@@ -33,6 +33,8 @@ pub struct Kernel {
     pub left_out: Vec<String>,
     pub checks: Vec<CheckResult>,
     pub review_pass: Option<ReviewPass>,
+    /// The latest review reply, for the PR body.
+    pub review: Option<wg_factory::api::Review>,
     pub approvals: Value,
     pub managed: String,
     pub contract: Option<Contract>,

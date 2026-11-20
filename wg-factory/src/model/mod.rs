@@ -92,6 +92,8 @@ pub enum Phase {
         round: u32,
     },
     Learning,
+    /// Waiting for the kernel's answer to `Publish`.
+    Publishing,
     Done,
 }
 
@@ -109,6 +111,9 @@ pub struct LayerState {
 pub struct RunState {
     pub phase: Phase,
     pub task: String,
+    pub title: String,
+    /// The outcome held while the kernel publishes.
+    pub finished: Option<crate::api::Outcome>,
     pub decisions: Vec<crate::api::Decision>,
     pub resume_task: Option<String>,
     pub initialized_earlier: bool,

@@ -68,6 +68,11 @@ pub struct Opts {
     pub raw: Raw,
     /// The guard logs an incident while this label runs.
     pub guard_incident: Option<&'static str>,
+    /// Run as a shift task: the pipeline keeps its publish stage and the driver gets a shift
+    /// context (its gh is never reachable, so a publish that passes the invariants fails at git).
+    pub shift: bool,
+    /// In a shift, the stop condition reports this once `stop_after` steps have run.
+    pub stop: Option<(usize, &'static str)>,
 }
 
 impl Default for Opts {
@@ -96,6 +101,8 @@ impl Default for Opts {
             config_extra: String::new(),
             raw: Arc::new(|_| None),
             guard_incident: None,
+            shift: false,
+            stop: None,
         }
     }
 }
@@ -434,6 +441,23 @@ pub fn run_with(o: Opts, step: Step) -> Out {
         haruspex_cli: CLI.into(),
         plugins: vec![],
         user: "tester".into(),
+        shift: o.shift.then(|| {
+            let steps = std::sync::atomic::AtomicUsize::new(0);
+            let stop = o.stop;
+            wg::engine::ShiftCtx {
+                gh: wg::gh::Gh::new("/nonexistent/gh", base.join("gh")),
+                issue: 1,
+                branch: "wg/1-thing".into(),
+                base: "main".into(),
+                attribution: "Co-Authored-By: t".into(),
+                shift_id: "20261120-0130".into(),
+                max_parallel: 1,
+                stop: Box::new(move || {
+                    let n = steps.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    stop.and_then(|(after, why)| (n >= after).then(|| why.to_string()))
+                }),
+            }
+        }),
     };
     let dirty: Vec<String> = o.dirty.iter().map(|s| s.to_string()).collect();
     let decisions: Vec<Decision> = o
@@ -447,6 +471,7 @@ pub fn run_with(o: Opts, step: Step) -> Out {
         })
         .collect();
     let start = Start {
+        title: o.task.trim().lines().next().unwrap_or_default().to_string(),
         task: o.task.trim().to_string(),
         decisions,
         resume_task: o.resume_task.map(String::from),
@@ -457,7 +482,13 @@ pub fn run_with(o: Opts, step: Step) -> Out {
             .unwrap_or(dirty),
         memory: wg::memory_store::load(&memory_path),
         memory_path: memory_path.clone(),
-        pipeline: wg::pipelines::load(wg::assets::DEV_PIPELINE, 60).unwrap(),
+        pipeline: {
+            let p = wg::pipelines::load(wg::assets::DEV_PIPELINE, 60).unwrap();
+            wg_factory::api::PipelineDef {
+                publish: if o.shift { p.publish.clone() } else { None },
+                ..p
+            }
+        },
         start_branch: "main".into(),
         initializing: false,
     };

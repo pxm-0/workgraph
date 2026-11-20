@@ -106,7 +106,11 @@ pub fn run(args: &[String]) -> Result<Value, String> {
         .haruspex
         .clone()
         .ok_or("no Haruspex CLI is pinned: run wg config pin-haruspex --cli <absolute path>")?;
-    let pipeline = crate::pipelines::load(crate::assets::DEV_PIPELINE, cfg.max_calls_per_task)?;
+    // In place the skill commits through wg finalize --run, so the publish stage is skipped.
+    let pipeline = wg_factory::api::PipelineDef {
+        publish: None,
+        ..crate::pipelines::load(crate::assets::DEV_PIPELINE, cfg.max_calls_per_task)?
+    };
     let repo = repo_root()?;
     let run_dir = dirs.run(&run_id);
     if run_dir.exists() {
@@ -146,6 +150,7 @@ pub fn run(args: &[String]) -> Result<Value, String> {
         haruspex_cli: hx.cli.to_string_lossy().into_owned(),
         plugins: crate::claude::auth::plugin_profile(&dirs.home, &cfg.keep_plugins),
         user: std::env::var("USER").unwrap_or_default(),
+        shift: None,
         run_dir: run_dir.clone(),
         dirs: dirs.clone(),
     };
@@ -155,6 +160,7 @@ pub fn run(args: &[String]) -> Result<Value, String> {
                 "assets": crate::assets::hash(), "pipeline": "dev", "memory_import": imported }),
     )?;
     let start = Start {
+        title: task.lines().next().unwrap_or_default().to_string(),
         task,
         decisions: decisions(a.get("decisions-file"))?,
         resume_task,
