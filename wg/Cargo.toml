@@ -42,3 +42,15 @@ path = "tests/runner.rs"
 [[test]]
 name = "e2e"
 path = "tests/e2e.rs"
+
+[[test]]
+name = "guard"
+path = "tests/guard.rs"
+
+[[test]]
+name = "haruspex_real"
+path = "tests/haruspex_real.rs"
+
+[[test]]
+name = "admin"
+path = "tests/admin.rs"
