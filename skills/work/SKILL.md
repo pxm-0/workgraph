@@ -18,7 +18,7 @@ If none exists, stop: `claude plugin marketplace add pxm-0/haruspex` then `claud
 
 **wg**, the first that works (`<wg> recall` prints JSON):
 
-1. `${CLAUDE_PLUGIN_ROOT}/wg/target/release/wg`
+1. `${CLAUDE_PLUGIN_ROOT}/target/release/wg`
 2. `${CLAUDE_PLUGIN_DATA}/wg-<version>-<target>`, where `<version>` is `version` in
    `${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json` and `<target>` maps `uname -sm`:
    `Darwin arm64` → `aarch64-apple-darwin`, `Darwin x86_64` → `x86_64-apple-darwin`,
