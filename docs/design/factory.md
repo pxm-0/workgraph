@@ -22,7 +22,7 @@ maps each one to its fix and the section that holds it.
 ### 1.2 The owner's decisions (fixed)
 
 1. The whole factory is one Rust binary, `wg`, grown from today's crate, plus a Claude Code skill to drive it.
-2. Every LLM call is a headless `claude -p --output-format json` subprocess on the owner's Claude Code setup (skills, plugins including mattpocock-skills and haruspex), billed to the owner's subscription first. When the subscription is rate- or usage-limited, the call falls back to an Anthropic API key from the owner's keychain or environment (§5.1, §17 D3). There are no dollar caps yet; every call's cost and billing path is ledgered.
+2. Every LLM call is a headless `claude -p --output-format json` subprocess on the owner's Claude Code setup (skills, plugins including mattpocock-skills and haruspex), billed to the owner's subscription first. When the subscription is rate- or usage-limited, the call falls back to an Anthropic API key from the owner's keychain, delivered through Claude Code's `apiKeyHelper` setting and never through any environment (§5.1, §17 D3, D5). Each stage, and the factory default, picks a **provider profile** in `factory.toml`: the subscription, the Anthropic API, or an Anthropic-compatible gateway (OpenRouter, or a local LiteLLM proxy in front of OpenAI, Gemini and others); every call still runs through `claude -p` (§5.1, §17 D6). There are no dollar caps yet; every call's cost, provider and model id is ledgered.
 3. "Shifts" means both scheduled shifts (nightly runs that take queued GitHub issues across configured repos and leave PRs plus a report) and an assembly line inside a shift: each task moves dev → QA → release, each pipeline a sequence of stages with its own gates. Today's "worker" is a placeholder for a whole pipeline.
 4. Risky units (migrations, deletes, auth, deploys, payments, secrets, CI) proceed, sandboxed on the existing OrbStack machine `oreochiserver-sim`, in a rootless container inside it (§8, §17 D1). That machine is also the argus rehearsal: never touch `/etc/argus` or argus services, never reuse production secrets, address it with `orb run -m oreochiserver-sim`, and every create, reset or delete of it needs the owner's yes. The owner accepted, knowingly, that the sim shares the Mac's `/Users` and has OrbStack's `mac`/`macctl`, so a container escape lands where the Mac is reachable (§14).
 5. Self-improvement merges itself on green: the factory may open PRs against `pxm-0/workgraph` and merge them when CI and a fixed regression eval on past tasks pass and the change does not touch protected safety code. Only prompts, pipelines and docs auto-merge; editable Rust passes the gate but is held for the owner (§17 D2). The owner can revert.
@@ -84,7 +84,7 @@ flowchart LR
       guard["wg guard PreToolUse hook"]
       checks["checks: CheckResult tokens"]
       risk["risk classifier + taint"]
-      budget["cost ledger + auth path"]
+      budget["cost ledger + provider profiles"]
       hx["Haruspex wrapper + finalize"]
       gitgh["git / gh"]
       sbx["sandbox client"]
@@ -98,6 +98,8 @@ flowchart LR
   runner -->|"fixed argv, prompt on stdin"| claude["claude -p children"]
   claude -->|"every tool call"| guard
   claude -->|"edits"| wt[("task worktree")]
+  claude -->|"apiKeyHelper: wg auth key"| cli
+  claude -->|"HTTPS or loopback, per provider profile"| prov[("subscription, Anthropic API, OpenRouter, local LiteLLM")]
   checks -->|"approved devstack commands"| wt
   sbx -->|"orb run -m oreochiserver-sim -u wgsbx"| sim
   subgraph sim["oreochiserver-sim (existing OrbStack machine; shares /Users, has mac/macctl)"]
@@ -161,7 +163,7 @@ Budgets are line targets; CI fails any `src` file over 800 lines. `Ph` is the ph
 | `lib.rs` | 0 | 40 | module tree |
 | `error.rs` | 0 | 120 | `WgError` (thiserror), user-facing messages without secrets |
 | `cli/legacy.rs` | 0 | 250 | `recall`, `check`, `save`, `finalize`: today's flags, parser and JSON, byte for byte; reached only by `cli.rs`-style callers, never by the skills |
-| `cli/run.rs` | 1 | 250 | `wg run`, `wg finalize --run`, `wg config allow-check`, `wg memory import`, `wg doctor` |
+| `cli/run.rs` | 1 | 250 | `wg run`, `wg finalize --run`, `wg config allow-check`, `wg memory import`, `wg doctor`, `wg auth key <provider>` (the `apiKeyHelper` entry point, §5.1) |
 | `cli/guard.rs` | 1 | 60 | `wg guard` hook entry point; `catch_unwind` around the handler, exit 2 on every error path (§5.4) |
 | `cli/shift.rs` | 2 | 300 | `wg shift run/resume/status/report/recover/gc/schedule-print`, `wg decide`, `wg approve`, `wg approval-summary` |
 | `cli/sandbox.rs` | 3 | 200 | `wg sandbox doctor/exec/reap/setup-print`, `wg sandbox-agent ...` (linux) |
@@ -175,7 +177,8 @@ Budgets are line targets; CI fails any `src` file over 800 lines. `Ph` is the ph
 | `gh.rs` | 2 | 300 | issues, labels, comments, timeline, PR create/ready/view, check-runs, merge (needs `SelfMergeDecision`) |
 | `claude/argv.rs` | 1 | 200 | builds the exact argv (§5) |
 | `claude/runner.rs` | 1 | 300 | spawn, stdin prompt, timeout, envelope, retry-once, ledger record |
-| `claude/auth.rs` | 1 | 120 | billing path per call: subscription first, API-key fallback on a rate or usage limit; reads the key from the keychain or `wg`'s environment into memory only (§5.1) |
+| `claude/auth.rs` | 1 | 150 | provider per call (the stage's profile, else the default), fallback order on a rate or usage limit; builds the per-call env (`ANTHROPIC_BASE_URL` only, for a gateway) and the settings profile's `apiKeyHelper` entry; `wg auth key <provider>` reads the profile's keychain item with a fixed `security` argv and writes the key to stdout only (§5.1, D5) |
+| `claude/providers.rs` | 1 | 200 | load and validate `[providers.*]` and `[auth]` (§7.1): kind, base URL (`https`, or `http` on a loopback address only), keychain service name, tier → model id map, stage → provider map, fallback order (D6) |
 | `claude/envelope.rs` | 1 | 200 | envelope types and error classification |
 | `claude/policy.rs` | 1 | 250 | role + kernel risk view → allowed/disallowed tools + guard manifest |
 | `guard/hook.rs` | 1 | 250 | PreToolUse handler: path roots, Bash rules, incidents |
@@ -276,8 +279,13 @@ delete existing ones); end-to-end flow tests live in `wg/tests/` (protected).
 ```rust
 // Private fields, no Deserialize, constructors are pub(crate). Each has a compile_fail doctest
 // proving it cannot be built or deserialized from outside the module that issues it.
-pub struct BudgetLease { scope: LeaseScope, cap: Option<Usd>, id: LeaseId, auth: AuthPath } // budget::Ledger::lease; cap None until dollar ceilings ship
-pub enum AuthPath { Subscription, ApiKey }
+pub struct BudgetLease { scope: LeaseScope, cap: Option<Usd>, id: LeaseId, provider: ProviderId, model_id: ModelId } // budget::Ledger::lease; cap None until dollar ceilings ship
+// claude/providers.rs: built only from factory.toml, never from factory or LLM output (D6)
+pub struct ProviderId(String);                          // a [providers.<name>] key, ^[a-z0-9-]{1,32}$
+pub struct ModelId(String);                             // a provider model id from the profile's tier map
+pub enum ProviderKind { Subscription, AnthropicApi, Gateway { base_url: GatewayUrl } } // GatewayUrl: https, or http on loopback
+pub struct Provider { id: ProviderId, kind: ProviderKind, keychain_service: Option<String>, // None only for Subscription
+                      models: TierMap<ModelId> }       // haiku, sonnet, opus → provider model ids, all three required
 pub struct CheckResult { name: CheckName, command: String, exit_code: i32, output_tail: String,
                          target: ExecTarget, tree: TreeFingerprint, nonce: Nonce }   // checks::run
 pub enum ExecTarget { DevStack, SimSandbox { job: JobId } }
@@ -332,7 +340,7 @@ pub struct LlmCall {
     pub label: String,            // "read", "challenge", "work:U2", "fix:U2#3", "fix:U2#r1", "review#2", "learn"
     pub role: Role,
     pub unit: Option<String>,     // required for Worker/Fixer; the kernel derives files and policy from ITS copy
-    pub tier: Tier,
+    pub tier: Tier,               // never a provider or model id: the kernel maps the tier through the stage's provider profile (D6)
     pub effort: Option<Effort>,
     pub template: String,         // prompt file stem, e.g. "work"
     pub vars: Vec<(String, String)>,
@@ -355,7 +363,7 @@ pub enum Command {
 
 pub enum Event {
     Started(RunInput),            // task text, decisions, user_changes_before, memory, pipeline, risk view, mode
-    LlmDone { label: String, reply: Reply, cost_micros: u64 },
+    LlmDone { label: String, reply: Reply, cost_micros: Option<u64>, counts_for_tier: bool }, // None = unknown; counts_for_tier is the kernel's §5.3 step 4 verdict
     LlmFailed { label: String, why: LlmFailure },      // Died, Timeout, Invalid, TurnLimit, BudgetHit, RateLimited, Refused
     ChecksDone { label: String, results: Vec<CheckOutcome>, changed_files: Vec<String> },
     ChecksUnavailable { label: String, why: String },  // the runner itself could not start: run stops
@@ -441,33 +449,60 @@ claude -p --output-format json \
 ```
 
 - **Prompt** on stdin, never argv. **cwd** is the task worktree (or the repo root in place).
+  `--model` is the provider profile's model id for the call's tier (`sonnet` here, on the
+  subscription profile; D6).
 - **Environment:** `env_clear()`, then `HOME`, `USER`, `LANG`, `TERM=dumb`, a fixed
   `PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`,
   `TMPDIR=~/.workgraph-work/tmp/<run>` (written `<run>/tmp` below; it is outside the denied
   `~/.workgraph/` tree, as are the worktrees),
-  `WG_RUN`, `WG_GUARD_MANIFEST`, `WG_AGENT=1`, `ARGUS_SSH_HOST=oreochiserver-sim`.
+  `WG_RUN`, `WG_GUARD_MANIFEST`, `WG_AGENT=1`, `ARGUS_SSH_HOST=oreochiserver-sim`, and, for a
+  gateway provider only, `ANTHROPIC_BASE_URL` from its profile. No key variable
+  (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or any provider's) ever reaches a child.
   `GH_TOKEN`, `SSH_AUTH_SOCK` and cloud credentials never reach a child. `HOME`/`USER` stay for
   keychain-based subscription auth.
-- **Billing path** (`claude/auth.rs`, §17 D3). Every call starts on the **subscription**: the
-  owner's Claude login, with no `ANTHROPIC_API_KEY` in the child's environment (`env_clear()`
-  guarantees that). When a subscription call ends `RateLimited` (§5.3) and `factory.toml
-  [auth].api_fallback` is on, the run (in a shift, the rest of the shift) switches to the
-  **API-key path**: the same argv, plus `ANTHROPIC_API_KEY` in that child's environment only.
-  - The key is read at spawn time from the macOS keychain (`security find-generic-password -s
-    <[auth].keychain_service> -w`, a fixed argv) or, if `wg` itself was started with
-    `ANTHROPIC_API_KEY` set, from that. It lives in the kernel's memory only: never in argv,
-    `factory.toml`, the journal, logs, rendered prompts, reports or any file, and never in the
-    scrubbed environment of Haruspex, checks or the sandbox job.
-  - The ledger records, per call, which path was used and, for the first API-key call of a run
-    or shift, the subscription failure that caused the switch.
-  - A child on the API-key path passes the key on to its own Bash tool calls. Those are only
-    approved check commands (§5.2) with metacharacters refused (§5.4), so no `env` or
-    `printenv`, and `docker compose` forwards only variables the compose files name. Preflight
-    therefore refuses the API-key path for a repo whose approved commands do not start with
-    `docker compose`, or whose `docker compose config` (with the factory override) names any
-    `ANTHROPIC_*` variable; that repo's task parks `rate limited` instead.
-  - If the key is absent or the API path is also limited, the call is `RateLimited` as before:
-    the task parks and the shift stops intake.
+- **Provider and billing path** (`claude/auth.rs`, `claude/providers.rs`, §17 D3, D5, D6). The
+  **billing path** of a call is its provider profile, one of the `[providers.*]` tables in
+  `factory.toml` (§7.1). A call uses the profile its stage names in `[auth.stages]`, else
+  `[auth].default` (`subscription` unless the owner changes it). Profiles come only from
+  owner-local config: a pipeline, a prompt or a self PR cannot name a provider or a model id.
+  Per call the kernel derives three things from the profile:
+  - **`--model`**: the profile's model id for the call's tier (`haiku`, `sonnet`, `opus`);
+  - **env**: `ANTHROPIC_BASE_URL` for a gateway, nothing for `subscription` or `anthropic-api`;
+  - **`--settings`**: for a key-bearing profile, the per-call settings file (below) also sets
+    `"apiKeyHelper": "<current_exe> auth key <provider>"`. Claude Code runs that helper and uses
+    its stdout as the key. `wg auth key` reads the keychain item the profile names
+    (`security find-generic-password -s <keychain_service> -w`, a fixed argv) and writes it to
+    stdout, its pipe to `claude`, and nowhere else. The key is therefore never in any process
+    environment, argv, file, log, journal, rendered prompt, report or ledger line, and
+    `factory.toml` holds only the keychain item's name. `wg` ignores an `ANTHROPIC_API_KEY` in its
+    own environment (`wg doctor` warns), and `env_clear()` keeps it from every child. `wg auth`
+    is in the always-disallowed tool list (§5.2), so a child's Bash cannot call the helper.
+- **Fallback order** (`[auth].fallback`, default `["subscription", "anthropic-api"]`). When a call
+  ends `RateLimited` (§5.3), its provider is marked limited for the rest of the run (in a shift,
+  the rest of the shift), and that call and every later call that would use it go to the next
+  provider in the list that is not limited. A stage whose provider is not in the list does not
+  fall back. An empty list turns fallback off.
+  - The ledger records, per call, the provider and model id and, for the first call after a
+    switch, the failure that caused it.
+  - If no usable next provider is left (list exhausted, key absent, gateway unreachable), the
+    call is `RateLimited` as before: the task parks and the shift stops intake.
+- **Gateways** (`openrouter`: `ANTHROPIC_BASE_URL=https://openrouter.ai/api`, key through
+  `apiKeyHelper`; `litellm`: a local LiteLLM proxy on a loopback port, which translates to OpenAI,
+  Gemini and others and keeps those providers' keys in its own config, never in the factory's).
+  The argv, guard, settings profile and validators are the same as for any other call. What can
+  break on a non-Anthropic model, stated plainly:
+  - tool-use quality: models follow Claude Code's tool protocol less reliably, so more calls end
+    `Invalid`, `TurnLimit` or stuck;
+  - `--json-schema` structured output through a gateway: if `structured_output` is missing or fails
+    validation, the call is `Invalid` like any untrusted output (one retry where §5.3 allows it,
+    then the stage fails). A profile whose `wg doctor --live` call returns no `structured_output`
+    is marked unusable, and stages pinned to it park at preflight;
+  - skills and plugins: `Skill(<name>)` and the plugin set are unchanged, but whether a model
+    follows a skill's instructions is not;
+  - Claude Code's own background calls (normally haiku) must resolve on the gateway; the Phase 0
+    spike checks whether `--model` suffices or the gateway must alias the default ids (§16);
+  - `total_cost_usd` is Claude Code's estimate at Anthropic prices, not the gateway's bill (§5.3).
+  Direct non-Anthropic APIs without `claude -p` are not in this design (§16 Phase 6).
 - **Run limits, not dollar caps.** `--max-turns` (per role, §5.2) and the wall-clock timeout bound
   every call. `--max-budget-usd` is kept only as a flat per-call **runaway guard**, set high
   (compiled `runaway_per_call_usd = 25`; `factory.toml` may lower it). It is not a budget:
@@ -509,6 +544,10 @@ claude -p --output-format json \
  "enabledPlugins":{"…": "only haruspex, mattpocock-skills and GateGuard true; every other installed plugin false"}}
 ```
 
+On a key-bearing provider the same file also carries
+`"apiKeyHelper": "/Users/oreo/.workgraph/bin/wg-4e1a9c2b7d10/wg auth key anthropic-api"` (D5); the
+helper path is `current_exe()` too.
+
 The whole `~/.workgraph/` tree (memory, `bin/`, `self.json`, `cost.jsonl`, `decisions/`,
 `eval/`, `factory.toml`, journals, tokens, key) stays denied. Everything an agent legitimately
 reads or writes outside the repo lives under `~/.workgraph-work/` (`worktrees/`, `tmp/<run>/`,
@@ -545,8 +584,8 @@ owner's `deploy-oreochi`) cannot be invoked, and a guard crash leaves only the l
 
 Always disallowed (in `--disallowedTools` and in the guard): WebFetch, WebSearch, Task/Agent,
 `gh`, `git push`, `git commit`, `git reset`, `git clean`, `git checkout --`, `curl`, `wget`,
-`ssh`, `orb`, `orbctl`, `sudo`, `docker` other than an approved command, `wg finalize`,
-`wg approve`, `wg self`, and any `haruspex ... approve|record|reopen`. Reads are allowed only
+`ssh`, `orb`, `orbctl`, `sudo`, `security`, `docker` other than an approved command, `wg finalize`,
+`wg approve`, `wg self`, `wg auth`, and any `haruspex ... approve|record|reopen`. Reads are allowed only
 under the worktree and `<run>/tmp`.
 
 **Haruspex argument grammars** (`guard/bash.rs`; `<cli>` is the pinned absolute path, §9.1). The
@@ -584,29 +623,36 @@ published.
    `subtype == "success"`, `is_error == false`.
 2. The value comes from `structured_output` only, through `parse_structured::<T>()`
    (`deny_unknown_fields`, then the semantic validator). The free-text `result` is never parsed
-   for values. If the installed CLI does not return `structured_output`, `wg doctor` fails and
-   nothing runs.
-3. The kernel records `{label, stage, task, run, shift, eval?, tier, model_used, auth, cost,
-   turns, session_id, duration_ms}` in the cost ledger and settles the lease. `cost` is the
-   envelope's `total_cost_usd` (notional on the subscription path, billed on the API-key path);
-   `auth` is `subscription` or `api_key`. **A missing `total_cost_usd` is recorded as `unknown`**,
-   journalled as a warning and counted separately in every spend summary, never as zero.
+   for values. If the installed CLI does not return `structured_output` on the default provider,
+   `wg doctor` fails and nothing runs; on any other provider, that profile is marked unusable
+   (§5.1).
+3. The kernel records `{label, stage, task, run, shift, eval?, tier, provider, model_id,
+   model_used, cost, turns, session_id, duration_ms}` in the cost ledger and settles the lease.
+   `provider` is the profile name (the billing path) and `model_id` the id sent with `--model`;
+   neither is ever a key. `cost` is the envelope's `total_cost_usd` (notional on `subscription`,
+   billed on `anthropic-api`). On a gateway that figure is Claude Code's estimate at Anthropic
+   prices, not the gateway's bill, so it is recorded as `unknown` (the raw figure stays in the
+   envelope log). **A missing `total_cost_usd` is recorded as `unknown`**, journalled as a
+   warning and counted separately in every spend summary, never as zero.
 4. Model check: Claude Code makes its own internal calls (often haiku), so `modelUsage` usually
    has several keys. `model_used` is the key with the most output tokens. The outcome counts
-   toward tier stats only if the requested tier's model is present and is that dominant key;
-   otherwise the result is used, the outcome is excluded and a warning is journalled. Phase 0
+   toward tier stats (`counts_for_tier`) only if the call's provider is `subscription` or
+   `anthropic-api` (where a tier means the same model) and the profile's model id for the
+   requested tier is present and is that dominant key; otherwise the result is used, the outcome
+   is excluded and a warning is journalled. Gateway outcomes are ledgered but never move tier
+   stats, so memory stays v1 and comparable (D6). Phase 0
    fixtures with multi-key `modelUsage` pin this, and the run report shows the excluded share so
    a silent stop in learning is visible.
 5. Failure classes and retries:
 
 | Class | Detected by | Retry | Factory sees |
 |---|---|---|---|
-| Invalid | envelope or schema validation failed | read-only roles (Challenger, Learner, ReleaseWriter notes, doctor) and the Reader (its writes are confined to the three Haruspex files, which the retry rewrites): once, same tier, under a fresh lease, prompt plus "Your previous reply failed validation: `<validator message>`" (the model's own text is never fed back). Side-effecting roles (Worker, Fixer, Reviewer, QaExplorer) whose call may have edited files: **no retry**; the unit is stuck (not model evidence) and the edits stay for the next fix round or the owner | `LlmFailed{Invalid}` |
+| Invalid | envelope or schema validation failed, from any provider (a gateway's structured output gets no allowance) | read-only roles (Challenger, Learner, ReleaseWriter notes, doctor) and the Reader (its writes are confined to the three Haruspex files, which the retry rewrites): once, same tier, under a fresh lease, prompt plus "Your previous reply failed validation: `<validator message>`" (the model's own text is never fed back). Side-effecting roles (Worker, Fixer, Reviewer, QaExplorer) whose call may have edited files: **no retry**; the unit is stuck (not model evidence) and the edits stay for the next fix round or the owner | `LlmFailed{Invalid}` |
 | Died | non-zero exit, `is_error` | none | `LlmFailed{Died}` |
 | Timeout | wall clock; SIGKILL of the process group | none | `LlmFailed{Timeout}` |
 | TurnLimit | `subtype == "error_max_turns"` | none; handled like Died for that role | `LlmFailed{TurnLimit}` |
 | BudgetHit | `subtype == "error_max_budget_usd"`: the per-call runaway guard tripped (§5.1) | none; journalled as a warning for the owner | `LlmFailed{BudgetHit}` |
-| RateLimited | `is_error` text matches the usage or rate-limit signature (pinned by fixtures) | on the subscription path with `api_fallback` on: the run switches to the API-key path (§5.1) and the call reruns once there if the guard log shows it made no allowed Edit, Write or Bash call; otherwise it is handled like Died and later calls use the API-key path. On the API-key path, or with no usable key: none; the task parks and the shift stops picking up work | `LlmFailed{RateLimited}` only when no fallback ran |
+| RateLimited | `is_error` text matches the usage or rate-limit signature (pinned by fixtures) | with a usable next provider in `[auth].fallback` (§5.1): the provider is marked limited and the call reruns once on the next one if the guard log shows it made no allowed Edit, Write or Bash call; otherwise it is handled like Died and later calls use the next provider. With no usable next provider: none; the task parks and the shift stops picking up work | `LlmFailed{RateLimited}` only when no fallback ran |
 | Refused | the kernel refused the command (policy, call cap, ordering) | none | `LlmFailed{Refused}` |
 | Incident | guard incident log, an approval transition, a contract weakening or a Haruspex file change during the call (§9.1, §9.4) | none; the task aborts | the run ends `Failed` |
 
@@ -933,6 +979,7 @@ It is outside every repo, so no PR can change it. The kernel clamps it to the co
 ```toml
 [tools]                        # absolute paths, resolved once; tests point these at fakes
 claude = "/opt/homebrew/bin/claude"
+security = "/usr/bin/security" # run only by `wg auth key` (D5)
 gh = "/opt/homebrew/bin/gh"
 git = "/usr/bin/git"
 orb = "/usr/local/bin/orb"
@@ -942,10 +989,34 @@ python3 = "/usr/bin/python3"
 cli = "/Users/oreo/Code/nodens/haruspex/scripts/haruspex.py"   # refused if inside any repo or worktree
 sha256 = "<hex of haruspex.py>"   # checked before every call; set by `wg config pin-haruspex` after the owner's yes
 
-[auth]                         # subscription first; API key only as a fallback (§5.1, §17 D3)
-api_fallback = true            # on a subscription rate or usage limit, switch to the API-key path
-keychain_service = "workgraph-anthropic"   # the key is read from the keychain at spawn time,
-                                           # or from wg's own ANTHROPIC_API_KEY; never stored here
+[auth]                         # provider profiles (§5.1, §17 D3, D5, D6)
+default = "subscription"       # profile for every stage not listed in [auth.stages]
+fallback = ["subscription", "anthropic-api"]   # order on a rate or usage limit; [] turns fallback off
+[auth.stages]                  # optional, by pipeline stage id; only this file can pin a provider
+learn = "litellm"
+
+# Keys never live here or in any environment: a key-bearing profile names a keychain item, and
+# Claude Code fetches the key through `apiKeyHelper` = `wg auth key <provider>` (D5).
+[providers.subscription]       # the owner's Claude login
+kind = "subscription"
+models = { haiku = "haiku", sonnet = "sonnet", opus = "opus" }
+
+[providers.anthropic-api]
+kind = "anthropic_api"
+keychain_service = "workgraph-anthropic"
+models = { haiku = "haiku", sonnet = "sonnet", opus = "opus" }
+
+[providers.openrouter]         # Anthropic-compatible gateway
+kind = "gateway"
+base_url = "https://openrouter.ai/api"         # sent as ANTHROPIC_BASE_URL, the only ANTHROPIC_* variable set
+keychain_service = "workgraph-openrouter"
+models = { haiku = "<openrouter id>", sonnet = "<openrouter id>", opus = "<openrouter id>" }
+
+[providers.litellm]            # local LiteLLM proxy translating to OpenAI, Gemini, etc.
+kind = "gateway"
+base_url = "http://127.0.0.1:4000"             # http only on a loopback address
+keychain_service = "workgraph-litellm"         # the proxy's own master key; OpenAI/Gemini keys stay in the proxy's config
+models = { haiku = "<litellm model_name>", sonnet = "<litellm model_name>", opus = "<litellm model_name>" }
 
 [limits]                       # no dollar caps yet (§17 D3); these stop runaways
 max_calls_per_task = 40        # dev worst case is 31 calls (§5.2)
@@ -1039,8 +1110,10 @@ launchd runs a missed interval when the Mac wakes. A shift that starts after `un
 2. **Self-update** (Phase 5). If `origin/main` of workgraph moved and its CI succeeded, run
    `wg self install` (§12.5), then re-exec `current`.
 3. **Preflight.** `factory.toml` and every pipeline validate; `gh auth status`; `wg doctor --live`
-   (one haiku call on the subscription path, which catches envelope drift); with `api_fallback`
-   on, the key is retrievable (checked for presence only, never printed or logged). Each
+   (one haiku call on the default provider, which catches envelope drift, plus one per other
+   provider a configured stage names; each checks `structured_output` and the init event's
+   `apiKeySource`, §5.1); every key-bearing provider in `[auth].fallback` has its keychain item
+   (checked for presence only, never printed or logged). Each
    repo must have a clean default branch fetchable, `compose.dev.yml` and `.devcontainer/`, or it
    is skipped as `RepoNotCompliant`. `wg sandbox doctor` (Phase 3) is non-fatal: risky units park.
    `wg sandbox reap`.
@@ -1140,7 +1213,7 @@ this order:
 5. **Parked.** Sandbox unavailable (with the doctor reason), rate limited, call cap.
 
 The rest follows: tasks by outcome; **spend** from the cost ledger per call, stage, task, shift
-and eval, each split by billing path (subscription or API key), with every fallback switch and its
+and eval, each split by billing path (provider and model id), with every fallback switch and its
 cause, and `unknown` costs counted apart; tier allocation and probes, rules
 added, revised and pruned, rejected rule texts, retro proposals (never applied), guard denials,
 skipped untrusted issues, and argus fingerprint before and after (Phase 3).
@@ -1926,7 +1999,8 @@ journalled as warnings.
 
 | Failure | Response |
 |---|---|
-| LLM invalid / died / timeout / turn limit / runaway guard / rate limit (with API-key fallback) | §5.3 table |
+| LLM invalid / died / timeout / turn limit / runaway guard / rate limit (with provider fallback) | §5.3 table |
+| Gateway unreachable, or its structured output missing or invalid | the call is Died or Invalid (§5.3); at preflight the profile is marked unusable and stages pinned to it park (§5.1) |
 | Check runner cannot start (`sh` fails to spawn) | `ChecksUnavailable`; the run stops with "no verified check result, so nothing can be trusted; edits so far are uncommitted" |
 | Check command not found inside `sh` | exit 127, a real failure; at baseline it is "already failing" |
 | Check timeout | process group killed, exit 124, tail notes "timed out after Ns" |
@@ -1937,7 +2011,7 @@ journalled as warnings.
 | Sandbox patch outside the unit's files or over 2 MB | refused; the fixer is told why |
 | Argus fingerprint changed (unit-file set, enablement, `failed` units) | incident; observe only. Other state changes are warnings |
 | Task call cap reached mid-run | `parked: call cap`, edits kept; never an unreviewed publish (§5.2) |
-| API-key fallback unavailable (no key, or the repo refused for the API path) | the rate-limited task parks; the shift stops intake (§5.1) |
+| No usable next provider (fallback list exhausted, keychain item missing, gateway down) | the rate-limited task parks; the shift stops intake (§5.1) |
 | Factory command with an invalid label, template, title or reason | refused and journalled (§4.2) |
 | `gh`/`git` failure | two retries (2 s, 8 s); then the task fails with command, exit code and tail; the shift continues |
 | Corrupt memory | run without learning; never overwrite |
@@ -1953,7 +2027,7 @@ journalled as warnings.
   ```json
   {"seq":42,"ts":1795660990,"run":"r-3f9a1c","shift":"20261121-0130","task":"pxm-0/kadath#118",
    "binary":"4e1a9c2b7d10","assets":"9f3c1a2e","pipeline":"dev","stage":"build","label":"fix:b#1",
-   "kind":"llm_finished","tier":"opus","effort":"high","auth":"subscription","cost_micros":410000,"ms":81234,"turns":17,"outcome":"ok"}
+   "kind":"llm_finished","tier":"opus","effort":"high","provider":"subscription","model_id":"opus","cost_micros":410000,"ms":81234,"turns":17,"outcome":"ok"}
   ```
   `assets` is the sha256 of the pipelines and prompts in use, overlay included. Outcomes are
   therefore attributable to exact versions, which is the input for the improve analysis.
@@ -1975,9 +2049,9 @@ journalled as warnings.
 - **Views:** `wg shift status`, `wg shift report [id]`, run reports, and
   `grep`/`jq` over journals. There is no separate query engine.
 - **Cost ledger:** `~/.workgraph/cost.jsonl`, one line per call (§5.3) with integer
-  micro-dollars (or `unknown`) and the billing path. The run report, the shift report and the
-  self-ledger summarise it per call, stage, task, shift and eval, split by subscription and API
-  key. It sets no limit today; it is the evidence for the dollar ceilings of Phase 6 (§17 D3).
+  micro-dollars (or `unknown`, always for gateways), the provider and the model id. The run
+  report, the shift report and the self-ledger summarise it per call, stage, task, shift and
+  eval, split by provider. It sets no limit today; it is the evidence for the dollar ceilings of Phase 6 (§17 D3).
 
 ---
 
@@ -1988,7 +2062,7 @@ journalled as warnings.
 | Z0 | The owner in chat, AskUserQuestion and permission prompts | the only source of approvals, decisions and persistent changes | skills; `ask` rules; printed setup scripts |
 | Z1 | `wg` kernel, xtask, configs, skills | trusted, owner-reviewed | allowlist gate; base-binary evaluation |
 | Z2 | `wg-factory`, prompts, dev/qa/release pipelines | semi-trusted, auto-merged | `no_std` + zero deps + lint; tokens; kernel invariants |
-| Z3 | `claude -p` children | constrained actor; output untrusted | dontAsk + generated per-command allowlists (second boundary); fail-closed `wg guard`; GateGuard; factory settings profile; scrubbed env (API key only on the fallback path); ledger lease; turn and time limits; validators |
+| Z3 | `claude -p` children | constrained actor; output untrusted | dontAsk + generated per-command allowlists (second boundary); fail-closed `wg guard`; GateGuard; factory settings profile; scrubbed env (no key ever; `ANTHROPIC_BASE_URL` only for a gateway); keys only through `apiKeyHelper`; ledger lease; turn and time limits; validators |
 | Z4 | Repo content, issue text, Haruspex JSON written by agents, check output, learn proposals | untrusted input | user-only settings and project-config refusal; empty MCP; fenced prompts; size caps; label-actor and body-editor checks; contract snapshot; `wg:self-proposed` |
 | Z5 | Sandbox pod in rootless podman on `oreochiserver-sim` | untrusted execution and output | the container only (the VM is not isolated from the Mac, accepted, §17 D1): no host mounts, no network, read-only root, no capabilities, no-new-privileges, limits, all proven by the container doctor; nonce, schema and size checks |
 
@@ -1996,16 +2070,18 @@ Checklist:
 
 1. **Host execution.** Product checks and worker commands run only as owner-approved command
    strings, normally through the repo's compose dev stack. Risky execution happens only in the sim
-   pod. The kernel's own commands are fixed argv: git, gh, python3 haruspex, orb, and `security`
-   for the API key.
+   pod. The kernel's own commands are fixed argv: git, gh, python3 haruspex, orb, and `security`,
+   run only by `wg auth key` (D5).
 2. **Git.** Branches are only `wg/*` and `wg-self/*`, plus `fixture/*` on
    `pxm-0/workgraph-eval` for `wg eval capture` (§12.4); pushes to anything else, including the
    eval repo's `main`, are refused in `git.rs`, and the pre-push hook refuses main. No `reset`, `clean`, `stash` or `checkout --` in
    the owner's checkout. Worktree removal happens only under `~/.workgraph-work/worktrees`, after
    canonicalizing the path.
-3. **Secrets.** The factory creates none. It reads one: the owner's Anthropic API key, only on
-   the fallback path, from the keychain or `wg`'s environment, held in memory and passed only in
-   that child's environment, never written to disk, logs, the journal or `factory.toml` (§5.1).
+3. **Secrets.** The factory creates none. It reads provider keys (the Anthropic API key, a
+   gateway's key) only inside `wg auth key`, from the keychain item a profile names, and writes
+   them only to that helper's stdout pipe to `claude` (`apiKeyHelper`, D5). No key is ever in a
+   process environment, argv, file, log, the journal, the ledger or `factory.toml` (§5.1). A
+   LiteLLM proxy's upstream keys live in the proxy's own config, outside the factory.
    Sandbox services use `sandbox-only` values. `/etc/argus` is never read, written or mounted;
    the doctor only checks that it is absent inside the probe container. Bundles exclude `.env*`
    except `.env.example`.
@@ -2037,14 +2113,20 @@ Known residual risks, stated plainly:
   spike shows `enabledPlugins` cannot be overridden per call, injected text could still reach a
   plugin's global store, and Phase 1a does not ship until that is closed.
 - **Haruspex cannot authenticate approvers.**
-- **Spend has no dollar cap** (§17 D3). Subscription limits switch calls to the API key, which
-  bills the owner. Turn limits, timeouts, the per-call runaway guard, call caps per task, the
-  shift's task and time limits and the self-lane PR caps bound it; the cost ledger and reports
-  show it. A shift whose API path is also limited ends early.
-- **The API key reaches a child's tool processes** on the fallback path (it is in that child's
-  environment). Bash limits and the compose-only rule (§5.1) keep it from approved commands'
-  containers, but a host-run command or a compose file that forwards it would expose it; preflight
-  refuses the API path for such repos.
+- **Spend has no dollar cap** (§17 D3). Subscription limits switch calls to the next provider in
+  the fallback order, which bills the owner. Turn limits, timeouts, the per-call runaway guard,
+  call caps per task, the shift's task and time limits and the self-lane PR caps bound it; the
+  cost ledger and reports show it, with gateway spend as `unknown` (the gateway's own usage page
+  is the bill). A shift whose fallback providers are also limited ends early.
+- **The key is in the `claude` process's memory** on a key-bearing provider, as with any client
+  (D5). A child that could run an arbitrary host command could call `wg auth key` itself;
+  `wg auth` and `security` are always disallowed and Bash is limited to approved commands, so
+  that needs a guard bypass first.
+- **Gateway providers send prompts and repo content to third parties** (OpenRouter and the
+  upstream vendor; LiteLLM's upstreams). Only owner-local `factory.toml` can choose one, per stage,
+  never a pipeline or self PR. Non-Anthropic models may follow tools, schemas and skills less
+  reliably (§5.1); the validators and the kernel's gates do not relax for them, and a review on a
+  gateway's `opus` mapping is only as strong as that model, which the ledger and report name.
 
 ---
 
@@ -2067,7 +2149,7 @@ the container rule. The image includes python3 and a Haruspex checkout for the f
   - envelope parsing against Phase 0 fixtures;
   - validators, one rejection each;
   - guard, 60+ cases (chaining, substitution, symlink escape, approve attempts, protected writes);
-  - rule sanitizer; classifier table; ledger records with a missing cost (`unknown`, never zero); billing-path switch and the key absent from argv, journal, logs and prompts; approval invariant and contract snapshot
+  - rule sanitizer; classifier table; ledger records with a missing cost (`unknown`, never zero); provider choice per stage and the fallback order; per-provider argv, env and settings (`ANTHROPIC_BASE_URL` only for gateways, no key variable ever, `apiKeyHelper` only on key-bearing profiles, model id from the tier map); provider config, one rejection each (non-loopback `http`, missing tier, unknown or keyless profile, stage pinned to an undefined provider); gateway outcomes excluded from tier stats; approval invariant and contract snapshot
     canonicalization; config clamping; pipeline invariants, one rejection each;
   - `compile_fail` doctests: tokens cannot be built or deserialized outside their module.
 
@@ -2136,10 +2218,15 @@ a fake factory that tries, and the kernel must refuse each:
   hash mismatch), the approval invariant on a repo with a prior approved task, and the contract
   snapshot.
 - `runner.rs`: `factory.toml [tools].claude` points at `tests/fixtures/fake-claude.sh`, which
-  replays envelopes by label. Covers retry, turn limit, runaway guard, a subscription rate limit
-  falling back to the API-key path (the rerun only when no edit was made, the switch staying for
-  the run, the key only in the child's environment), the API path also limited, and a missing
-  cost recorded as `unknown`.
+  replays envelopes by label and records its env and settings. Covers retry, turn limit, runaway
+  guard, a subscription rate limit falling back to `anthropic-api` (the rerun only when no edit was
+  made, the switch staying for the run), the fallback also limited, and a missing cost recorded as
+  `unknown`. **Key handling:** with `[tools].security` pointed at a fake keychain holding a
+  sentinel key, the fake claude runs its `apiKeyHelper` and gets the sentinel, and the sentinel is
+  absent from the child's env, argv, the settings file, `<run>/`, the journal and the ledger.
+  **Gateway dry run:** for `openrouter` and `litellm` profiles, the exact argv, env
+  (`ANTHROPIC_BASE_URL` and nothing key-like) and settings, with no network; a gateway envelope
+  with no or invalid `structured_output` is `Invalid` and follows the §5.3 retry rule.
 - `intake.rs`: a fake `gh` (via `[tools].gh`) serving canned JSON; label-actor filtering, a body
   edited by an untrusted actor after labelling is skipped, factory-created and `wg:self-proposed`
   issues never enter the self lane, claim, recover.
@@ -2155,7 +2242,7 @@ a fake factory that tries, and the kernel must refuse each:
   - report contents;
   - resume after the process is killed mid-stage;
   - STOP, `max_tasks` and a rate limit with no fallback stop intake;
-  - the shift report's spend summary per call, stage, task and shift, by billing path;
+  - the shift report's spend summary per call, stage, task and shift, by provider;
   - an untrusted labeller is ignored.
 - **Sandbox** (CI, `ubuntu-latest` with rootless podman, running `sandbox-agent run` directly):
   - no network (`getent hosts example.com` fails; prepare succeeds);
@@ -2208,10 +2295,19 @@ phase is useful on its own.
     subscription;
   - **per-stage cost fixtures** (read, challenge, work, fix, review, learn on two toy tasks),
     the first entries of the cost ledger; they size no ceiling (D3), only the turn limits;
-  - the **billing paths**: with no `ANTHROPIC_API_KEY` the call uses the subscription login;
-    with the key in the child's environment it uses the API (confirmed from the
-    `stream-json` init event's `apiKeySource`); and the usage-limit `is_error` signature of each
-    path, which §5.3 matches;
+  - the **billing paths** (D5): with no key variable and no `apiKeyHelper` the call uses the
+    subscription login; with `"apiKeyHelper"` set in a `--settings` file under `-p`, Claude Code
+    runs the helper and uses the API, and the `stream-json` init event's `apiKeySource` reports
+    the helper; a Bash tool's environment in that session holds no key (`env` output searched for
+    a sentinel key from a test keychain item, in a spike-only session, not a factory role); how
+    often the helper is re-run; and the usage-limit `is_error` signature of each path, which §5.3
+    matches;
+  - **gateway profiles** (D6): a dry-run test pins the argv, env and settings `wg` builds for
+    `openrouter` and `litellm`. Real gateway calls run only if the owner has a gateway key (or a
+    local LiteLLM proxy) at spike time; they check `structured_output` through `--json-schema`,
+    tool use, skills, and whether Claude Code's background haiku calls resolve with `--model`
+    alone. Without one, the ADR marks each of these **unconfirmed** and gateway profiles stay
+    unusable until a later spike confirms them;
   - that `--permission-mode dontAsk` denies everything not allowlisted, that `Edit(<path>)`
     patterns scope edits, that `Bash(<cmd>:*)` refuses `<cmd> && rm -rf ~`, and that
     `Skill(<name>)` blocks other skills;
@@ -2243,7 +2339,7 @@ the Phase 0 spike outcomes; the ADR's chosen fallbacks are inputs to 1a.
 
 - **Kernel, in this order (each a reviewable commit):** ids, paths, money, exec, runner (argv,
   policy, envelope), fail-closed guard, untrusted validators, checks and the kernel-derived gate,
-  command_check, budget (cost ledger and call caps), auth (billing path and fallback), Haruspex cli (pinned), tamper, contract, tokens_store, memory, engine
+  command_check, budget (cost ledger and call caps), auth and providers (profiles, fallback order, `apiKeyHelper`, `wg auth key`), Haruspex cli (pinned), tamper, contract, tokens_store, memory, engine
   driver, convert, pipelines (dev only), assets, render, journal, run report, config,
   `wg config allow-check`, `wg config pin-haruspex`, `wg finalize --run`, `wg doctor [--live]`.
 - **Factory:** all of §3.2 except `engine/stages.rs`.
@@ -2255,7 +2351,7 @@ the Phase 0 spike outcomes; the ADR's chosen fallbacks are inputs to 1a.
 coverage ≥ 80%; one real interactive run on a toy repo reaches `ready_for_review` and
 `wg finalize --run` passes the verification gate; memory written by Rust passes the v1 validator
 and an existing `.claude/work-memory.json` imports; zero guard incidents and every call recorded
-in the cost ledger with its billing path.
+in the cost ledger with its provider and model id.
 
 **Phase 1b: switch and delete.** After **N = 5** real interactive runs on at least 2 repos with
 `--experimental` and no incident, unexplained divergence from run.js's outcome or unledgered call
@@ -2330,7 +2426,7 @@ This is the first useful nightly factory.
   fixtures (at least 3 expecting `needs_decision`), promoting `wg eval capture` drafts by merging
   them, and sets the GitHub repo settings in §14. The self lane's checks run in the sim sandbox,
   so Phase 3 is a prerequisite.
-- The self-ledger and shift report carry eval and self-lane spend by billing path; the eval runs
+- The self-ledger and shift report carry eval and self-lane spend by provider; the eval runs
   with no dollar ceiling, bounded by `max_eval_runs_per_pr`, the staged fixture counts and the
   self-PR caps (D3).
 - Shadow mode for the first 5 self PRs: the gate decides and records, and the owner merges or
@@ -2352,13 +2448,16 @@ This is the first useful nightly factory.
 - **Dollar ceilings** (D3): per call, task, shift and day, self lane per week and eval per PR,
   compiled into `config.rs` and set from the cost ledger's recorded figures, restoring
   `parked: budget` and a budget stop condition.
+- **Direct non-Anthropic APIs** without `claude -p` (D6 keeps every stage on `claude -p` for now):
+  a separate runner per API, which would need its own tool loop, guard and schema enforcement.
 
 ---
 
 ## 17. Owner decisions
 
-The owner answered four of the open questions. They are final and the sections above follow them.
-Each is labelled `D<n>`; the questions still open keep their old numbers.
+The owner answered five of the open questions and added one decision (D6). They are final and the
+sections above follow them. Each is labelled `D<n>`; the questions still open keep their old
+numbers.
 
 ### 17.1 Decided
 
@@ -2387,9 +2486,10 @@ design's default and is now final.
 
 **D3. Cost (was Q7): no dollar caps for now; subscription first, API key as fallback.**
 - Every call starts on the owner's Claude subscription (`claude -p` with the owner's login). On
-  a subscription rate or usage limit it falls back to `claude -p` with `ANTHROPIC_API_KEY` taken
-  from the owner's keychain or environment, never written to disk, logs or `factory.toml`. The
-  fallback and the billing path of each call are recorded (§5.1, §5.3).
+  a subscription rate or usage limit it falls back to `claude -p` with the owner's Anthropic API
+  key, never written to disk, logs or `factory.toml`; D5 fixes how the key is delivered and D6
+  generalises the fallback to an ordered list of providers. The fallback and the billing path of
+  each call are recorded (§5.1, §5.3).
 - Every call's cost (`total_cost_usd` from the JSON envelope) and billing path go to the cost
   ledger. The run report, shift report and self-ledger summarise spend per call, stage, task,
   shift and eval (§7.5, §12.1, §13.2).
@@ -2412,6 +2512,41 @@ them by merging. It never pushes to the eval repo's `main` and never merges ther
 refuses any other ref for that remote (§12.4, §14).
 - Consequences: §12.4, §14 checklist 2, §15.4, §16 Phase 5.
 
+**D5. How the API key reaches the child (was Q8): through `apiKeyHelper`, never the environment.**
+- The per-call `--settings` profile of a key-bearing provider sets `"apiKeyHelper"` to the
+  kernel's own `wg auth key <provider>` (at `current_exe()`), which reads the macOS keychain item
+  named in `factory.toml` and writes the key to its stdout pipe to `claude` only. No key is ever
+  in a process environment, argv, file, log, journal, report or ledger line (§5.1, §14).
+- `ANTHROPIC_API_KEY` is never set for a child, and an `ANTHROPIC_API_KEY` in `wg`'s own
+  environment is ignored. `wg auth` and `security` are always disallowed for children (§5.2).
+- The old preflight that refused the API path for repos whose commands were not compose-only, or
+  whose compose config named an `ANTHROPIC_*` variable, existed only because the key was in the
+  child's environment; it is gone.
+- Phase 0 confirms that `apiKeyHelper` is honoured under `-p` with `--settings`, that
+  `apiKeySource` reports it, and that the key is absent from a Bash tool's environment (§16).
+- Consequences: §1.2 decision 2, §2, §3.1, §5.1, §5.2, §7.1 `[auth]`, §13, §14, §15, §16 Phase 0.
+
+**D6. Universal model providers: provider profiles, every stage still on `claude -p`.**
+- `factory.toml` defines `[providers.*]` profiles: `subscription` (the owner's Claude login),
+  `anthropic-api` (key through `apiKeyHelper`), and Anthropic-compatible gateways: `openrouter`
+  (`ANTHROPIC_BASE_URL=https://openrouter.ai/api`, key through `apiKeyHelper`) and `litellm` (a
+  local LiteLLM proxy on a loopback port translating to OpenAI, Gemini and others; its provider
+  keys stay in the proxy's config, not the factory's). Each maps the tiers haiku, sonnet and opus
+  to provider model ids (§7.1).
+- `[auth].default` picks the factory default and `[auth.stages]` a profile per stage. Only this
+  owner-local file chooses providers; the factory names tiers, never providers or model ids
+  (§4.2).
+- The kernel builds the env (`ANTHROPIC_BASE_URL` only, never keys) and `--settings` per call
+  from the profile. The ledger records provider and model id (§5.3). The fallback order is
+  configurable, default `subscription` → `anthropic-api` (§5.1).
+- What can break on non-Anthropic models is stated in §5.1 (tool use, structured output through a
+  gateway, skills and plugins, background calls, cost figures). Structured output that fails
+  validation is untrusted output like any other: one retry where §5.3 allows it, then the stage
+  fails. Gateway outcomes do not move tier stats.
+- Direct non-Anthropic APIs without `claude -p` are a later phase (§16 Phase 6), not now.
+- Consequences: §1.2 decision 2, §2, §3.1, §4.1, §4.2, §5.1, §5.3, §7.1, §7.3, §7.5, §13, §14,
+  §15, §16 Phases 0, 1, 5 and 6.
+
 ### 17.2 Still open
 
 Each has a default the design uses until answered.
@@ -2428,10 +2563,6 @@ Each has a default the design uses until answered.
   container outside the pod, `pasta --no-map-gw`, a factory-built `.npmrc`, a lockfile-keyed deps
   volume and the registry-only egress proxy (§8.3); a malicious lockfile entry could still
   exfiltrate the source under test to the registry host (no secrets are in the pod).
-- **Q8 (raised by D3). How the API key reaches the child.** D3 names `ANTHROPIC_API_KEY` in the
-  child's environment, so the child's own tool processes inherit it (§14). Claude Code's
-  `apiKeyHelper` setting, pointing at a kernel helper, would keep the key out of the
-  environment. Default: the environment variable, as decided, with the preflight refusal of §5.1.
 
 ---
 
