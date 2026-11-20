@@ -32,7 +32,7 @@ pub fn encode(bytes: &[u8]) -> String {
 pub fn decode(text: &str) -> Result<Vec<u8>, String> {
     let bad = || "the patch is not base64".to_string();
     let t = text.trim_end_matches('=');
-    if text.len() % 4 != 0 || text.len() - t.len() > 2 {
+    if !text.len().is_multiple_of(4) || text.len() - t.len() > 2 {
         return Err(bad());
     }
     let mut out = Vec::with_capacity(t.len() * 3 / 4);

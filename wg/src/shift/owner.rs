@@ -106,6 +106,7 @@ pub fn summary(dirs: &Dirs, cfg: &Config, gh: &Gh, repo: &str, pr: u64) -> Resul
         "checks": out["checks"], "checksAlreadyFailing": out["checksAlreadyFailing"],
         "skipped": out["skipped"], "costUsd": out["costUsd"], "spend": out["spend"],
         "callsWithUnknownCost": out["callsWithUnknownCost"],
+        "tainted": out["tainted"], "riskyBuilt": out["riskyBuilt"], "sandboxRuns": out["sandboxRuns"],
         "approve": format!("wg approve --repo {repo} --pr {pr} --by \"$(git config user.name)\""),
     }))
 }

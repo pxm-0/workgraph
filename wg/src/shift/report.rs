@@ -130,7 +130,8 @@ pub fn build(dirs: &Dirs, id: &str) -> Result<Value, String> {
                     "verified": out["verified"], "reviewed": out["reviewed"], "review": out["review"],
                     "criteria": out["review"]["criteria"],
                     "checks": out["checks"], "checksAlreadyFailing": out["checksAlreadyFailing"],
-                    "risky": out["skipped"], "spend": out["spend"] })
+                    "risky": out["skipped"], "spend": out["spend"],
+                    "tainted": out["tainted"], "riskyBuilt": out["riskyBuilt"], "sandboxRuns": out["sandboxRuns"] })
         })
         .collect();
     let notes: Map<String, Value> = runs
@@ -155,6 +156,12 @@ pub fn build(dirs: &Dirs, id: &str) -> Result<Value, String> {
         "errors": of("error"),
         "runs": notes,
         "spend": spend(dirs, &runs)?,
+        "shiftIncidents": of("incident"),
+        "sandbox": {
+            "doctor": of("sandbox_doctor").last().cloned(),
+            "argus": of("argus_fingerprint"),
+            "reap": of("sandbox_reap"),
+        },
     }))
 }
 
@@ -204,7 +211,22 @@ pub fn markdown(r: &Value) -> String {
             .flatten()
             .map(|c| format!("{} {}", s(c, "id"), s(c, "status")))
             .collect();
-        format!("- #{pr} {} ({}#{}): verified {}, reviewed {}, criteria [{}], checks {}, already failing {}. Approve with `/workgraph:work approve {}#{pr}`",
+        let risky: Vec<String> = a["riskyBuilt"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|u| format!("{} ({})", s(u, "id"), s(u, "label")))
+            .collect();
+        let sandboxed = if a["tainted"] == true {
+            format!(
+                ", risky units [{}] built and checked only in the sandbox ({} SandboxRun)",
+                risky.join(", "),
+                a["sandboxRuns"].as_array().map_or(0, Vec::len)
+            )
+        } else {
+            String::new()
+        };
+        format!("- #{pr} {} ({}#{}): verified {}, reviewed {}, criteria [{}], checks {}, already failing {}{sandboxed}. Approve with `/workgraph:work approve {}#{pr}`",
         crate::ids::one_line(a["title"].as_str().unwrap_or(""), 120), s(a, "repo"), a["issue"], a["verified"], a["reviewed"],
         criteria.join(", "), a["checks"], a["checksAlreadyFailing"], s(a, "repo"))
     };
@@ -238,21 +260,48 @@ pub fn markdown(r: &Value) -> String {
             )
         })
         .collect();
+    let sb = &r["sandbox"];
+    let fp = |at: &str| {
+        sb["argus"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|e| e["at"] == at)
+            .and_then(|e| e["fingerprint"]["sha256"].as_str())
+            .map_or("-".to_string(), |h| h[..h.len().min(12)].to_string())
+    };
+    let sandbox = format!(
+        "Doctor: {}. vm_host_reach: accepted (owner decision D1: a container escape lands in the sim VM).\nArgus fingerprint: start {}, end {}.",
+        match sb["doctor"]["ok"].as_bool() {
+            Some(true) => "ok".to_string(),
+            _ => format!("risky units park ({})", crate::ids::one_line(sb["doctor"]["failed"].as_str().unwrap_or("not run"), 200)),
+        },
+        fp("start"),
+        fp("end")
+    );
+    let shift_incidents = list(&r["shiftIncidents"], &|e| {
+        format!(
+            "- shift: {}",
+            crate::ids::one_line(e["why"].as_str().unwrap_or(""), 300)
+        )
+    });
     let stale = match r["staleLockPid"].as_u64() {
         Some(pid) => format!("\n\nThe previous shift (pid {pid}) died holding the lock."),
         None => String::new(),
     };
     format!(
-        "# Shift {}\n\nStopped: {}{stale}\n\n## Needs you\n\n### Incidents\n{}\n\n### Decisions\n{}\n\n### Approvals\n{}\n\n### Parked\n{}\n\n## Stuck\n{}\n\n## Skipped\n{}\n{}\n\n## Rules\n{}\n\n## Spend\n\nTotal ${} (calls with unknown cost: {})\n\n```json\n{}\n```\n",
+        "# Shift {}\n\nStopped: {}{stale}\n\n## Needs you\n\n### Incidents\n{}\n{}\n\n### Decisions\n{}\n\n### Approvals\n{}\n\n### Parked\n{}\n\n## Stuck\n{}\n\n## Skipped\n{}\n{}\n\n## Sandbox\n\n{}\n\n## Rules\n{}\n\n## Spend\n\nTotal ${} (calls with unknown cost: {})\n\n```json\n{}\n```\n",
         s(r, "shift"),
         r["stopped"],
         list(&n["incidents"], &task_line),
+        if r["shiftIncidents"].as_array().is_some_and(|a| !a.is_empty()) { shift_incidents } else { String::new() },
         list(&n["decisions"], &decision),
         list(&n["approvals"], &approval),
         list(&n["parked"], &parked),
         list(&r["stuck"], &task_line),
         list(&r["skippedRepos"], &|e| format!("- repo {}: {}", s(e, "repo"), s(e, "why"))),
         list(&r["skippedIssues"], &|e| format!("- {}#{}: {}", s(e, "repo"), e["issue"], s(e, "why"))),
+        sandbox,
         if rules.is_empty() { "- none".to_string() } else { rules.join("\n") },
         r["spend"]["usd"],
         r["spend"]["callsWithUnknownCost"],
@@ -278,7 +327,8 @@ pub fn write(dirs: &Dirs, id: &str) -> Result<Value, String> {
         "report": dir.join("report.md"),
         "tasks": r["tasks"].as_array().map_or(0, Vec::len),
         "stopped": r["stopped"],
-        "needsYou": { "incidents": count("incidents"), "decisions": count("decisions"),
+        "needsYou": { "incidents": count("incidents") + r["shiftIncidents"].as_array().map_or(0, Vec::len),
+                      "decisions": count("decisions"),
                       "approvals": count("approvals"), "parked": count("parked") },
         "spendUsd": r["spend"]["usd"],
     }))

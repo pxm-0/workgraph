@@ -140,9 +140,8 @@ fn sandbox_pins(
 ) -> Result<std::collections::BTreeMap<String, String>, String> {
     let host_refused =
         "host verify refused for tainted task; add [repo.sandbox].verify or verify yourself";
-    let name = git::repo_name(&git::slug(repo));
     let verify = cfg
-        .repo(&name)
+        .repo_at(repo)
         .and_then(|r| r.sandbox.as_ref())
         .map(|s| s.verify.clone())
         .unwrap_or_default();

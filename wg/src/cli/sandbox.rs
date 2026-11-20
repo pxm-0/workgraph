@@ -191,11 +191,10 @@ fn check(dirs: &Dirs, task: &str, name: &str) -> Result<(String, i32), String> {
         return Err(format!("task {task} is not this worktree's"));
     }
     let cfg = super::run::load_config(dirs)?;
-    let repo = crate::git::repo_name(&crate::git::slug(&root));
     let sb = cfg
-        .repo(&repo)
+        .repo_at(&root)
         .and_then(|r| r.sandbox.clone())
-        .ok_or_else(|| format!("{repo} has no [repo.sandbox]"))?;
+        .ok_or("this checkout is no [[repo]] with a [repo.sandbox]")?;
     let cmd = sb
         .checks
         .get(name)
