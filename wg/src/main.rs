@@ -9,6 +9,8 @@
 //!   wg shift run | resume ID | status | report [ID] | recover | gc | schedule-print
 //!   wg decide --repo R --issue N --decisions-file F | wg approve --repo R --pr N --by NAME
 //!   wg approval-summary --repo R --pr N
+//!   wg sandbox doctor | reap | setup-print | exec (--unit U [--patch] | --task T) -- CMD... |
+//!     exec --task T --check NAME | poll --job J        wg sandbox-agent ... (linux, on the sim)
 //!   wg recall | check | save | finalize (legacy, unchanged)
 
 use serde_json::{json, Value};
@@ -28,6 +30,8 @@ fn main() {
     let rest = args.get(1..).unwrap_or(&[]);
     match args.first().map(String::as_str) {
         Some("guard") => std::process::exit(wg::cli::guard::main(rest)),
+        Some("sandbox-agent") => std::process::exit(wg::sandbox::agent::main(rest)),
+        Some("sandbox") => std::process::exit(wg::cli::sandbox::main(rest)),
         Some("auth") => match wg::cli::admin::auth(rest) {
             Ok(key) => println!("{key}"),
             Err(e) => {

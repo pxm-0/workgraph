@@ -54,6 +54,12 @@ pub struct RepoCfg {
     pub install: Option<String>,
     #[serde(default)]
     pub allow_project_config: Vec<AllowedConfig>,
+    /// Candidate code never runs on the Mac: every check goes to the sandbox (design §7.1).
+    #[serde(default)]
+    pub always_tainted: bool,
+    /// Phase 3: where this repo's risky units and tainted checks run.
+    #[serde(default)]
+    pub sandbox: Option<crate::sandbox::config::RepoSandbox>,
 }
 
 fn dev_only() -> Vec<String> {
@@ -187,6 +193,12 @@ pub fn repo(r: &RepoCfg) -> Result<(), String> {
     if let Some(i) = &r.install {
         one_line(i, &what("install"))?;
     }
+    if let Some(s) = &r.sandbox {
+        crate::sandbox::config::repo(&r.name, s)?;
+    }
+    if r.always_tainted && r.sandbox.is_none() {
+        return Err(what("always_tainted needs a [repo.sandbox]"));
+    }
     for a in &r.allow_project_config {
         if !PROJECT_CONFIG.contains(&a.path.as_str()) {
             return Err(what(
@@ -249,6 +261,8 @@ mod tests {
             ("default_branch = \"../x\"", "branch name"),
             ("factory_compose = \"docker compose -f x.yml\"", "-p <name>"),
             ("install = \"\"", "one line"),
+            ("always_tainted = true", "needs a [repo.sandbox]"),
+            ("sandbox = { image = \"node:22\" }", "digest"),
             (
                 "allow_project_config = [{ path = \"x\", sha256 = \"0\" }]",
                 "not project agent config",
