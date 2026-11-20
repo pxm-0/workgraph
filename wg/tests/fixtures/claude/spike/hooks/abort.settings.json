@@ -1,0 +1,1 @@
+{"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "<spike>/hooks/abort.sh", "timeout": 60}]}]}}

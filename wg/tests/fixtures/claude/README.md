@@ -1,10 +1,44 @@
 # `claude -p` envelopes (Phase 0 spike, ADR-001)
 
 Recorded with Claude Code 2.1.311 on 2026-11-20 in a throwaway git repo, env cleared as in design
-§5.1. Each `<case>.json` is the `type: "result"` envelope, re-indented and redacted (spike paths
-`<spike>`, home `~`, account ids, emails and `sk-ant-` strings). `<case>.init.json` is an excerpt of
-the stream-json `init` event. Argv per case: `docs/design/adr-001-claude-p-contract.md`.
-`wg/tests/claude_fixtures.rs` checks every file here.
+§5.1, by `spike/run.sh` and `spike/stages.sh`; `spike/extract.py` wrote every file here from the raw
+streams. Each `<case>.json` is the `type: "result"` envelope, re-indented and redacted (spike paths
+`<spike>`, home `~`, account ids, emails and `sk-ant-` strings). `<case>.init.json` is the whole
+stream-json `init` event with the same redaction, plus: `memory_paths` and `messaging_socket_path`
+values are `<redacted>`, and the owner's private name lists (`tools`, `slash_commands`, `skills`,
+`agents`) are each one string `"<N names redacted>"`. Nothing else is reshaped: `plugins` and
+`mcp_servers` are as recorded. Argv and exit status per case: `spike/argv.txt`; the ADR explains
+each. `wg/tests/claude_fixtures.rs` checks every file here.
+
+| Other file | What it records |
+|---|---|
+| `rate_limit_event.json` | the `rate_limit_event` every stream-json run emitted (18 of 18), from `subscription_no_helper`; `overageDisabledReason` redacted |
+
+## Spike evidence (`spike/`)
+
+The spike's scripts and logs, redacted the same way, so the ADR's verdicts do not rest on a
+scratchpad: `run.sh`, `stages.sh`, `extract.py`, `show.py` (prints a stream's tool uses), `hooks/`
+(every `--settings` hook, the key helper and the loopback gateway stub), `project_config/` (each
+variant's `.claude/settings.json` and `.mcp.json`), `spikeplug/` (the frontmatter-widening skill)
+and `markers/`. Marker files are evidence by presence:
+
+| Marker or log | Case | Present? |
+|---|---|---|
+| `project_hook_none` | `project_config_no_flags` | yes: the project PreToolUse hook fired |
+| `project_hook_strict` | `project_config_strict_mcp_only` | yes |
+| `project_hook_both`, `project_hook_ss` | `project_config_both_flags`, `_setting_sources_only` | no |
+| `project_mcp_none` | `project_config_no_flags` | yes: the project MCP server was spawned |
+| `project_mcp_both`, `_ss`, `_strict` | the other three variants | no |
+| `escaped_and`, `escaped_semi` | `perm_bash_chain` | no |
+| `escaped_guard` | `guard_metachar` | no |
+| `abort_escaped` | `hook_abort` | no |
+| `skill_widened` | `skill_frontmatter_widen` | no |
+| `exit2.log` | `hook_exit2` | `Read`, then `Bash`: the hook saw both |
+| `guard.log` | `guard_metachar` | deny for the chained command, allow for the plain one |
+| `abort.log` | `hook_abort` | 2 lines: the hook fired (and aborted) for both Bash calls |
+| `ask.log` | `hook_ask_*` | 1 line, from the later `dontask` run by its mtime; the `default` run's line was not retained, its evidence is the hook's reason `spike ask` as the tool result |
+| `helper.log` | `api_key_helper_invalid`, both gateway runs | 15 helper runs: 11 in the 401 run, 2 per gateway run |
+| `gateway.log` | `gateway_loopback_provider_model` only | `HEAD`, then 2 `POST`s with `model` `openai/gpt-5.1`; the dry-run's requests were not retained, so its alias evidence is the init `model` |
 
 | Case | What it records |
 |---|---|
@@ -36,7 +70,7 @@ the stream-json `init` event. Argv per case: `docs/design/adr-001-claude-p-contr
 | `plugins_profile_off` | `--settings` `enabledPlugins` false for four plugins: they are gone from `init` |
 | `subscription_no_helper` | no key variable, no helper: `apiKeySource` "none", call billed to the login |
 | `api_key_helper_invalid` | `--settings` `apiKeyHelper` printing a dummy key: `apiKeySource` "apiKeyHelper", 401 after 10 retries |
-| `gateway_loopback_dry_run` | `ANTHROPIC_BASE_URL` at a loopback stub, helper key, `--model sonnet`: stub saw `claude-sonnet-5-5` |
+| `gateway_loopback_dry_run` | `ANTHROPIC_BASE_URL` at a loopback stub, helper key, `--model sonnet`: init `model` is `claude-sonnet-5-5` |
 | `gateway_loopback_provider_model` | same with `--model openai/gpt-5.1`: the id reached the stub unchanged |
 | `stage_t1_read` | toy task 1 (fix `add`), Reader-shaped call, haiku |
 | `stage_t1_challenge` | toy task 1, Challenger-shaped call |

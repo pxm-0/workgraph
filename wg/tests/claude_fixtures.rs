@@ -19,7 +19,7 @@ struct Case {
     models: &'static [&'static str],
     /// `permission_denials` length, when the case is about permissions.
     denials: Option<usize>,
-    /// A paired `<name>.init.json` excerpt of the stream-json init event exists.
+    /// A paired `<name>.init.json` (the whole stream-json init event, redacted) exists.
     init: bool,
     /// `apiKeySource` in that excerpt, when the case is about the billing path.
     api_key_source: Option<&'static str>,
@@ -127,6 +127,9 @@ const CASES: &[Case] = &[
     structured("stage_t2_learn"),
 ];
 
+/// Fixture files that are not result envelopes.
+const OTHER_FILES: &[&str] = &["rate_limit_event.json"];
+
 fn dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/claude")
 }
@@ -189,10 +192,14 @@ fn check(c: &Case) {
             .expect("permission_denials");
         assert_eq!(got.len(), d, "{n}: permission_denials");
     }
-    if let Some(source) = c.api_key_source {
+    if c.init {
         let init = load(&format!("{n}.init.json"));
         assert_eq!(init["subtype"], "init", "{n}: init event");
-        assert_eq!(init["apiKeySource"], source, "{n}: apiKeySource");
+        assert!(init["plugins"].is_array(), "{n}: init plugins");
+        assert!(init["mcp_servers"].is_array(), "{n}: init mcp_servers");
+        if let Some(source) = c.api_key_source {
+            assert_eq!(init["apiKeySource"], source, "{n}: apiKeySource");
+        }
     }
 }
 
@@ -210,6 +217,7 @@ fn every_fixture_file_is_covered_and_documented() {
             let init = c.init.then(|| format!("{}.init.json", c.name));
             std::iter::once(format!("{}.json", c.name)).chain(init)
         })
+        .chain(OTHER_FILES.iter().map(|f| f.to_string()))
         .collect();
     let on_disk: BTreeSet<String> = std::fs::read_dir(dir())
         .expect("fixtures dir")
@@ -229,6 +237,9 @@ fn every_fixture_file_is_covered_and_documented() {
             c.name
         );
     }
+    for f in OTHER_FILES {
+        assert!(readme.contains(&format!("`{f}`")), "README lacks {f}");
+    }
 }
 
 #[test]
@@ -241,42 +252,130 @@ fn failure_subtypes_are_distinct_from_is_error_alone() {
     assert_eq!(env["api_error_status"], 404);
 }
 
+/// `mcp_servers` of a case's init event whose `source` is `source`.
+fn servers_from(case: &str, source: &str) -> usize {
+    load(&format!("{case}.init.json"))["mcp_servers"]
+        .as_array()
+        .expect("mcp_servers")
+        .iter()
+        .filter(|s| s["source"] == source)
+        .count()
+}
+
+/// True if the spike left `<spike>/markers/<name>` (a hook or MCP server touched it).
+fn marker(name: &str) -> bool {
+    dir().join("spike/markers").join(name).exists()
+}
+
 #[test]
-fn project_mcp_servers_start_only_without_both_isolation_flags() {
+fn project_config_runs_only_without_both_isolation_flags() {
     // §5.1: the repo's .mcp.json server appears (and was spawned) only when neither
     // --setting-sources user nor --strict-mcp-config is given.
-    let project = |n: &str| {
-        load(&format!("project_config_{n}.init.json"))["project_mcp_servers"]
-            .as_array()
-            .expect("project_mcp_servers")
-            .len()
-    };
+    let project = |v: &str| servers_from(&format!("project_config_{v}"), "project");
     assert_eq!(project("no_flags"), 1);
     assert_eq!(project("both_flags"), 0);
     assert_eq!(project("setting_sources_only"), 0);
     assert_eq!(project("strict_mcp_only"), 0);
     let both = load("project_config_both_flags.init.json");
-    assert_eq!(both["mcp_server_count_by_source"], serde_json::json!({}));
+    assert_eq!(
+        both["mcp_servers"],
+        serde_json::json!([]),
+        "no server at all"
+    );
+    // Without --strict-mcp-config the owner's plugin and claude.ai servers load too.
+    assert!(servers_from("project_config_setting_sources_only", "claudeai") > 0);
+    assert_eq!(
+        servers_from("project_config_strict_mcp_only", "claudeai"),
+        0
+    );
+    // The project PreToolUse hook and MCP server touch a marker per variant
+    // (spike/project_config/pc_<variant>.*): the hook fired only without --setting-sources user.
+    assert!(marker("project_hook_none") && marker("project_hook_strict"));
+    assert!(!marker("project_hook_both") && !marker("project_hook_ss"));
+    assert!(marker("project_mcp_none"));
+    for v in ["both", "ss", "strict"] {
+        assert!(!marker(&format!("project_mcp_{v}")), "project_mcp_{v}");
+    }
 }
 
 #[test]
 fn a_settings_profile_turns_plugins_off_per_call() {
-    let names = |f: &str| -> BTreeSet<String> {
+    // enabledPlugins keys are `name@marketplace`: the init event's `plugins[].source`.
+    let sources = |f: &str| -> BTreeSet<(String, String)> {
         load(f)["plugins"]
             .as_array()
             .expect("plugins")
             .iter()
-            .map(|p| p.as_str().expect("plugin name").to_owned())
+            .map(|p| {
+                let name = p["name"].as_str().expect("plugin name").to_owned();
+                let source = p["source"].as_str().expect("plugin source").to_owned();
+                assert!(source.starts_with(&format!("{name}@")), "{source}");
+                (name, source)
+            })
             .collect()
     };
-    let on = names("plugins_default.init.json");
-    let off = names("plugins_profile_off.init.json");
+    let names = |s: &BTreeSet<(String, String)>| -> BTreeSet<String> {
+        s.iter().map(|(n, _)| n.clone()).collect()
+    };
+    let on = names(&sources("plugins_default.init.json"));
+    let off = names(&sources("plugins_profile_off.init.json"));
     for p in ["ponytail", "superpowers", "i-have-adhd", "workgraph"] {
         assert!(on.contains(p) && !off.contains(p), "{p} not turned off");
     }
     for p in ["ecc", "haruspex", "mattpocock-skills"] {
         assert!(off.contains(p), "{p} must stay on");
     }
+}
+
+#[test]
+fn rate_limit_event_carries_the_subscription_window_status() {
+    // §5 candidate usage-limit signal (not yet seen in a limited state): stream-json emits it.
+    let e = load("rate_limit_event.json");
+    assert_eq!(e["type"], "rate_limit_event");
+    let info = &e["rate_limit_info"];
+    assert_eq!(info["status"], "allowed");
+    assert!(info["rateLimitType"].is_string() && info["resetsAt"].is_u64());
+    for window in ["five_hour", "seven_day"] {
+        let w = &info["unifiedWindows"][window];
+        assert!(w["utilization"].is_f64(), "{window}: utilization");
+        assert!(w["status"].is_string(), "{window}: status");
+    }
+}
+
+#[test]
+fn gateway_dry_run_resolves_aliases_client_side() {
+    // The init event shows `--model sonnet` resolved before the call; the stub log (kept for the
+    // provider-model run only) shows an arbitrary id reaching the gateway unchanged.
+    let init = load("gateway_loopback_dry_run.init.json");
+    assert_eq!(init["model"], SONNET);
+    let log = std::fs::read_to_string(dir().join("spike/markers/gateway.log")).expect("stub log");
+    let posts: Vec<Value> = log
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("stub log line"))
+        .filter(|r: &Value| r["method"] == "POST")
+        .collect();
+    assert_eq!(posts.len(), 2);
+    assert!(posts
+        .iter()
+        .all(|r| r["model"] == "openai/gpt-5.1" && r["auth_header"] == "x-api-key"));
+}
+
+#[test]
+fn num_turns_can_exceed_max_turns() {
+    // ADR §1: ledger num_turns as reported; never derive limits from max_turns + 1.
+    // (fixture, --max-turns): see spike/stages.sh and spike/argv.txt.
+    for (f, max) in [
+        ("schema_max_turns_1", 1),
+        ("stage_t1_challenge", 8),
+        ("stage_t2_challenge", 8),
+        ("stage_t2_read", 8),
+        ("stage_t1_learn", 3),
+    ] {
+        let env = load(&format!("{f}.json"));
+        assert_eq!(env["subtype"], "success", "{f}");
+        assert!(env["num_turns"].as_u64().unwrap() > max, "{f}");
+    }
+    assert_eq!(load("stage_t1_challenge.json")["num_turns"], 10);
 }
 
 /// True if `text` holds something shaped like `local@domain.tld`.
@@ -302,13 +401,33 @@ fn email_detector_works() {
     assert!(!has_email("Bash(git status:*) and @types/node"));
 }
 
+/// Every file under `root`, recursively.
+fn files_under(root: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(root)
+        .expect("fixtures dir")
+        .flat_map(|e| {
+            let path = e.expect("dir entry").path();
+            if path.is_dir() {
+                files_under(&path)
+            } else {
+                vec![path]
+            }
+        })
+        .collect()
+}
+
 #[test]
-fn no_fixture_carries_a_key_or_an_email() {
-    for entry in std::fs::read_dir(dir()).expect("fixtures dir") {
-        let path = entry.expect("dir entry").path();
+fn no_fixture_carries_a_key_an_email_or_a_home_path() {
+    let files = files_under(&dir());
+    assert!(
+        files.iter().any(|p| p.ends_with("spike/run.sh")),
+        "walks spike/"
+    );
+    for path in files {
         let text = std::fs::read_to_string(&path).expect("fixture text");
         let name = path.display();
         assert!(!text.contains("sk-ant-api"), "{name}: key-shaped string");
         assert!(!has_email(&text), "{name}: email");
+        assert!(!text.contains("/Users/"), "{name}: unredacted home path");
     }
 }

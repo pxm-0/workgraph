@@ -1,22 +1,118 @@
 {
   "type": "system",
   "subtype": "init",
-  "apiKeySource": "apiKeyHelper",
+  "cwd": "<spike>/r7",
+  "session_id": "89c08604-fe49-441a-8788-e36978f55f13",
+  "tools": [
+    "<23 names redacted>"
+  ],
+  "mcp_servers": [],
   "model": "claude-haiku-5-5",
   "permissionMode": "dontAsk",
-  "claude_code_version": "2.1.311",
-  "plugins": [
-    "superpowers",
-    "mattpocock-skills",
-    "ecc",
-    "ponytail",
-    "i-have-adhd",
-    "workgraph",
-    "haruspex",
-    "cc-plugin-agents-md",
-    "cc-plugin-telemetry",
-    "cc-plugin-plugin-authoring"
+  "slash_commands": [
+    "<609 names redacted>"
   ],
-  "mcp_server_count_by_source": {},
-  "project_mcp_servers": []
+  "terminal_slash_commands": [
+    "doctor",
+    "color",
+    "focus",
+    "reload-plugins"
+  ],
+  "apiKeySource": "apiKeyHelper",
+  "claude_code_version": "2.1.311",
+  "output_style": "default",
+  "agents": [
+    "<81 names redacted>"
+  ],
+  "skills": [
+    "<419 names redacted>"
+  ],
+  "plugins": [
+    {
+      "name": "superpowers",
+      "path": "~/.claude/plugins/cache/claude-plugins-official/superpowers/7.0.2",
+      "source": "superpowers@claude-plugins-official",
+      "version": "7.0.2"
+    },
+    {
+      "name": "mattpocock-skills",
+      "path": "~/.claude/plugins/cache/claude-plugins-official/mattpocock-skills/1.3.1",
+      "source": "mattpocock-skills@claude-plugins-official",
+      "version": "1.3.1"
+    },
+    {
+      "name": "ecc",
+      "path": "~/.claude/plugins/cache/ecc/ecc/2.2.3",
+      "source": "ecc@ecc",
+      "version": "2.2.3"
+    },
+    {
+      "name": "ponytail",
+      "path": "~/.claude/plugins/cache/ponytail/ponytail/5.3.3",
+      "source": "ponytail@ponytail",
+      "version": "5.3.3"
+    },
+    {
+      "name": "i-have-adhd",
+      "path": "~/.claude/plugins/cache/i-have-adhd/i-have-adhd/0.4.1",
+      "source": "i-have-adhd@i-have-adhd",
+      "version": "0.4.1"
+    },
+    {
+      "name": "workgraph",
+      "path": "~/.claude/plugins/cache/workgraph/workgraph/0.2.0",
+      "source": "workgraph@workgraph",
+      "version": "0.2.0"
+    },
+    {
+      "name": "haruspex",
+      "path": "~/.claude/plugins/cache/haruspex/haruspex/0.1.0",
+      "source": "haruspex@haruspex",
+      "version": "0.1.0"
+    },
+    {
+      "name": "cc-plugin-agents-md",
+      "path": "builtin",
+      "source": "cc-plugin-agents-md@builtin"
+    },
+    {
+      "name": "cc-plugin-telemetry",
+      "path": "builtin",
+      "source": "cc-plugin-telemetry@builtin"
+    },
+    {
+      "name": "cc-plugin-plugin-authoring",
+      "path": "builtin",
+      "source": "cc-plugin-plugin-authoring@builtin"
+    }
+  ],
+  "capabilities": [
+    "interrupt_receipt_v1",
+    "interrupt_cancel_queued_v1",
+    "interrupt_send_now_v1",
+    "interrupt_requeue_taken_v1",
+    "msg_lifecycle_v1",
+    "request_marker_lists_v1",
+    "lifecycle_wakeup_source_v1",
+    "sdk_mcp_tools_list_changed",
+    "sdk_mcp_manifests",
+    "mcp_read_resource_v1",
+    "mcp_tool_ui_meta_v1",
+    "ui_surface_v1",
+    "prompts_screened_v1",
+    "mcp_call_result_not_for_model_v1"
+  ],
+  "analytics_disabled": false,
+  "product_feedback_disabled": false,
+  "uuid": "f8a0cb13-2142-4b6e-9f88-4cde06d7bfa0",
+  "memory_paths": {
+    "auto": "<redacted>"
+  },
+  "original_cwd": "<spike>/r7",
+  "additional_directories": [],
+  "messaging_socket_path": "<redacted>",
+  "fast_mode_state": "off",
+  "fast_mode_disabled_reason": "sdk_opt_in_required",
+  "per_turn_effort_active": true,
+  "view_mode": "default"
 }
