@@ -49,6 +49,12 @@ where
 }
 
 fn handle(args: &[String]) -> Result<(), String> {
+    // Input first: a guard that denies before reading leaves Claude Code's write with EPIPE.
+    let mut input = String::new();
+    std::io::stdin()
+        .take(4 * 1024 * 1024)
+        .read_to_string(&mut input)
+        .map_err(|e| format!("cannot read the hook input: {e}"))?;
     #[cfg(debug_assertions)]
     if std::env::var_os("WG_GUARD_TEST_PANIC").is_some() {
         panic!("forced by WG_GUARD_TEST_PANIC (debug builds only)");
@@ -60,11 +66,6 @@ fn handle(args: &[String]) -> Result<(), String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read manifest: {e}"))?;
     let m: Manifest =
         serde_json::from_str(&text).map_err(|e| format!("the manifest is not valid: {e}"))?;
-    let mut input = String::new();
-    std::io::stdin()
-        .take(4 * 1024 * 1024)
-        .read_to_string(&mut input)
-        .map_err(|e| format!("cannot read the hook input: {e}"))?;
     let hook: Value =
         serde_json::from_str(&input).map_err(|e| format!("the hook input is not JSON: {e}"))?;
     let verdict = decide(&m, &hook);
