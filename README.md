@@ -44,10 +44,11 @@ If the file can't be read or parsed, the run doesn't save, so it can't overwrite
 
 ## Requirements
 
-- `wg`, the Rust binary in `wg/` that does every mechanical step (`recall`, `check`, `save`,
-  `finalize`) and prints one JSON line. Each `v*` release attaches builds for macOS (arm64, x86_64)
+- `wg`, the Rust binary in `wg/` (a crate of the root workspace) that does every mechanical step
+  (`recall`, `check`, `save`, `finalize`) and prints one JSON line. Each `v*` release attaches builds for macOS (arm64, x86_64)
   and Linux x86_64 with `.sha256` checksums; the skill downloads the matching one on first use after
-  asking. With Rust installed you can build it instead: `cargo build --release --manifest-path wg/Cargo.toml`.
+  asking. With Rust installed you can build it instead: `cargo build --release -p wg`, which
+  writes `target/release/wg`.
 
 - [Haruspex](https://github.com/pxm-0/haruspex) and `python3`. The skill looks for the CLI in the
   repo's `.haruspex/bin/`, then the installed `haruspex` plugin, then `~/Code/nodens/haruspex`.
@@ -67,11 +68,32 @@ claude plugin marketplace add pxm-0/workgraph
 claude plugin install workgraph@workgraph
 ```
 
-## Test
+## Develop
 
-Control-flow tests run the real workflow script against fake agents. No dependencies.
+Builds and tests run in the compose dev stack (`compose.dev.yml`, image from
+`.devcontainer/Dockerfile`, pinned by digest), the same image CI uses. It publishes no ports, and
+the cargo registry and build output live in the named volumes `cargo-registry` and `cargo-target`.
+Open the repo in the devcontainer, or run commands through the stack:
 
 ```
-node --test tests/*.test.mjs
-HARUSPEX_CLI=/abs/path/haruspex.py cargo test --manifest-path wg/Cargo.toml
+docker compose -f compose.dev.yml run --rm dev cargo test --workspace
+docker compose -f compose.dev.yml run --rm dev cargo clippy --workspace --all-targets -- -D warnings
+docker compose -f compose.dev.yml run --rm dev cargo xtask size        # no .rs file over 800 lines
+docker compose -f compose.dev.yml run --rm dev sh -c 'node --test tests/*.test.mjs'
 ```
+
+The finalize tests need the Haruspex CLI; without it they skip. Mount a checkout read-only:
+
+```
+docker compose -f compose.dev.yml run --rm -v /abs/path/haruspex:/haruspex:ro \
+  -e HARUSPEX_CLI=/haruspex/scripts/haruspex.py dev cargo test --workspace
+```
+
+`node --test` runs the real workflow script against fake agents, with no dependencies.
+
+The workspace has three crates: `wg` (the binary), `wg-factory` (an empty `no_std` crate for the
+factory, built for `thumbv7em-none-eabihf` in CI so it can never name `std`) and `xtask`.
+
+The pre-push hook (`.githooks/pre-push`) refuses pushes to `main` and runs fmt, clippy and the
+tests in the stack. Enable it with `git config core.hooksPath .githooks`, and set `HARUSPEX_DIR`
+to include the finalize tests.
