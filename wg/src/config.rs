@@ -3,6 +3,8 @@
 
 use crate::claude::providers::{self, Auth, AuthCfg, ProviderCfg};
 use crate::ids;
+pub use crate::shift::config::repo_slug;
+use crate::shift::config::{IntakeFile, RepoCfg, Shift, ShiftFile};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -29,6 +31,12 @@ struct File {
     claude: ClaudeCfg,
     #[serde(default)]
     check: Vec<CheckEntry>,
+    #[serde(default)]
+    shift: ShiftFile,
+    #[serde(default)]
+    intake: IntakeFile,
+    #[serde(default)]
+    repo: Vec<RepoCfg>,
 }
 
 /// The pinned Haruspex CLI: absolute path and sha256 (design §9.1).
@@ -44,6 +52,7 @@ pub struct Pin {
 struct Tools {
     claude: Option<String>,
     security: Option<String>,
+    gh: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -74,12 +83,15 @@ pub struct Config {
     pub haruspex: Option<Pin>,
     pub claude_bin: String,
     pub security_bin: String,
+    pub gh_bin: String,
     pub max_calls_per_task: u32,
     pub runaway_per_call_usd: u32,
     pub auth: Auth,
     /// Plugin names (before the `@`) left enabled in children; every other one is turned off.
     pub keep_plugins: Vec<String>,
     pub checks: Vec<CheckEntry>,
+    pub shift: Shift,
+    pub repos: Vec<RepoCfg>,
 }
 
 fn abs_tool(name: &str, v: Option<String>, default: &str) -> Result<String, String> {
@@ -118,6 +130,17 @@ pub fn parse(text: &str) -> Result<Config, String> {
         one_line_cmd(&c.project, &format!("check {} project", c.name))?;
         one_line_cmd(&c.factory, &format!("check {} factory", c.name))?;
     }
+    for r in &f.repo {
+        crate::shift::config::repo(r)?;
+    }
+    if let Some(dup) = f
+        .repo
+        .iter()
+        .enumerate()
+        .find(|(i, r)| f.repo[..*i].iter().any(|x| x.name == r.name))
+    {
+        return Err(format!("[[repo]] {} is listed twice", dup.1.name));
+    }
     let lower = |v: Option<u32>, max: u32, what: &str| match v {
         Some(0) => Err(format!("[limits].{what} must be positive")),
         Some(n) => Ok(n.min(max)),
@@ -127,6 +150,7 @@ pub fn parse(text: &str) -> Result<Config, String> {
         haruspex: f.haruspex,
         claude_bin: abs_tool("claude", f.tools.claude, "/opt/homebrew/bin/claude")?,
         security_bin: abs_tool("security", f.tools.security, "/usr/bin/security")?,
+        gh_bin: abs_tool("gh", f.tools.gh, "/opt/homebrew/bin/gh")?,
         max_calls_per_task: lower(
             f.limits.max_calls_per_task,
             MAX_CALLS_PER_TASK,
@@ -144,6 +168,8 @@ pub fn parse(text: &str) -> Result<Config, String> {
                 .to_vec()
         }),
         checks: f.check,
+        shift: crate::shift::config::shift(f.shift, f.intake)?,
+        repos: f.repo,
     })
 }
 
@@ -157,6 +183,10 @@ pub fn load(path: &Path) -> Result<Config, String> {
 }
 
 impl Config {
+    pub fn repo(&self, name: &str) -> Option<&RepoCfg> {
+        self.repos.iter().find(|r| r.name == name)
+    }
+
     /// The approved entry for a check of `repo`; later entries override earlier ones.
     pub fn check(&self, repo: &str, name: &str) -> Option<&CheckEntry> {
         self.checks
@@ -205,6 +235,8 @@ mod tests {
             ),
             ("[tools]\nclaude = \"claude\"\n".into(), "absolute path"),
             ("[limits]\nmax_calls_per_task = 0\n".into(), "positive"),
+            ("[[repo]]\nname = \"o/r\"\npath = \"/a\"\n[[repo]]\nname = \"o/r\"\npath = \"/b\"\n".into(), "twice"),
+            ("[[repo]]\nname = \"o\"\npath = \"/a\"\n".into(), "owner/name"),
             (
                 "[[check]]\nrepo = \"o/r\"\nname = \"Bad\"\nproject = \"a\"\nfactory = \"a\"\n"
                     .into(),

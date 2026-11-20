@@ -100,6 +100,22 @@ pub fn label(s: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A GitHub label the factory may set: `^[a-z0-9:_-]{1,48}$`, never `wg:self`, which only the
+/// owner applies (design §12.1).
+pub fn gh_label(s: &str) -> Result<(), String> {
+    if s == "wg:self" {
+        return Err("the label wg:self is the owner's to apply".into());
+    }
+    let ok = (1..=48).contains(&s.len())
+        && s.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || ":_-".contains(c));
+    if ok {
+        Ok(())
+    } else {
+        Err(format!("bad label {:?}", truncate(s, 48)))
+    }
+}
+
 /// A branch the Reader may create in place: `^work/[a-z0-9-]{1,48}$`.
 pub fn work_branch(s: &str) -> bool {
     s.strip_prefix("work/").is_some_and(|slug| {
@@ -169,6 +185,11 @@ mod tests {
         assert!(run_id("run-abc123").is_ok() && run_id("x;y").is_err());
         assert!(check_name("unit_tests").is_ok() && check_name("Test").is_err());
         assert!(work_branch("work/add-x") && !work_branch("main") && !work_branch("work/A"));
+        assert!(gh_label("wg:pr-open").is_ok() && gh_label("risky:auth").is_ok());
+        assert!(gh_label("wg:self").unwrap_err().contains("owner"));
+        assert!(
+            gh_label("Bad").is_err() && gh_label("").is_err() && gh_label(&"a".repeat(49)).is_err()
+        );
         assert_eq!(one_line("a\nb\u{7}c", 3), "a b");
     }
 }
