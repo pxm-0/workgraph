@@ -21,7 +21,7 @@ use wg_factory::api::{Effort, LlmFailure, Reply, Role, SchemaId, Tier};
 pub struct Request {
     pub label: String,
     pub role: Role,
-    /// `read`, `challenge`, `work`, `fix`, `review` or `learn`: picks the provider.
+    /// `read`, `challenge`, `work`, `fix`, `review`, `learn`, `qa` or `release`: picks the provider.
     pub stage: &'static str,
     pub tier: Tier,
     pub effort: Option<Effort>,
@@ -57,7 +57,10 @@ fn failed(why: LlmFailure) -> Answer {
 
 /// Read-only roles, and the Reader whose writes the retry rewrites, get one retry on Invalid.
 fn retries_invalid(role: Role) -> bool {
-    matches!(role, Role::Reader | Role::Challenger | Role::Learner)
+    matches!(
+        role,
+        Role::Reader | Role::Challenger | Role::Learner | Role::QaExplorer | Role::ReleaseWriter
+    )
 }
 
 /// The dominant model is the requested one: the same id, or the alias's full id.

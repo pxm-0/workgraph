@@ -20,6 +20,8 @@ pub struct Ctx<'a> {
     /// Risky or tainted work (Phase 3): the absolute `wg` and what its sandbox exec may do. Bash is
     /// then only `wg sandbox exec` and `wg sandbox poll` (design §5.2).
     pub sandbox: Option<(String, SandboxGrant)>,
+    /// A release writer writing the plan into the Haruspex task (its notes call writes nothing).
+    pub edits_task: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -175,6 +177,30 @@ pub fn policy(role: Role, unit_files: &[String], c: &Ctx) -> Policy {
             write_roots.push(tmp_dir.clone());
             skills.extend([HX_SKILL, "mattpocock-skills:code-review"]);
         }
+        Role::QaExplorer => {
+            // Throwaway scripts in the run's tmp only; checks as the reviewer runs them.
+            tools.retain(|t| *t != "Skill");
+            bash.prefixes = match &c.sandbox {
+                Some((wg, g)) => vec![
+                    format!(
+                        "{wg} sandbox exec --task {}",
+                        g.task.as_deref().unwrap_or("")
+                    ),
+                    format!("{wg} sandbox poll --job"),
+                ],
+                None => c.approved.to_vec(),
+            };
+            write_roots.push(tmp_dir.clone());
+        }
+        Role::ReleaseWriter => {
+            // No Bash and no Skill: a release writer can never deploy (design §5.2).
+            tools.retain(|t| !["Skill", "Write", "Bash"].contains(t));
+            if c.edits_task {
+                write_roots.extend(task_file.clone());
+            } else {
+                tools.retain(|t| *t != "Edit");
+            }
+        }
         Role::Learner => tools.clear(),
     }
     let mut allowed: Vec<String> = tools
@@ -221,7 +247,35 @@ mod tests {
             approved,
             secret_roots: vec!["/home/.workgraph".into()],
             sandbox: None,
+            edits_task: false,
         }
+    }
+
+    #[test]
+    fn qa_explorers_and_release_writers_get_the_least_they_need() {
+        let approved = vec!["npm run e2e".to_string()];
+        let q = policy(Role::QaExplorer, &[], &ctx(&approved));
+        assert_eq!(q.manifest.write_roots, ["/w/tmp/r-1/"]);
+        assert_eq!(q.manifest.bash.prefixes, ["npm run e2e"]);
+        assert!(q.manifest.skills.is_empty() && !q.manifest.tools.contains(&"Skill".to_string()));
+        let notes = policy(Role::ReleaseWriter, &[], &ctx(&approved));
+        assert_eq!(notes.manifest.tools, ["Read", "Glob", "Grep"]);
+        assert!(notes.manifest.write_roots.is_empty());
+        assert!(!notes
+            .allowed
+            .iter()
+            .any(|a| a.starts_with("Bash") || a.starts_with("Skill")));
+        let plan = policy(
+            Role::ReleaseWriter,
+            &[],
+            &Ctx {
+                edits_task: true,
+                ..ctx(&approved)
+            },
+        );
+        assert_eq!(plan.manifest.tools, ["Read", "Glob", "Grep", "Edit"]);
+        assert_eq!(plan.manifest.write_roots, ["/r/.haruspex/tasks/T-001.json"]);
+        assert!(!plan.allowed.iter().any(|a| a.starts_with("Bash")));
     }
 
     #[test]

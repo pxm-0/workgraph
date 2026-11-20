@@ -61,10 +61,12 @@ fn esc(id: &str, question: String, recommendation: &str) -> Escalation {
 }
 
 impl Kernel {
+    /// The Reading's task, or (the release line, with no Reading) the task it works on.
     pub fn task_id(&self) -> String {
         self.reading
             .as_ref()
             .map(|r| r.task_id.clone())
+            .or_else(|| self.resume_task.clone())
             .unwrap_or_default()
     }
 
@@ -201,8 +203,10 @@ impl Kernel {
         else {
             return Some("this repo has no [repo.sandbox]".into());
         };
+        // The QA check set runs there too once the task is tainted.
         self.required
             .iter()
+            .chain(&super::command_check::qa_set(ctx))
             .find(|n| !sb.checks.contains_key(*n))
             .map(|n| format!("[repo.sandbox] has no command for check {n}"))
     }

@@ -26,7 +26,7 @@ struct WireVerdict {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct WireFinding {
+pub(super) struct WireFinding {
     id: String,
     severity: String,
     #[serde(default)]
@@ -67,23 +67,26 @@ pub fn parse(v: &Value, ctx: &Ctx) -> Result<Review, String> {
     let findings = w
         .findings
         .into_iter()
-        .map(|f| {
-            let file = match f.file.as_deref().map(str::trim) {
-                None | Some("") => None,
-                Some(p) => Some(repo_path(p)?),
-            };
-            Ok(Finding {
-                id: one_line(&f.id, 32),
-                severity: severity(&f.severity)?,
-                file,
-                summary: one_line(&f.summary, 1000),
-            })
-        })
+        .map(finding)
         .collect::<Result<Vec<_>, String>>()?;
     Ok(Review {
         passed: w.passed,
         criteria,
         findings,
+    })
+}
+
+/// A finding's file must be a repo path; its text is one capped line.
+pub(super) fn finding(f: WireFinding) -> Result<Finding, String> {
+    let file = match f.file.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(p) => Some(repo_path(p)?),
+    };
+    Ok(Finding {
+        id: one_line(&f.id, 32),
+        severity: severity(&f.severity)?,
+        file,
+        summary: one_line(&f.summary, 1000),
     })
 }
 

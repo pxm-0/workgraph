@@ -87,6 +87,12 @@ pub fn output(ctx: &RunCtx, ran: &Ran) -> Result<Value, String> {
             o.insert("note".into(), json!(why));
             "The run failed; edits so far, if any, are uncommitted in the working tree."
         }
+        End::AwaitingOwner { gate, ask } => {
+            o.insert("status".into(), json!("awaiting_owner"));
+            o.insert("gate".into(), json!(gate));
+            o.insert("note".into(), json!(ask));
+            "The release is prepared and stops at the owner's ready-to-release gate. The factory never records a deployment and never deploys."
+        }
     };
     if !o.contains_key("verified") {
         o.insert("verified".into(), json!(false));

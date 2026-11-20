@@ -7,6 +7,7 @@ pub mod review;
 pub mod rules;
 pub mod schemas;
 pub mod small;
+pub mod stage;
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -35,6 +36,9 @@ pub fn parse(schema: SchemaId, v: &Value, ctx: &Ctx) -> Result<Reply, String> {
         SchemaId::Work => small::work(v).map(Reply::Work),
         SchemaId::Review => review::parse(v, ctx).map(Reply::Review),
         SchemaId::Learn => small::learn(v, ctx).map(Reply::Learn),
+        SchemaId::Verdict => stage::verdict(v).map(Reply::Verdict),
+        SchemaId::ReleaseNotes => stage::notes(v).map(Reply::ReleaseNotes),
+        SchemaId::ReleasePlan => stage::plan(v).map(Reply::ReleasePlan),
     }
 }
 

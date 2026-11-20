@@ -153,6 +153,33 @@ pub fn doctor(args: &[String]) -> Result<Value, String> {
             ),
             Err(e) => add("dev pipeline", false, "error", e),
         }
+        // The load check per repo (design §5.2): each chain's worst case must fit the call cap.
+        let assets = crate::assets::Assets::compiled();
+        for r in &cfg.repos {
+            let release = vec!["release".to_string()];
+            let lines = std::iter::once(&r.pipelines).chain(r.release.then_some(&release));
+            for names in lines {
+                let view = crate::pipelines::RepoView::of(r);
+                match crate::pipelines::chain(&assets, names, &view, cfg.max_calls_per_task) {
+                    Ok(c) => add(
+                        &format!("chain {} {}", r.name, names.join("+")),
+                        true,
+                        "error",
+                        format!(
+                            "worst case {} of {} calls",
+                            crate::pipelines::worst_case(&c),
+                            cfg.max_calls_per_task
+                        ),
+                    ),
+                    Err(e) => add(
+                        &format!("chain {} {}", r.name, names.join("+")),
+                        false,
+                        "error",
+                        e,
+                    ),
+                }
+            }
+        }
         for p in &cfg.auth.providers {
             let note = match (&p.kind, &p.keychain_service) {
                 (Kind::Gateway { .. }, _) => {

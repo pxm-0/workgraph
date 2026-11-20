@@ -43,8 +43,17 @@ pub struct AllowedConfig {
 pub struct RepoCfg {
     pub name: String,
     pub path: String,
-    #[serde(default = "dev_only")]
+    /// The assembly line (design §6.2): `dev` first, then later pipelines; `qa` ends with publish.
+    #[serde(default = "dev_qa")]
     pub pipelines: Vec<String>,
+    /// The `qa` check set: names of owner-approved `[[check]]` entries the QA `checks` stage runs
+    /// besides the gate (Phase 4).
+    #[serde(default)]
+    pub qa_checks: Vec<String>,
+    /// Run the release line for this repo's verified, merged tasks (Phase 4). It needs
+    /// `[repo.sandbox].release_rehearsal`; it prepares and stops at the owner's gate.
+    #[serde(default)]
+    pub release: bool,
     #[serde(default = "main_branch")]
     pub default_branch: String,
     /// `docker compose -p <name> -f compose.dev.yml -f <owner-local override>`: prefixed to every
@@ -62,8 +71,8 @@ pub struct RepoCfg {
     pub sandbox: Option<crate::sandbox::config::RepoSandbox>,
 }
 
-fn dev_only() -> Vec<String> {
-    vec!["dev".into()]
+fn dev_qa() -> Vec<String> {
+    vec!["dev".into(), "qa".into()]
 }
 
 fn main_branch() -> String {
@@ -168,8 +177,32 @@ pub fn repo(r: &RepoCfg) -> Result<(), String> {
     if !r.path.starts_with('/') || r.path.contains("/../") || r.path.chars().any(char::is_control) {
         return Err(what("path must be absolute"));
     }
-    if r.pipelines != ["dev"] {
-        return Err(what("Phase 2 runs the pipelines [\"dev\"] only"));
+    if r.pipelines.first().map(String::as_str) != Some("dev")
+        || r.pipelines
+            .iter()
+            .skip(1)
+            .any(|p| ["dev", "release", "self"].contains(&p.as_str()))
+        || r.pipelines
+            .iter()
+            .enumerate()
+            .any(|(i, p)| r.pipelines[..i].contains(p))
+    {
+        return Err(what(
+            "pipelines starts with \"dev\", names each pipeline once, and never release or self",
+        ));
+    }
+    for c in &r.qa_checks {
+        crate::ids::check_name(c).map_err(|e| what(&format!("qa_checks: {e}")))?;
+    }
+    if r.release
+        && !r
+            .sandbox
+            .as_ref()
+            .is_some_and(|s| !s.release_rehearsal.is_empty())
+    {
+        return Err(what(
+            "release = true needs [repo.sandbox].release_rehearsal: the rehearsal runs only there",
+        ));
     }
     let b = &r.default_branch;
     if b.is_empty()
@@ -257,7 +290,11 @@ mod tests {
             .contains("login"));
         assert!(repo_toml("").is_ok());
         for (extra, want) in [
-            ("pipelines = [\"dev\", \"qa\"]", "Phase 2"),
+            ("pipelines = [\"qa\"]", "starts with"),
+            ("pipelines = [\"dev\", \"release\"]", "never release"),
+            ("pipelines = [\"dev\", \"qa\", \"qa\"]", "once"),
+            ("qa_checks = [\"Bad\"]", "qa_checks"),
+            ("release = true", "release_rehearsal"),
             ("default_branch = \"../x\"", "branch name"),
             ("factory_compose = \"docker compose -f x.yml\"", "-p <name>"),
             ("install = \"\"", "one line"),

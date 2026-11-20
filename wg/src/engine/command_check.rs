@@ -32,13 +32,23 @@ fn stage(role: Role) -> &'static str {
         Role::Fixer => "fix",
         Role::Reviewer => "review",
         Role::Learner => "learn",
+        Role::QaExplorer => "qa",
+        Role::ReleaseWriter => "release",
     }
+}
+
+/// The repo's `qa` check set (`[[repo]].qa_checks`).
+pub fn qa_set(ctx: &RunCtx) -> Vec<String> {
+    ctx.cfg
+        .repo(&ctx.repo_name)
+        .map(|r| r.qa_checks.clone())
+        .unwrap_or_default()
 }
 
 /// Turns a factory call into the kernel's request, or refuses it.
 pub fn llm(ctx: &RunCtx, k: &Kernel, c: &LlmCall, max_units: usize) -> Result<Request, Refusal> {
     crate::ids::label(&c.label).map_err(refuse)?;
-    let template = crate::assets::prompt(&c.template).ok_or_else(|| {
+    let template = ctx.assets.prompt(&c.template).ok_or_else(|| {
         refuse(format!(
             "unknown template {:?}",
             crate::ids::truncate(&c.template, 32)
@@ -86,7 +96,7 @@ pub fn llm(ctx: &RunCtx, k: &Kernel, c: &LlmCall, max_units: usize) -> Result<Re
             });
         }
     }
-    if c.role == Role::Reviewer && k.tainted {
+    if matches!(c.role, Role::Reviewer | Role::QaExplorer) && k.tainted {
         if let Some(why) = k.sandbox_blocker(ctx) {
             return Err(refuse(format!(
                 "the task is tainted and its review commands run only in the sandbox, which is unavailable: {why}"
@@ -106,9 +116,15 @@ pub fn llm(ctx: &RunCtx, k: &Kernel, c: &LlmCall, max_units: usize) -> Result<Re
     let task_id = k.task_id();
     let hx = format!("python3 {}", ctx.haruspex_cli);
     let prompt = crate::render::render(template, &c.vars, &[("hx", hx)]).map_err(refuse)?;
+    let qa = if c.role == Role::QaExplorer {
+        qa_set(ctx)
+    } else {
+        vec![]
+    };
     let approved: Vec<String> = k
         .required
         .iter()
+        .chain(qa.iter())
         .filter_map(|n| ctx.cfg.check(&ctx.repo_name, n))
         .flat_map(|e| [e.project.clone(), e.factory.clone()])
         .collect();
@@ -133,6 +149,8 @@ pub fn llm(ctx: &RunCtx, k: &Kernel, c: &LlmCall, max_units: usize) -> Result<Re
             approved: &approved,
             secret_roots,
             sandbox: grant.map(|g| (ctx.wg_exe.to_string_lossy().into_owned(), g)),
+            edits_task: c.role == Role::ReleaseWriter
+                && c.schema == wg_factory::api::SchemaId::ReleasePlan,
         },
     );
     let (turns, secs) = (
@@ -160,10 +178,19 @@ pub fn llm(ctx: &RunCtx, k: &Kernel, c: &LlmCall, max_units: usize) -> Result<Re
     })
 }
 
-/// Check names must be known; the kernel then runs its own set, whatever the factory listed.
-pub fn checks(k: &Kernel, label: &str, names: &[String]) -> Result<Vec<String>, Refusal> {
+/// Check names must be known; the kernel then runs its own set, whatever the factory listed: the
+/// gate, plus the `qa` checks the factory named.
+pub fn checks(
+    k: &Kernel,
+    label: &str,
+    names: &[String],
+    qa: &[String],
+) -> Result<Vec<String>, Refusal> {
     crate::ids::label(label).map_err(refuse)?;
-    if let Some(n) = names.iter().find(|n| !k.required.contains(n)) {
+    if let Some(n) = names
+        .iter()
+        .find(|n| !k.required.contains(n) && !qa.contains(n))
+    {
         return Err(refuse(format!(
             "unknown check {:?}",
             crate::ids::truncate(n, 32)
@@ -175,5 +202,46 @@ pub fn checks(k: &Kernel, label: &str, names: &[String]) -> Result<Vec<String>, 
     if !k.baseline_done {
         return Err(refuse("the baseline must run first"));
     }
-    Ok(k.gate.clone())
+    let extra: Vec<String> = names
+        .iter()
+        .filter(|n| qa.contains(n) && !k.gate.contains(n))
+        .cloned()
+        .collect();
+    Ok(k.gate.iter().cloned().chain(extra).collect())
+}
+
+/// A `Gate` command: a known gate, evaluated `--json` only.
+pub fn gate(label: &str, gate: &str) -> Result<(), Refusal> {
+    crate::ids::label(label).map_err(refuse)?;
+    if !crate::pipelines::GATES.contains(&gate) {
+        return Err(refuse(format!(
+            "unknown gate {:?}",
+            crate::ids::truncate(gate, 32)
+        )));
+    }
+    Ok(())
+}
+
+/// A `Sandbox` command: a known step set, configured for this repo; its commands, in order.
+pub fn sandbox_steps(ctx: &RunCtx, label: &str, steps_from: &str) -> Result<Vec<String>, Refusal> {
+    crate::ids::label(label).map_err(refuse)?;
+    if !crate::pipelines::STEP_SETS.contains(&steps_from) {
+        return Err(refuse(format!(
+            "unknown step set {:?}",
+            crate::ids::truncate(steps_from, 32)
+        )));
+    }
+    let steps = ctx
+        .cfg
+        .repo(&ctx.repo_name)
+        .and_then(|r| r.sandbox.as_ref())
+        .map(|s| s.release_rehearsal.clone())
+        .unwrap_or_default();
+    if steps.is_empty() {
+        return Err(refuse(format!(
+            "[repo.sandbox].{steps_from} has no steps for {}",
+            ctx.repo_name
+        )));
+    }
+    Ok(steps)
 }
