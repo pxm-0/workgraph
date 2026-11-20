@@ -4,7 +4,8 @@ version = "0.3.0"
 edition = "2021"
 description = "Deterministic I/O for the workgraph plugin: recall, check, save, finalize"
 publish = false
-# Test targets are listed below so cli.rs can be compiled through a wrapper (see tests/cli_target.rs).
+# Test targets are listed below so cli.rs can be compiled through a wrapper (see tests/cli_target.rs,
+# which also fails when a tests/*.rs file has no [[test]] entry here).
 autotests = false
 
 [dependencies]
