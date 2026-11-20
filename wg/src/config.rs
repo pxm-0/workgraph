@@ -37,6 +37,8 @@ struct File {
     intake: IntakeFile,
     #[serde(default)]
     repo: Vec<RepoCfg>,
+    #[serde(default)]
+    sandbox: crate::sandbox::config::SandboxFile,
 }
 
 /// The pinned Haruspex CLI: absolute path and sha256 (design §9.1).
@@ -53,6 +55,8 @@ struct Tools {
     claude: Option<String>,
     security: Option<String>,
     gh: Option<String>,
+    orb: Option<String>,
+    orbctl: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -84,6 +88,10 @@ pub struct Config {
     pub claude_bin: String,
     pub security_bin: String,
     pub gh_bin: String,
+    pub orb_bin: String,
+    pub orbctl_bin: String,
+    /// The sandbox machine and user (Phase 3).
+    pub sandbox: crate::sandbox::config::Machine,
     pub max_calls_per_task: u32,
     pub runaway_per_call_usd: u32,
     pub auth: Auth,
@@ -151,6 +159,9 @@ pub fn parse(text: &str) -> Result<Config, String> {
         claude_bin: abs_tool("claude", f.tools.claude, "/opt/homebrew/bin/claude")?,
         security_bin: abs_tool("security", f.tools.security, "/usr/bin/security")?,
         gh_bin: abs_tool("gh", f.tools.gh, "/opt/homebrew/bin/gh")?,
+        orb_bin: abs_tool("orb", f.tools.orb, "/usr/local/bin/orb")?,
+        orbctl_bin: abs_tool("orbctl", f.tools.orbctl, "/usr/local/bin/orbctl")?,
+        sandbox: crate::sandbox::config::machine(f.sandbox)?,
         max_calls_per_task: lower(
             f.limits.max_calls_per_task,
             MAX_CALLS_PER_TASK,
