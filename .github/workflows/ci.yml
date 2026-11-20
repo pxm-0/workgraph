@@ -1,0 +1,30 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: pxm-0/haruspex
+          path: haruspex
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Workflow control-flow tests
+        run: node --test tests/
+      - name: wg integration tests (with the real Haruspex CLI)
+        working-directory: wg
+        env:
+          HARUSPEX_CLI: ${{ github.workspace }}/haruspex/scripts/haruspex.py
+        run: cargo test --locked

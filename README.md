@@ -9,15 +9,15 @@ A Claude Code plugin that runs a coding task as a graph under a
 
 | Step | Model | What happens |
 |---|---|---|
-| Recall | haiku | Load the repo's rules and model stats; note your uncommitted work so the run never touches or commits it |
+| Recall | `wg recall`, no model | Load the repo's rules and model stats; note your uncommitted work so the run never touches or commits it |
 | Read | opus, high effort | Init Haruspex if the repo has none. Write the Reading: outcome, scope, acceptance criteria, assumptions, failure modes, test plan, core reviews. Split the work into up to 5 units, each owning criteria |
 | Challenge | sonnet, high effort | Adversarial pass: assume the Reading is incomplete and add what it missed |
 | Escalate | none (code) | Anything critical, or high and not mitigable in code and tests, stops the run here before any edit; you're asked only those |
 | Build | learned per unit size | Test-first workers (`mattpocock-skills:tdd`), independent units in parallel, on the cheapest model proven in this repo |
-| Check / Fix | haiku / one tier up per round | Exit codes decide. Only the blamed unit goes back (`mattpocock-skills:diagnosing-bugs`), max 3 rounds |
+| Check / Fix | `wg check` / one tier up per round | `wg` runs the commands and exit codes decide. The workflow sandbox can't run commands, so a haiku agent relays `wg`'s output, which must echo a per-call nonce or it is rejected. Only the blamed unit goes back (`mattpocock-skills:diagnosing-bugs`), max 3 rounds |
 | Review | opus | Independent Spec and Standards review (`mattpocock-skills:code-review`) against the Haruspex criteria; writes verdicts into the task. One fix and re-review round |
-| Learn | sonnet | Score the rules in play, turn fixed failures into rules, and propose guardrails in the `mattpocock-skills:retro` style (never applied unasked) |
-| You | — | Approve the build gate and commit. Then Haruspex `verify` and the verification gate run, and a PR opens |
+| Learn | sonnet, then `wg save` | Score the rules in play, turn fixed failures into rules, and propose guardrails in the `mattpocock-skills:retro` style (never applied unasked). `wg save` validates and writes the memory |
+| You | `wg finalize`, no model | Approve the build gate and commit. One command commits, records the gates, runs Haruspex `verify` and the verification gate; a PR opens only if it passes |
 
 **Risk policy.** Everything below critical is mitigated without asking: assumptions are validated
 in code or given a reversible default, and high-severity failure modes get a criterion and a test.
@@ -44,6 +44,11 @@ If the file can't be read or parsed, the run doesn't save, so it can't overwrite
 
 ## Requirements
 
+- `wg`, the Rust binary in `wg/` that does every mechanical step (`recall`, `check`, `save`,
+  `finalize`) and prints one JSON line. Each `v*` release attaches builds for macOS (arm64, x86_64)
+  and Linux x86_64 with `.sha256` checksums; the skill downloads the matching one on first use after
+  asking. With Rust installed you can build it instead: `cargo build --release --manifest-path wg/Cargo.toml`.
+
 - [Haruspex](https://github.com/pxm-0/haruspex) and `python3`. The skill looks for the CLI in the
   repo's `.haruspex/bin/`, then the installed `haruspex` plugin, then `~/Code/nodens/haruspex`.
 - [mattpocock-skills](https://github.com/mattpocock/skills) for the TDD, diagnosis, review and
@@ -68,4 +73,5 @@ Control-flow tests run the real workflow script against fake agents. No dependen
 
 ```
 node --test tests/
+HARUSPEX_CLI=/abs/path/haruspex.py cargo test --manifest-path wg/Cargo.toml
 ```

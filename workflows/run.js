@@ -3,14 +3,13 @@ export const meta = {
   description: 'Run a coding task as a graph under a Haruspex Reading: build units in parallel on the cheapest proven model, test-first, gate on real checks with model escalation, review independently against the criteria, then learn weighted rules',
   whenToUse: 'A coding task in the current git repo that should run end to end, leaving only critical decisions and the final diff to you',
   phases: [
-    { title: 'Recall', detail: 'load rules and model stats for this repo', model: 'haiku' },
     { title: 'Read', detail: 'Haruspex Reading, mitigations, units mapped to criteria', model: 'opus' },
     { title: 'Challenge', detail: 'adversarial pass on the Reading', model: 'sonnet' },
-    { title: 'Check', detail: 'run the check commands; exit codes decide', model: 'haiku' },
+    { title: 'Check', detail: 'wg runs the check commands; a haiku pipe relays its verified output', model: 'haiku' },
     { title: 'Build', detail: 'one test-first worker per unit on its allocated model' },
     { title: 'Fix', detail: 'only the blamed unit goes back, one model tier up per round' },
     { title: 'Review', detail: 'independent Spec and Standards review against the criteria', model: 'opus' },
-    { title: 'Learn', detail: 'score rules, update model stats, propose guardrails, save memory' },
+    { title: 'Learn', detail: 'score rules, update model stats, propose guardrails' },
   ],
 }
 
@@ -36,7 +35,12 @@ const decisions = Array.isArray(input.decisions) ? input.decisions.filter(d => d
 const resumeTask = typeof input.taskId === 'string' && input.taskId.trim() ? input.taskId.trim() : null
 if (!task) throw new Error('work: no task given. Pass args: {task: "what to do", haruspexCli: "/abs/path/haruspex.py"}')
 if (!cli.startsWith('/')) throw new Error('work: args.haruspexCli must be the absolute path to haruspex.py')
+const wg = String(input.wg || '').trim()
+const runId = String(input.runId || '').trim()
+if (!wg.startsWith('/')) throw new Error('work: args.wg must be the absolute path to the wg binary')
+if (!/^[A-Za-z0-9-]{6,}$/.test(runId)) throw new Error('work: args.runId must be 6+ letters, digits or dashes')
 const hx = `python3 ${cli}`
+const shq = s => `'${String(s).replace(/'/g, `'\\''`)}'`
 
 const str = { type: 'string' }
 const strs = { type: 'array', items: str }
@@ -48,7 +52,7 @@ const ESCALATION = {
   properties: { id: str, severity: { type: 'string', enum: ['high', 'critical'] }, question: str, recommendation: str, options: strs },
   required: ['id', 'severity', 'question', 'recommendation'],
 }
-const LOAD = { type: 'object', properties: { exists: bool, content: str, dirty: strs }, required: ['exists', 'dirty'] }
+const RAW = { type: 'object', properties: { raw: str }, required: ['raw'] }
 const READ = {
   type: 'object',
   properties: {
@@ -85,17 +89,6 @@ const CHALLENGE = {
   required: ['added', 'assign', 'escalations'],
 }
 const WORK = { type: 'object', properties: { summary: str, blocked: str }, required: ['summary'] }
-const CHECK = {
-  type: 'object',
-  properties: {
-    results: {
-      type: 'array',
-      items: { type: 'object', properties: { exitCode: { type: 'integer' }, outputTail: str }, required: ['exitCode', 'outputTail'] },
-    },
-    changedFiles: strs,
-  },
-  required: ['results', 'changedFiles'],
-}
 const REVIEW = {
   type: 'object',
   properties: {
@@ -184,27 +177,37 @@ function blameReview(review, units) {
   return hit.length ? hit : units
 }
 
-// The checker only relays exit codes; it never judges. A command it fails to report counts as failed.
+// wg runs the checks; the sandbox can't, so a haiku agent only relays wg's stdout. The output must
+// parse, echo this call's nonce and cover every command, or it is rejected: a model can't invent results.
+const checkCalls = new Map()
+function parseCheck(raw, nonce, cmds) {
+  try {
+    const v = JSON.parse(String(raw).trim())
+    const ok = v && v.nonce === nonce && Array.isArray(v.results) && v.results.length === cmds.length &&
+      v.results.every((r, i) => r.cmd === cmds[i] && Number.isInteger(r.exitCode) && typeof r.outputTail === 'string') &&
+      Array.isArray(v.changedFiles)
+    return ok ? v : null
+  } catch (e) {
+    return null
+  }
+}
 async function runChecks(cmds, label) {
-  const r = await agent(
-    (cmds.length
-      ? `Run these shell commands from the repo root, one at a time, in this order, exactly as written, each with a 10-minute timeout:\n${cmds.map(c => `- ${c}`).join('\n')}\n` +
-        'Report one result per command, in the same order: its exit code and the last 40 lines of its output. '
-      : 'There are no check commands; report results: []. ') +
-      'Do not edit, create or delete any file, and do not try to fix anything. ' +
-      'Finally run `git status --porcelain` and report every changed or untracked path, repo-relative, path only.',
-    { label, phase: 'Check', schema: CHECK, model: 'haiku', effort: 'low' })
-  if (!r) throw new Error(`${label}: the checker agent died, so nothing can be verified. Edits so far are uncommitted in the working tree.`)
-  const results = cmds.map((cmd, i) => ({ cmd, ...(r.results[i] || { exitCode: -1, outputTail: 'checker did not report this command' }) }))
-  return { failed: results.filter(x => x.exitCode !== 0), changedFiles: r.changedFiles }
+  const n = (checkCalls.get(label) || 0) + 1
+  checkCalls.set(label, n)
+  const nonce = `${runId}:${label}:${n}`
+  const command = `${shq(wg)} check --nonce ${shq(nonce)}${cmds.map(c => ` --cmd ${shq(c)}`).join('')}`
+  const prompt = `Run exactly this one command from the repo root, then return its complete stdout, unchanged, as "raw". Do nothing else: no other commands, no edits, no summary.\n\n${command}`
+  for (const attempt of [1, 2]) {
+    const r = await agent(prompt, { label: attempt === 1 ? label : `${label}!retry`, phase: 'Check', schema: RAW, model: 'haiku', effort: 'low' })
+    const v = r && parseCheck(r.raw, nonce, cmds)
+    if (v) return { failed: v.results.filter(x => x.exitCode !== 0), changedFiles: v.changedFiles }
+    log(`${label}: the check relay returned ${r ? 'output that is not wg\'s' : 'nothing'}${attempt === 1 ? '; retrying once' : ''}`)
+  }
+  throw new Error(`${label}: no verified check result, so nothing can be trusted. Edits so far are uncommitted in the working tree.`)
 }
 
-// ---- Recall: the sandbox has no file access, so a cheap agent reads the repo's memory file.
-phase('Recall')
-const loaded = await agent(
-  `If ${MEMORY} exists, return exists=true and its exact contents in "content". If it does not exist, return exists=false. ` +
-    'Also run `git status --porcelain` and return every changed or untracked path in "dirty" (repo-relative, path only). Do not create or change any file.',
-  { label: 'memory:load', phase: 'Recall', schema: LOAD, model: 'haiku', effort: 'low' })
+// ---- Recall: the skill runs `wg recall` before the workflow and passes its output as args.memory.
+const loaded = input.memory && typeof input.memory === 'object' && Array.isArray(input.memory.dirty) ? input.memory : null
 // The user's own uncommitted work: never planned over, committed or blamed. A rerun after escalations
 // passes the first run's list, since that run's .haruspex/ and init edits are dirty by now.
 const userChangesBefore = Array.isArray(input.userChangesBefore) ? input.userChangesBefore : loaded ? loaded.dirty : []
@@ -213,7 +216,7 @@ let memory = { version: 1, runs: 0, nextId: 1, checks: [], rules: [], models: {}
 let canSave = true
 if (!loaded) {
   canSave = false
-  log(`could not read ${MEMORY}; running without memory and not saving, so nothing gets overwritten`)
+  log(`no recall output in args.memory; running without memory and not saving, so nothing gets overwritten`)
 } else if (loaded.exists) {
   try {
     const m = JSON.parse(loaded.content)
@@ -542,14 +545,8 @@ const models = outcomes.reduce((m, o) => {
   return { ...m, [o.key]: { ...(m[o.key] || {}), [o.tier]: { pass, fail } } }
 }, memory.models)
 
+// The skill pipes this to `wg save`, which validates it and never overwrites an unreadable file.
 const nextMemory = { version: 1, runs: memory.runs + 1, nextId, checks: gate.length ? gate : memory.checks, rules, models }
-let memorySaved = false
-if (canSave) {
-  memorySaved = !!(await agent(
-    `Replace ${MEMORY} with exactly the JSON between the <<< and >>> lines, creating the .claude folder if needed. Change no other file. Return "saved".\n<<<\n${JSON.stringify(nextMemory, null, 2)}\n>>>`,
-    { label: 'memory:save', phase: 'Learn', model: 'haiku', effort: 'low' }))
-  if (!memorySaved) log(`memory save failed; ${MEMORY} unchanged`)
-}
 
 return {
   status: stuck.length ? 'stuck' : 'ready_for_review',
@@ -574,6 +571,6 @@ return {
     top: rules.slice(0, 5).map(r => ({ id: r.id, weight: r2(weight(r)), scope: r.scope, text: r.text })),
   },
   proposals,
-  memorySaved,
+  memoryToSave: canSave ? nextMemory : null,
   next: 'Nothing is committed. On the user\'s approval of the build gate and commit, follow the skill\'s verification steps.',
 }
