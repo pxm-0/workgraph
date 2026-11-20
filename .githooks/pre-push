@@ -1,0 +1,25 @@
+#!/bin/sh
+# Refuses pushes to main, then runs fmt, clippy and the tests in the compose dev stack (the same
+# image CI uses). Enable once per clone: git config core.hooksPath .githooks
+# Set HARUSPEX_DIR=/abs/path/to/haruspex to also run the finalize tests against the real CLI.
+set -eu
+
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+  if [ "$remote_ref" = "refs/heads/main" ]; then
+    echo "pre-push: refusing to push to main; push a branch and open a PR" >&2
+    exit 1
+  fi
+done
+
+cd "$(git rev-parse --show-toplevel)"
+set -- docker compose -f compose.dev.yml run --rm -T
+if [ -n "${HARUSPEX_DIR:-}" ]; then
+  set -- "$@" -v "$HARUSPEX_DIR:/haruspex:ro" -e HARUSPEX_CLI=/haruspex/scripts/haruspex.py
+fi
+"$@" dev sh -c '
+  set -e
+  cargo fmt --all --check
+  cargo clippy --workspace --all-targets --locked -- -D warnings
+  cargo test --workspace --locked
+  node --test tests/*.test.mjs
+'

@@ -1,0 +1,16 @@
+// Devcontainer (Argus docs/DEV_ENV_PROTOCOL.md): the toolchain runs in compose.dev.yml's `dev`
+// service, the same image the git hook and CI use. No ports are forwarded.
+{
+  "name": "workgraph",
+  "dockerComposeFile": ["../compose.dev.yml"],
+  "service": "dev",
+  "runServices": ["dev"],
+  "workspaceFolder": "/workspace",
+  "shutdownAction": "stopCompose",
+  "postCreateCommand": "cargo fetch --locked",
+  "customizations": {
+    "vscode": {
+      "extensions": ["rust-lang.rust-analyzer"]
+    }
+  }
+}
