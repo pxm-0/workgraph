@@ -267,6 +267,12 @@ fn the_no_std_build_refuses_extern_crate_std() {
             ])
             .current_dir(dir)
             .env("CARGO_TARGET_DIR", base.join("target"))
+            // A coverage run instruments rustc; a bare no-std target has no profiler runtime.
+            .env_remove("RUSTFLAGS")
+            .env_remove("CARGO_ENCODED_RUSTFLAGS")
+            .env_remove("RUSTC_WRAPPER")
+            .env_remove("RUSTC_WORKSPACE_WRAPPER")
+            .env_remove("CARGO_BUILD_RUSTFLAGS")
             .output()
             .unwrap();
         (
