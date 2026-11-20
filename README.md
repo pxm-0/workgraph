@@ -74,8 +74,10 @@ skip the repo (`wg doctor` shows each chain's worst case). With `[[repo]].releas
 `/workgraph:work approve` whose PR has merged: it recreates a worktree at the merge commit,
 reruns Haruspex verify there with the pinned commands, writes release notes and the Haruspex
 release plan, rehearses the steps in the sim sandbox (no network), evaluates ready-to-release and
-stops at your human gate with the issue labelled `wg:release-ready`. It never records a
-deployment and never deploys: that stays yours. A stage of an existing kind is TOML plus a prompt
+stops at your human gate with the issue labelled `wg:release-ready`, only once the kernel holds
+the rehearsal, the gate and the plan itself. It never records a deployment and never deploys:
+that stays yours. A release that is stuck is listed in the shift report; after you fix its cause,
+`wg shift retry-release --repo <owner/repo> --issue <n>` puts it back for the next shift. A stage of an existing kind is TOML plus a prompt
 file (both compiled in by `wg/build.rs`); a new kind is a Rust change.
 
 ## Memory

@@ -2428,8 +2428,21 @@ per repo (`[[repo]].release = true`, which needs `[repo.sandbox].release_rehears
 tasks from the task record (`verified` after `wg approve`) once `gh pr view` reports the PR merged.
 Haruspex binds check evidence to a commit, so before `release.toml` the kernel reruns `verify` at
 the merge commit with the owner-approved pins (a tainted task's through `[repo.sandbox].verify`);
-it records no gate and no approval. `/workgraph:work approve --release` is not built yet: the owner
-records ready-to-release and deploys by hand.
+it records no gate and no approval, and first refuses unless the merge commit's Haruspex active task
+is the task being released (verify and every gate judge the active task). The line takes only a PR
+that merged at the head `wg approve` verified (kept on the task record as `approved_head`).
+The kernel, not the factory, decides that the owner may be asked: before honouring a `human` stage it
+requires a passing `SandboxRun` at the current tree for every sandbox stage that applies and its own
+fresh gate evaluation with only the owner's pending approval left, and the release line also
+requires the kernel's parsed release plan with `ready = true` and a passing `release_rehearsal` run.
+Once a chain's QA check set has run, the kernel adds it to every later check run, and publish
+requires it passing at the tree, like the gate. A release incident labels the issue `wg:incident`
+and stops the shift; a refusal or a failed stage is `release-stuck`, listed in the report under
+"Releases stuck" and put back by the owner with `wg shift retry-release --repo <r> --issue <n>`;
+any other release error leaves the task `verified` for the next shift. The dev limits
+(`max_tasks`, `max_consecutive_failures`) end intake only, never the release line.
+`/workgraph:work approve --release` is not built (Q9 in §17.2): the owner records
+ready-to-release and deploys by hand.
 
 ### Phase 5: self-improvement, shadow first
 
@@ -2577,6 +2590,12 @@ Each has a default the design uses until answered.
   container outside the pod, `pasta --no-map-gw`, a factory-built `.npmrc`, a lockfile-keyed deps
   volume and the registry-only egress proxy (§8.3); a malicious lockfile entry could still
   exfiltrate the source under test to the registry host (no secrets are in the pod).
+- **Q9. Resuming the release `human` stage.** §6.1 says a `human` stage resumes only through
+  `wg approve`; §9.5 names `/workgraph:work approve --release`. Recording ready-to-release changes
+  `.haruspex/state.json` in a worktree detached at the merge commit, so where that record lands
+  (a commit to the default branch, a PR, or nowhere) is the owner's call. Default for Phase 4: not
+  built. The release `human` stage is terminal (`release-ready`), and the owner records
+  ready-to-release and deploys by hand.
 
 ---
 
