@@ -124,7 +124,7 @@ impl Gh {
             "--state",
             "open",
             "--json",
-            "number,title,body,author,labels,url,updatedAt,createdAt",
+            "number,title,body,author,labels,url,updatedAt,createdAt,state",
             "--limit",
             "20",
         ])?;
@@ -149,20 +149,29 @@ impl Gh {
             "-R",
             repo,
             "--json",
-            "number,title,body,author,labels,url,updatedAt,createdAt",
+            "number,title,body,author,labels,url,updatedAt,createdAt,state",
         ])?;
         issue::parse(&v)
     }
 
-    /// Every `labeled` event on issue `n`, oldest first.
-    pub fn label_events(&self, repo: &str, n: u64) -> Result<Vec<LabelEvent>, String> {
+    /// Issue `n`'s `labeled` events and its title renames (as edits), oldest first.
+    pub fn timeline(&self, repo: &str, n: u64) -> Result<(Vec<LabelEvent>, Vec<Edit>), String> {
         check_repo(repo)?;
         let path = format!("repos/{repo}/issues/{n}/timeline");
         let rows = self.lines(&[
             "api", "--paginate", &path, "--jq",
-            r#".[] | select(.event == "labeled") | {label: .label.name, actor: .actor.login, at: .created_at}"#,
+            r#".[] | select(.event == "labeled" or .event == "renamed") | {event: .event, label: .label.name, actor: .actor.login, at: .created_at}"#,
         ])?;
-        rows.iter().map(issue::label_event).collect()
+        let mut labels = Vec::new();
+        let mut renames = Vec::new();
+        for r in &rows {
+            if r["event"] == "renamed" {
+                renames.push(issue::rename(r)?);
+            } else {
+                labels.push(issue::label_event(r)?);
+            }
+        }
+        Ok((labels, renames))
     }
 
     /// Every edit of issue `n`'s body.

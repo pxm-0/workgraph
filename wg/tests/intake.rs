@@ -55,6 +55,24 @@ fn only_trusted_issues_are_taken_p1_first_then_oldest_and_the_claim_relabels() {
         "9": issue(9, "pxm-0", "pxm-0", &["wg:queued", "wg:pr-open"], json!([])),
     });
     issues["10"] = issue(10, "pxm-0", "pxm-0", &q, json!([]));
+    // Parked, edited by mallory while claimed, then queued again by the factory's own token.
+    let requeued = |n: u64| {
+        let mut i = issue(
+            n,
+            "pxm-0",
+            "pxm-0",
+            &q,
+            json!([{ "at": "2026-11-02T06:00:00Z", "editor": "mallory" }]),
+        );
+        i["events"] = json!([{ "label": "wg:queued", "actor": "pxm-0", "at": "2026-11-02T00:00:00Z" },
+                             { "label": "wg:queued", "actor": "pxm-0", "at": "2026-11-02T08:00:00Z" }]);
+        i
+    };
+    issues["11"] = requeued(11);
+    issues["12"] = requeued(12);
+    issues["13"] = issue(13, "pxm-0", "pxm-0", &q, json!([]));
+    issues["13"]["events"] = json!([{ "label": "wg:queued", "actor": "pxm-0", "at": "2026-11-02T00:00:00Z" },
+        { "event": "renamed", "actor": "mallory", "at": "2026-11-02T09:00:00Z" }]);
     issues["10"]["body"] = json!("x".repeat(20_001));
     fs::write(
         &state,
@@ -76,9 +94,16 @@ fn only_trusted_issues_are_taken_p1_first_then_oldest_and_the_claim_relabels() {
         ..Gh::new(b.join("fake-gh.py").to_str().unwrap(), b.join("scratch"))
     };
     let cfg = wg::config::parse("[intake]\ntrusted_actors = [\"pxm-0\"]\n").unwrap();
-    let got = intake::intake(&gh, &cfg.shift, "o/r", &intake::created(&dirs, "o/r")).unwrap();
+    let got = intake::intake(
+        &gh,
+        &cfg.shift,
+        "o/r",
+        &intake::created(&dirs, "o/r"),
+        &[11],
+    )
+    .unwrap();
     let picked: Vec<u64> = got.picked.iter().map(|i| i.number).collect();
-    assert_eq!(picked, [8, 1, 5]);
+    assert_eq!(picked, [8, 1, 5, 12]);
     let why = |n: u64| {
         got.skipped
             .iter()
@@ -93,6 +118,31 @@ fn only_trusted_issues_are_taken_p1_first_then_oldest_and_the_claim_relabels() {
     assert!(why(7).contains("created by the factory"));
     assert!(why(9).contains("wg:pr-open"));
     assert!(why(0).contains("body over 20000"), "{:?}", got.skipped);
+    assert!(
+        why(11).contains("edited by mallory"),
+        "a rerun is checked back to the owner's first label: {:?}",
+        got.skipped
+    );
+    assert!(why(13).contains("edited by mallory"), "an untrusted rename");
+
+    // Just before a claim the issue is read again: closed, un-queued or edited means no claim.
+    let still = |n: u64| {
+        intake::still_queued(
+            &gh,
+            &cfg.shift,
+            "o/r",
+            &got.picked.iter().find(|i| i.number == n).unwrap().clone(),
+        )
+    };
+    assert_eq!(still(1), None);
+    let mut st = read(&state);
+    st["issues"]["o/r"]["5"]["state"] = json!("CLOSED");
+    st["issues"]["o/r"]["8"]["labels"] = json!([{ "name": "wg:queued" }, { "name": "wg:stuck" }]);
+    st["issues"]["o/r"]["12"]["body"] = json!("do something else");
+    fs::write(&state, st.to_string()).unwrap();
+    assert!(still(5).unwrap().contains("closed"));
+    assert!(still(8).unwrap().contains("wg:stuck"));
+    assert!(still(12).unwrap().contains("changed after intake"));
 
     intake::claim(&dirs, &gh, &cfg.shift, "o/r", 1, "20261120-0130").unwrap();
     let s = read(&state);
@@ -161,7 +211,8 @@ fn recover_requeues_stale_claims_without_a_pr_and_gc_removes_merged_worktrees() 
     let q = ["wg:in-shift"];
     fs::write(&state, json!({ "origins": { "o/r": repo.join(".git") }, "issues": { "o/r": {
         "1": issue(1, "pxm-0", "pxm-0", &q, json!([])), "2": issue(2, "pxm-0", "pxm-0", &q, json!([])),
-        "3": issue(3, "pxm-0", "pxm-0", &q, json!([])) } },
+        "3": issue(3, "pxm-0", "pxm-0", &q, json!([])),
+        "4": issue(4, "pxm-0", "pxm-0", &["wg:in-shift", "wg:stuck"], json!([])) } },
         "prs": [{ "repo": "o/r", "number": 100, "url": "https://github.com/o/r/pull/100", "state": "MERGED",
                   "headRefName": "wg/2-two" }] }).to_string()).unwrap();
     let wt = wg::git::worktree(&repo, &dirs.worktrees(), "o__r/2-two", "wg/2-two", "main").unwrap();
@@ -185,6 +236,11 @@ fn recover_requeues_stale_claims_without_a_pr_and_gc_removes_merged_worktrees() 
     record::save(&dirs, &rec(2, "wg/2-two", old, Some(100), &wt)).unwrap();
     record::save(
         &dirs,
+        &rec(4, "wg/4-four", old, None, Path::new("/nonexistent")),
+    )
+    .unwrap();
+    record::save(
+        &dirs,
         &rec(
             3,
             "wg/3-three",
@@ -199,7 +255,11 @@ fn recover_requeues_stale_claims_without_a_pr_and_gc_removes_merged_worktrees() 
     assert_eq!(
         out["recovered"],
         json!([{ "repo": "o/r", "issue": 1 }]),
-        "#2 has a PR, #3 is fresh"
+        "#2 has a PR, #3 is fresh, #4 already carries wg:stuck"
+    );
+    assert_eq!(
+        read(&state)["issues"]["o/r"]["4"]["labels"],
+        json!([{ "name": "wg:in-shift" }, { "name": "wg:stuck" }])
     );
     let s = read(&state);
     assert_eq!(

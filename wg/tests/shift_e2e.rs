@@ -134,6 +134,15 @@ fn a_shift_turns_queued_issues_into_draft_prs_decisions_and_a_report() {
     assert_eq!(r["needsYou"]["decisions"][0]["issue"], 3);
     assert_eq!(r["needsYou"]["approvals"][0]["verified"], true);
     assert_eq!(r["needsYou"]["approvals"][0]["reviewed"], true);
+    let a = &r["needsYou"]["approvals"][0];
+    assert_eq!(
+        (a["title"].as_str(), a["pr"].as_u64()),
+        (Some("Fix add so it adds"), Some(100))
+    );
+    assert_eq!(
+        a["criteria"][0],
+        json!({ "id": "AC-001", "status": "passed", "evidence": ["check:test"] })
+    );
     assert!(r["skippedIssues"][0]["why"]
         .as_str()
         .unwrap()
@@ -157,6 +166,12 @@ fn a_shift_turns_queued_issues_into_draft_prs_decisions_and_a_report() {
         .unwrap();
     assert!(md.find("### Incidents").unwrap() < md.find("### Decisions").unwrap());
     assert!(md.contains("/workgraph:shift decide o/r#3"));
+    assert!(
+        md.contains("- #100 Fix add so it adds (o/r#1)")
+            && md.contains("AC-001 passed")
+            && md.contains("`/workgraph:work approve o/r#100`"),
+        "{md}"
+    );
 
     // The decide round trip: the answer is stored, the issue queued, and the next shift ships it.
     let answers = f.base.join("answers.json");
@@ -270,9 +285,15 @@ fn stop_file_max_tasks_and_a_rate_limit_without_fallback_stop_intake() {
         (0, Some("the STOP file exists"))
     );
     std::fs::remove_file(f.home.join(".workgraph/STOP")).unwrap();
+    // A shift that died holding the lock is reported.
+    std::fs::write(f.home.join(".workgraph/shift.lock"), "999999999 1\n").unwrap();
 
     let out = f.shift();
     assert_eq!(out["tasks"], 1);
+    assert_eq!(
+        f.report(out["shift"].as_str().unwrap())["staleLockPid"],
+        999999999
+    );
     assert_eq!(out["stopped"], json!(["max_tasks (1) reached"]));
     assert_eq!(f.labels("o/r", 2), ["wg:queued"]);
 

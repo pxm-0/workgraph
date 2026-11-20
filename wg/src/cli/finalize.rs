@@ -87,6 +87,15 @@ pub fn finalize_at(
     if let Some(w) = contract::weakened(&meta.contract, &now, &meta.decided) {
         return refuse(format!("incident: {w}"));
     }
+    // The CHECKS pin (design §9.3, §9.5 step 1) holds before any approval is recorded.
+    let project = hx.project_commands()?;
+    if let Some((name, _)) = meta
+        .pins
+        .iter()
+        .find(|(name, cmd)| project.get(name.as_str()) != Some(*cmd))
+    {
+        return refuse(format!("check {name} changed in project.json since Read"));
+    }
     let head = git::head(repo)?;
     let approval = HumanApproval::new(&meta.task_id, &head, by);
     let staged: Vec<String> = git::dirty_in(repo)?

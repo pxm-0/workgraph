@@ -175,6 +175,7 @@ pub fn run(args: &[String]) -> Result<Value, String> {
         pipeline,
         start_branch: git::branch(&repo)?,
         initializing: !repo.join(".haruspex").exists(),
+        baseline_floor: None,
     };
     let ran = driver::run_task(&ctx, start, &wg_factory::engine::step)?;
     persist(&ctx, &dirs, &ran)?;

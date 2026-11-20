@@ -239,6 +239,43 @@ pub fn push_task_branch(dir: &Path, branch: &str) -> Result<(), String> {
     retried(|| git(dir, &["push", "-q", "-u", "origin", &spec], &[])).map(|_| ())
 }
 
+/// Paths the worktree at `dir` changes from where it forked off `base`: committed since the merge
+/// base, plus uncommitted and untracked ones.
+pub fn changed_since(dir: &Path, base: &str) -> Result<Vec<String>, String> {
+    let fork = git(dir, &["merge-base", base, "HEAD"], &[])?;
+    let committed = git(dir, &["diff", "--name-only", "-z", &fork, "HEAD"], &[])?;
+    let mut out: Vec<String> = committed
+        .split('\0')
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect();
+    for f in dirty_in(dir)? {
+        if !out.contains(&f) {
+            out.push(f);
+        }
+    }
+    Ok(out)
+}
+
+/// sha256 of the blob `rev:path`, or `None` when it does not exist there.
+pub fn blob_sha256(repo: &Path, rev: &str, path: &str) -> Result<Option<String>, String> {
+    if !exists_at(repo, rev, path) {
+        return Ok(None);
+    }
+    let out = Command::new("git")
+        .args(["cat-file", "blob", &format!("{rev}:{path}")])
+        .current_dir(repo)
+        .output()
+        .map_err(|e| format!("git cat-file failed to start: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git cat-file {rev}:{path} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(Some(format!("{:x}", Sha256::digest(&out.stdout))))
+}
+
 /// Paths from `git status --porcelain=v1 -z`; for renames and copies, the new path.
 pub fn dirty() -> Result<Vec<String>, String> {
     dirty_in(Path::new("."))

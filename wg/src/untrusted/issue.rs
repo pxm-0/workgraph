@@ -20,6 +20,8 @@ pub struct Issue {
     pub labels: Vec<String>,
     pub url: String,
     pub created_at: String,
+    /// `OPEN` or `CLOSED`.
+    pub state: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -100,6 +102,10 @@ pub fn parse(v: &Value) -> Result<Issue, String> {
         labels,
         url: url.to_string(),
         created_at: timestamp(&v["createdAt"], &what)?,
+        state: match v["state"].as_str() {
+            Some(s @ ("OPEN" | "CLOSED")) => s.to_string(),
+            _ => return Err(format!("{what}: bad state")),
+        },
     })
 }
 
@@ -122,13 +128,26 @@ pub fn edit(v: &Value) -> Result<Edit, String> {
     })
 }
 
-/// Why the issue is not work, or the time of the trusted `label` event it is queued by.
+/// A title rename from the timeline, checked like a body edit: the title reaches the prompt, the
+/// PR title and the branch name.
+pub fn rename(v: &Value) -> Result<Edit, String> {
+    Ok(Edit {
+        at: timestamp(&v["at"], "rename")?,
+        editor: login(&v["actor"], "rename").unwrap_or_else(|_| "ghost".into()),
+    })
+}
+
+/// Why the issue is not work, or the time of the trusted `label` event it is queued by. Edits and
+/// renames count from the latest queue event, or with `since_first` from the earliest: a rerun of
+/// an issue the factory itself queued again (park, decide, recover) is checked back to the
+/// owner's first label, since each factory requeue is a newer trusted event.
 pub fn trusted(
     i: &Issue,
     label: &str,
     events: &[LabelEvent],
     edits: &[Edit],
     trusted: &[String],
+    since_first: bool,
 ) -> Result<String, String> {
     let ok = |who: &str| trusted.iter().any(|t| t == who);
     if !ok(&i.author) {
@@ -148,7 +167,20 @@ pub fn trusted(
             last.actor
         ));
     }
-    if let Some(e) = edits.iter().find(|e| e.at >= last.at && !ok(&e.editor)) {
+    let anchor = if since_first {
+        events
+            .iter()
+            .filter(|e| e.label == label)
+            .map(|e| e.at.as_str())
+            .min()
+            .unwrap_or(last.at.as_str())
+    } else {
+        last.at.as_str()
+    };
+    if let Some(e) = edits
+        .iter()
+        .find(|e| e.at.as_str() >= anchor && !ok(&e.editor))
+    {
         return Err(format!("edited by {} after labelling", e.editor));
     }
     Ok(last.at.clone())
@@ -203,7 +235,7 @@ mod tests {
     fn issue(author: &str) -> Issue {
         parse(&json!({ "number": 42, "title": "Add a thing", "body": "do it", "author": { "login": author },
             "labels": [{ "name": "wg:queued" }], "url": "https://github.com/o/r/issues/42",
-            "createdAt": "2026-11-01T10:00:00Z" }))
+            "createdAt": "2026-11-01T10:00:00Z", "state": "OPEN" }))
         .unwrap()
     }
 
@@ -218,7 +250,7 @@ mod tests {
     #[test]
     fn parse_rejects_each_bad_field() {
         let good = json!({ "number": 1, "title": "t", "body": "", "author": { "login": "pxm-0" },
-            "labels": [], "url": "https://x/1", "createdAt": "2026-11-01T10:00:00Z" });
+            "labels": [], "url": "https://x/1", "createdAt": "2026-11-01T10:00:00Z", "state": "OPEN" });
         assert!(parse(&good).is_ok());
         let cases = [
             ("number", json!(0), "no number"),
@@ -228,6 +260,7 @@ mod tests {
             ("labels", json!([{ "nope": 1 }]), "bad label"),
             ("url", json!("javascript:alert(1)"), "bad url"),
             ("createdAt", json!("yesterday"), "bad timestamp"),
+            ("state", json!("MERGED"), "bad state"),
         ];
         for (k, v, want) in cases {
             let mut bad = good.clone();
@@ -256,33 +289,63 @@ mod tests {
         let i = issue("pxm-0");
         let at = "2026-11-02T00:00:00Z";
         assert_eq!(
-            trusted(&i, "wg:queued", &[ev("pxm-0", at)], &[], &t).unwrap(),
+            trusted(&i, "wg:queued", &[ev("pxm-0", at)], &[], &t, false).unwrap(),
             at
         );
-        assert!(
-            trusted(&issue("stranger"), "wg:queued", &[ev("pxm-0", at)], &[], &t)
-                .unwrap_err()
-                .contains("written by stranger")
-        );
+        assert!(trusted(
+            &issue("stranger"),
+            "wg:queued",
+            &[ev("pxm-0", at)],
+            &[],
+            &t,
+            false
+        )
+        .unwrap_err()
+        .contains("written by stranger"));
         let relabelled = [ev("pxm-0", at), ev("triager", "2026-11-03T00:00:00Z")];
-        assert!(trusted(&i, "wg:queued", &relabelled, &[], &t)
+        assert!(trusted(&i, "wg:queued", &relabelled, &[], &t, false)
             .unwrap_err()
             .contains("labelled wg:queued by triager"));
-        assert!(trusted(&i, "wg:queued", &[], &[], &t)
+        assert!(trusted(&i, "wg:queued", &[], &[], &t, false)
             .unwrap_err()
             .contains("no wg:queued"));
         let before = Edit {
             at: "2026-11-01T12:00:00Z".into(),
             editor: "stranger".into(),
         };
-        assert!(trusted(&i, "wg:queued", &[ev("pxm-0", at)], &[before], &t).is_ok());
+        assert!(trusted(&i, "wg:queued", &[ev("pxm-0", at)], &[before], &t, false).is_ok());
         let after = Edit {
             at: "2026-11-02T05:00:00Z".into(),
             editor: "stranger".into(),
         };
-        assert!(trusted(&i, "wg:queued", &[ev("pxm-0", at)], &[after], &t)
+        assert!(trusted(
+            &i,
+            "wg:queued",
+            &[ev("pxm-0", at)],
+            std::slice::from_ref(&after),
+            &t,
+            false
+        )
+        .unwrap_err()
+        .contains("edited by stranger after labelling"));
+        // A factory requeue is a newer trusted event: only a rerun's check back to the first
+        // label still sees the edit made while the task was claimed.
+        let requeued = [ev("pxm-0", at), ev("pxm-0", "2026-11-04T00:00:00Z")];
+        assert!(trusted(
+            &i,
+            "wg:queued",
+            &requeued,
+            std::slice::from_ref(&after),
+            &t,
+            false
+        )
+        .is_ok());
+        assert!(trusted(&i, "wg:queued", &requeued, &[after], &t, true)
             .unwrap_err()
-            .contains("edited by stranger after labelling"));
+            .contains("edited by stranger"));
+        let renamed =
+            rename(&json!({ "actor": "stranger", "at": "2026-11-05T00:00:00Z" })).unwrap();
+        assert!(trusted(&i, "wg:queued", &requeued, &[renamed], &t, false).is_err());
     }
 
     #[test]

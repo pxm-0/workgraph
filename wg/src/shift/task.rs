@@ -65,6 +65,14 @@ pub struct Done {
     pub escalations: Value,
 }
 
+impl Done {
+    /// Parked because the shift stopped mid-task: the task stays claimed and `wg shift resume`
+    /// replays what its run already got (design §7.3 step 9).
+    pub fn resumable(&self) -> bool {
+        self.kind == Kind::Parked && self.reason.starts_with("shift stopped")
+    }
+}
+
 fn done(kind: Kind, run: Option<&str>, reason: impl Into<String>) -> Done {
     Done {
         kind,
@@ -84,14 +92,13 @@ pub fn stop_reason(stop_file: &Path, deadline: u64) -> Option<String> {
     (now() >= deadline).then(|| "the shift window closed".into())
 }
 
-/// Project agent config in the worktree that the owner did not allowlist (design §5.1).
-pub fn project_config_problem(repo: &RepoCfg, worktree: &Path) -> Result<Option<String>, String> {
+/// Project agent config the owner did not allowlist (design §5.1), given each file's sha256.
+pub fn config_problem(
+    repo: &RepoCfg,
+    sha_of: impl Fn(&str) -> Result<Option<String>, String>,
+) -> Result<Option<String>, String> {
     for rel in PROJECT_CONFIG {
-        let p = worktree.join(rel);
-        if !p.exists() {
-            continue;
-        }
-        let sha = crate::haruspex::cli::sha256_file(&p)?;
+        let Some(sha) = sha_of(rel)? else { continue };
         if !repo
             .allow_project_config
             .iter()
@@ -103,6 +110,16 @@ pub fn project_config_problem(repo: &RepoCfg, worktree: &Path) -> Result<Option<
         }
     }
     Ok(None)
+}
+
+/// `config_problem` for the files in a worktree.
+pub fn project_config_problem(repo: &RepoCfg, worktree: &Path) -> Result<Option<String>, String> {
+    config_problem(repo, |rel| {
+        let p = worktree.join(rel);
+        p.exists()
+            .then(|| crate::haruspex::cli::sha256_file(&p))
+            .transpose()
+    })
 }
 
 fn compose(repo: &RepoCfg, cmd: &str) -> String {
@@ -117,7 +134,7 @@ fn fence(text: &str) -> String {
 }
 
 /// The issue comment for an outcome. LLM-written text is fenced as data, never markdown.
-fn comment(repo: &str, n: u64, d: &Done) -> String {
+fn comment(repo: &str, n: u64, shift: &str, d: &Done) -> String {
     match d.kind {
         Kind::Pr => format!("Draft PR: {}", d.pr_url.as_deref().unwrap_or("")),
         Kind::NeedsDecision => {
@@ -148,6 +165,11 @@ fn comment(repo: &str, n: u64, d: &Done) -> String {
                 .unwrap_or("integrity");
             format!("An incident aborted this task (class: {class}). The shift stopped; details are in the owner's journal.")
         }
+        Kind::Parked if d.resumable() => format!(
+            "workgraph parked this task when the shift stopped; it stays claimed. Resume it with `wg shift resume {}`:\n\n{}",
+            shift,
+            fence(&d.reason)
+        ),
         Kind::Stuck | Kind::Parked => {
             format!("workgraph {}:\n\n{}", d.kind.name(), fence(&d.reason))
         }
@@ -166,11 +188,15 @@ fn write_back(
         Kind::Pr => ("wg:pr-open", "pr-open"),
         Kind::NeedsDecision => ("wg:needs-decision", "needs-decision"),
         Kind::Stuck => ("wg:stuck", "stuck"),
+        // Still claimed by this shift: no other shift takes it, `wg shift resume` does.
+        Kind::Parked if d.resumable() => (IN_SHIFT, "in-shift"),
         Kind::Parked => (e.cfg.shift.label.as_str(), "parked"),
         Kind::Incident => ("wg:incident", "incident"),
     };
-    intake::relabel(e.dirs, e.gh, repo, n, &[add], &[IN_SHIFT])?;
-    e.gh.comment(repo, n, &comment(repo, n, d))?;
+    if add != IN_SHIFT {
+        intake::relabel(e.dirs, e.gh, repo, n, &[add], &[IN_SHIFT])?;
+    }
+    e.gh.comment(repo, n, &comment(repo, n, e.shift_id, d))?;
     let pr = d
         .pr_url
         .as_deref()
@@ -193,6 +219,12 @@ pub fn work(e: &Env, repo: &RepoCfg, i: &Issue, resume: bool) -> Result<Done, St
     if !resume {
         intake::claim(e.dirs, e.gh, &e.cfg.shift, &repo.name, i.number, e.shift_id)?;
     }
+    // Journalled before the worktree and the install, so a shift killed there is resumable.
+    let run_id = format!("r-{}", tokens_store::random_hex(6)?);
+    e.journal.append(
+        "task_claimed",
+        json!({ "repo": repo.name, "issue": i.number, "run": run_id, "resume": resume }),
+    )?;
     let branch = existing
         .as_ref()
         .map(|r| r.branch.clone())
@@ -223,8 +255,9 @@ pub fn work(e: &Env, repo: &RepoCfg, i: &Issue, resume: bool) -> Result<Done, St
         ..existing.clone().unwrap_or_default()
     };
     record::save(e.dirs, &rec)?;
+    // A backstop to the repo preflight: the claim is released, and it is no task failure.
     if let Some(problem) = project_config_problem(repo, &worktree)? {
-        let d = done(Kind::Stuck, None, problem);
+        let d = done(Kind::Parked, None, problem);
         write_back(e, &repo.name, i.number, rec, &d)?;
         return Ok(d);
     }
@@ -272,21 +305,37 @@ pub fn work(e: &Env, repo: &RepoCfg, i: &Issue, resume: bool) -> Result<Done, St
         }
         _ => Replay::none(),
     };
-    let run_id = format!("r-{}", tokens_store::random_hex(6)?);
+    let floor = first_baseline(e.dirs, &rec.runs);
     let rec = TaskRecord {
         runs: rec.runs.iter().cloned().chain([run_id.clone()]).collect(),
         ..rec
     };
     record::save(e.dirs, &rec)?;
-    e.journal.append(
-        "task_claimed",
-        json!({ "repo": repo.name, "issue": i.number, "run": run_id, "resume": resume }),
-    )?;
-    let (d, ran_rec) = run(e, repo, i, rec, &worktree, &run_id, replay)?;
+    let (d, ran_rec) = run(e, repo, i, rec, &worktree, &run_id, replay, floor)?;
     write_back(e, &repo.name, i.number, ran_rec, &d)?;
     Ok(d)
 }
 
+/// The checks that failed at this task's first baseline, which ran on the fresh worktree before
+/// any Worker edit (the kernel orders the baseline first). `None` before any baseline ran.
+pub fn first_baseline(dirs: &Dirs, runs: &[String]) -> Option<Vec<String>> {
+    runs.iter().find_map(|r| {
+        let journal = crate::journal::read(&dirs.run(r).join("journal.jsonl")).ok()?;
+        let e = journal
+            .iter()
+            .find(|e| e["kind"] == "checks_run" && e["label"] == "check:baseline")?;
+        Some(
+            e["results"]
+                .as_array()?
+                .iter()
+                .filter(|x| x["exit"] != 0)
+                .filter_map(|x| x["name"].as_str().map(str::to_string))
+                .collect(),
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run(
     e: &Env,
     repo: &RepoCfg,
@@ -295,6 +344,7 @@ fn run(
     worktree: &Path,
     run_id: &str,
     replay: Replay,
+    baseline_floor: Option<Vec<String>>,
 ) -> Result<(Done, TaskRecord), String> {
     let dirs = e.dirs;
     let run_dir = dirs.run(run_id);
@@ -376,6 +426,7 @@ fn run(
         pipeline,
         start_branch: rec.branch.clone(),
         initializing: !worktree.join(".haruspex").exists(),
+        baseline_floor,
     };
     let ran = driver::run_task(&ctx, start, &wg_factory::engine::step)?;
     crate::cli::run::persist(&ctx, dirs, &ran)?;
@@ -423,7 +474,9 @@ fn outcome(ran: &driver::Ran, out: &Value, run_id: &str) -> Done {
     let run = Some(run_id);
     let note = out["note"].as_str().unwrap_or("").to_string();
     match &ran.end {
-        End::Finish(_) if ran.published.is_some() => Done {
+        End::Incident(why) => done(Kind::Incident, run, why.clone()),
+        // A draft PR exists: the task is a PR whatever ended the run after it.
+        _ if ran.published.is_some() => Done {
             pr_url: ran.published.clone(),
             ..done(Kind::Pr, run, "draft PR opened")
         },
@@ -431,7 +484,6 @@ fn outcome(ran: &driver::Ran, out: &Value, run_id: &str) -> Done {
             escalations: out["escalations"].clone(),
             ..done(Kind::NeedsDecision, run, "needs a decision")
         },
-        End::Incident(why) => done(Kind::Incident, run, why.clone()),
         End::Parked(why) => Done {
             rate_limited: why.starts_with("rate limited"),
             ..done(Kind::Parked, run, why.clone())
@@ -466,7 +518,7 @@ mod tests {
     fn comments_fence_agent_text_and_name_only_the_incident_class() {
         let mut d = done(Kind::NeedsDecision, None, "x");
         d.escalations = json!([{ "id": "E1", "severity": "critical", "question": "drop ```table``` @everyone?", "recommendation": "no" }]);
-        let c = comment("o/r", 3, &d);
+        let c = comment("o/r", 3, "s1", &d);
         assert!(
             c.contains("```text\ndrop '''table''' @everyone?\n```"),
             "{c}"
@@ -475,6 +527,7 @@ mod tests {
         let i = comment(
             "o/r",
             3,
+            "s1",
             &done(
                 Kind::Incident,
                 None,
@@ -482,10 +535,20 @@ mod tests {
             ),
         );
         assert!(i.contains("class: guard") && !i.contains("secret path"));
-        assert!(comment("o/r", 3, &done(Kind::Stuck, None, "why")).contains("```text\nwhy\n```"));
+        assert!(
+            comment("o/r", 3, "s1", &done(Kind::Stuck, None, "why")).contains("```text\nwhy\n```")
+        );
+        let parked = comment(
+            "o/r",
+            3,
+            "s1",
+            &done(Kind::Parked, None, "shift stopped: the STOP file exists"),
+        );
+        assert!(parked.contains("`wg shift resume s1`"), "{parked}");
+        assert!(!done(Kind::Parked, None, "call cap").resumable());
         let mut pr = done(Kind::Pr, None, "");
         pr.pr_url = Some("https://x/pull/4".into());
-        assert_eq!(comment("o/r", 3, &pr), "Draft PR: https://x/pull/4");
+        assert_eq!(comment("o/r", 3, "s1", &pr), "Draft PR: https://x/pull/4");
     }
 
     #[test]
@@ -515,5 +578,35 @@ mod tests {
         .unwrap();
         assert_eq!(project_config_problem(&allowed, &dir).unwrap(), None);
         assert_eq!(compose(&allowed, "run x"), "run x");
+    }
+
+    #[test]
+    fn the_first_baseline_of_a_task_bounds_what_a_rerun_may_leave_out() {
+        let home = std::env::temp_dir().join(format!("wg-task-floor-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let dirs = Dirs { home };
+        let runs = ["r-a", "r-b", "r-c"].map(String::from);
+        assert_eq!(first_baseline(&dirs, &runs), None);
+        let journal = |run: &str, results: Value| {
+            std::fs::create_dir_all(dirs.run(run)).unwrap();
+            let j = Journal::open(&dirs.run(run).join("journal.jsonl"), run).unwrap();
+            j.append("checks_run", json!({ "label": "check:L1", "results": [] }))
+                .unwrap();
+            j.append(
+                "checks_run",
+                json!({ "label": "check:baseline", "results": results }),
+            )
+            .unwrap();
+        };
+        // r-a never reached its baseline (no journal); r-b's is the first; r-c ran on edits.
+        journal(
+            "r-b",
+            json!([{ "name": "test", "exit": 0 }, { "name": "lint", "exit": 1 }]),
+        );
+        journal(
+            "r-c",
+            json!([{ "name": "test", "exit": 1 }, { "name": "lint", "exit": 1 }]),
+        );
+        assert_eq!(first_baseline(&dirs, &runs), Some(vec!["lint".to_string()]));
     }
 }

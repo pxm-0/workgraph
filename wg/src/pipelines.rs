@@ -228,17 +228,32 @@ pub fn load(text: &str, max_calls: u32) -> Result<PipelineDef, String> {
     })
 }
 
-/// The publish stage: draft by default, at most 5 labels, never one that queues self work.
+/// The only labels a shift PR may carry. The pipeline is editable and auto-merges (D2), so it never
+/// picks a `wg:*` state label or a repo's own label-triggered automation (design §9.5).
+pub const PUBLISH_LABELS: [&str; 1] = ["wg:awaiting-approval"];
+
+/// The publish stage: always a draft (only `wg approve` makes a shift PR ready), labels only from
+/// `PUBLISH_LABELS`.
 fn publish(s: &Stage) -> Result<PublishDef, String> {
-    let labels = s.labels.clone().unwrap_or_default();
-    if labels.len() > 5 {
-        return Err(format!("stage {}: at most 5 labels", s.id));
+    if s.draft == Some(false) {
+        return Err(format!(
+            "stage {}: a shift PR is always a draft; only wg approve makes it ready",
+            s.id
+        ));
     }
+    let labels = s.labels.clone().unwrap_or_default();
     for l in &labels {
         crate::ids::gh_label(l).map_err(|e| format!("stage {}: {e}", s.id))?;
+        if !PUBLISH_LABELS.contains(&l.as_str()) {
+            return Err(format!(
+                "stage {}: a shift PR may carry only {}, not {l}",
+                s.id,
+                PUBLISH_LABELS.join(", ")
+            ));
+        }
     }
     Ok(PublishDef {
-        draft: s.draft.unwrap_or(true),
+        draft: true,
         labels,
     })
 }
@@ -323,6 +338,24 @@ mod tests {
             (
                 DEV_PIPELINE.replace("labels = [\"wg:awaiting-approval\"]", "labels = [\"a b\"]"),
                 "label",
+            ),
+            (
+                DEV_PIPELINE.replace("draft = true", "draft = false"),
+                "always a draft",
+            ),
+            (
+                DEV_PIPELINE.replace(
+                    "labels = [\"wg:awaiting-approval\"]",
+                    "labels = [\"wg:verified\"]",
+                ),
+                "may carry only",
+            ),
+            (
+                DEV_PIPELINE.replace(
+                    "labels = [\"wg:awaiting-approval\"]",
+                    "labels = [\"automerge\"]",
+                ),
+                "may carry only",
             ),
             (
                 DEV_PIPELINE.replace("draft = true", "draft = true\nprompt = \"read\""),

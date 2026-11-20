@@ -64,10 +64,23 @@ fn spend(dirs: &Dirs, runs: &BTreeMap<String, String>) -> Result<Value, String> 
     }))
 }
 
-/// Per run: guard denials, rejected rules and warnings, from its journal and guard log.
+fn output(dirs: &Dirs, run: Option<&str>) -> Value {
+    run.and_then(|r| std::fs::read_to_string(dirs.run(r).join("output.json")).ok())
+        .and_then(|x| serde_json::from_str(&x).ok())
+        .unwrap_or(Value::Null)
+}
+
+/// The PR number at the end of a PR URL.
+fn pr_number(url: &Value) -> Option<u64> {
+    url.as_str()?.rsplit('/').next()?.parse().ok()
+}
+
+/// Per run: guard denials, rules added, revised, pruned and rejected, and replayed answers, from
+/// its journal, output and guard log.
 fn run_notes(dirs: &Dirs, run: &str) -> Value {
     let dir = dirs.run(run);
     let events = journal::read(&dir.join("journal.jsonl")).unwrap_or_default();
+    let rules = &output(dirs, Some(run))["rules"];
     let denials = std::fs::read_to_string(dir.join("guard.jsonl"))
         .unwrap_or_default()
         .lines()
@@ -75,6 +88,9 @@ fn run_notes(dirs: &Dirs, run: &str) -> Value {
         .count();
     json!({
         "guardDenials": denials,
+        "rulesAdded": rules["added"].as_array().cloned().unwrap_or_default(),
+        "rulesRevised": rules["revised"].as_array().cloned().unwrap_or_default(),
+        "rulesPruned": rules["pruned"].as_array().cloned().unwrap_or_default(),
         "rulesRejected": events.iter().filter(|e| e["kind"] == "rule_rejected").map(|e| e["rule"].clone()).collect::<Vec<_>>(),
         "replayed": events.iter().filter(|e| e["kind"] == "llm_replayed").count(),
     })
@@ -97,8 +113,10 @@ pub fn build(dirs: &Dirs, id: &str) -> Result<Value, String> {
             .cloned()
             .collect::<Vec<_>>()
     };
+    // Every run the shift started, claimed ones too: an interrupted run a resume replaced, or one
+    // that ended in a kernel error, still paid for its calls.
     let mut runs = BTreeMap::new();
-    for t in &tasks {
+    for t in of("task_claimed").iter().chain(&tasks) {
         if let Some(r) = t["run"].as_str() {
             runs.insert(r.to_string(), format!("{}#{}", s(t, "repo"), t["issue"]));
         }
@@ -106,13 +124,11 @@ pub fn build(dirs: &Dirs, id: &str) -> Result<Value, String> {
     let approvals: Vec<Value> = pick("pr-open")
         .iter()
         .map(|t| {
-            let out: Value = t["run"]
-                .as_str()
-                .and_then(|r| std::fs::read_to_string(dirs.run(r).join("output.json")).ok())
-                .and_then(|x| serde_json::from_str(&x).ok())
-                .unwrap_or(Value::Null);
-            json!({ "repo": t["repo"], "issue": t["issue"], "pr": t["pr"], "run": t["run"],
+            let out = output(dirs, t["run"].as_str());
+            json!({ "repo": t["repo"], "issue": t["issue"], "title": t["title"], "pr": pr_number(&t["pr"]),
+                    "url": t["pr"], "run": t["run"],
                     "verified": out["verified"], "reviewed": out["reviewed"], "review": out["review"],
+                    "criteria": out["review"]["criteria"],
                     "checks": out["checks"], "checksAlreadyFailing": out["checksAlreadyFailing"],
                     "risky": out["skipped"], "spend": out["spend"] })
         })
@@ -124,6 +140,7 @@ pub fn build(dirs: &Dirs, id: &str) -> Result<Value, String> {
     Ok(json!({
         "shift": id,
         "binary": events.first().map(|e| e["binary"].clone()),
+        "staleLockPid": events.first().map(|e| e["stale_lock_pid"].clone()),
         "stopped": of("stopped").iter().map(|e| e["why"].clone()).collect::<Vec<_>>(),
         "needsYou": {
             "incidents": pick("incident"),
@@ -180,20 +197,63 @@ pub fn markdown(r: &Value) -> String {
         )
     };
     let approval = |a: &Value| {
-        format!("- {} ({}#{}): verified {}, reviewed {}, checks {}, already failing {}. Approve with `/workgraph:work approve {}#<pr>`",
-        a["pr"].as_str().unwrap_or("?"), s(a, "repo"), a["issue"], a["verified"], a["reviewed"], a["checks"], a["checksAlreadyFailing"], s(a, "repo"))
+        let pr = a["pr"].as_u64().map_or("?".to_string(), |n| n.to_string());
+        let criteria: Vec<String> = a["criteria"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|c| format!("{} {}", s(c, "id"), s(c, "status")))
+            .collect();
+        format!("- #{pr} {} ({}#{}): verified {}, reviewed {}, criteria [{}], checks {}, already failing {}. Approve with `/workgraph:work approve {}#{pr}`",
+        crate::ids::one_line(a["title"].as_str().unwrap_or(""), 120), s(a, "repo"), a["issue"], a["verified"], a["reviewed"],
+        criteria.join(", "), a["checks"], a["checksAlreadyFailing"], s(a, "repo"))
+    };
+    let parked = |t: &Value| {
+        let resume = if t["resumable"] == true {
+            format!(" Resume with `wg shift resume {}`.", s(r, "shift"))
+        } else {
+            String::new()
+        };
+        format!("{}{resume}", task_line(t))
+    };
+    let rules: Vec<String> = r["runs"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(run, n)| {
+            let ids = |k: &str| {
+                n[k].as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|x| crate::ids::one_line(x.as_str().unwrap_or("?"), 64))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            format!(
+                "- {run}: added [{}], revised [{}], pruned [{}], rejected [{}]",
+                ids("rulesAdded"),
+                ids("rulesRevised"),
+                ids("rulesPruned"),
+                ids("rulesRejected")
+            )
+        })
+        .collect();
+    let stale = match r["staleLockPid"].as_u64() {
+        Some(pid) => format!("\n\nThe previous shift (pid {pid}) died holding the lock."),
+        None => String::new(),
     };
     format!(
-        "# Shift {}\n\nStopped: {}\n\n## Needs you\n\n### Incidents\n{}\n\n### Decisions\n{}\n\n### Approvals\n{}\n\n### Parked\n{}\n\n## Stuck\n{}\n\n## Skipped\n{}\n{}\n\n## Spend\n\nTotal ${} (calls with unknown cost: {})\n\n```json\n{}\n```\n",
+        "# Shift {}\n\nStopped: {}{stale}\n\n## Needs you\n\n### Incidents\n{}\n\n### Decisions\n{}\n\n### Approvals\n{}\n\n### Parked\n{}\n\n## Stuck\n{}\n\n## Skipped\n{}\n{}\n\n## Rules\n{}\n\n## Spend\n\nTotal ${} (calls with unknown cost: {})\n\n```json\n{}\n```\n",
         s(r, "shift"),
         r["stopped"],
         list(&n["incidents"], &task_line),
         list(&n["decisions"], &decision),
         list(&n["approvals"], &approval),
-        list(&n["parked"], &task_line),
+        list(&n["parked"], &parked),
         list(&r["stuck"], &task_line),
         list(&r["skippedRepos"], &|e| format!("- repo {}: {}", s(e, "repo"), s(e, "why"))),
         list(&r["skippedIssues"], &|e| format!("- {}#{}: {}", s(e, "repo"), e["issue"], s(e, "why"))),
+        if rules.is_empty() { "- none".to_string() } else { rules.join("\n") },
         r["spend"]["usd"],
         r["spend"]["callsWithUnknownCost"],
         serde_json::to_string_pretty(&json!({ "byProvider": r["spend"]["byProvider"], "byStage": r["spend"]["byStage"],
@@ -254,8 +314,16 @@ mod tests {
         let dir = dirs.shifts().join("20261120-0130");
         std::fs::create_dir_all(&dir).unwrap();
         let j = Journal::open(&dir.join("journal.jsonl"), "20261120-0130").unwrap();
-        j.append("shift_started", json!({ "binary": "b1" }))
-            .unwrap();
+        j.append(
+            "shift_started",
+            json!({ "binary": "b1", "stale_lock_pid": 4242 }),
+        )
+        .unwrap();
+        j.append(
+            "task_claimed",
+            json!({ "repo": "o/r", "issue": 5, "run": "r-5" }),
+        )
+        .unwrap();
         j.append(
             "issue_skipped",
             json!({ "repo": "o/r", "issue": 9, "why": "labelled wg:queued by stranger" }),
@@ -284,6 +352,7 @@ mod tests {
                 led("r-2", "anthropic-api", json!(500)),
                 led("r-2", "openrouter", json!("unknown")),
                 led("other", "subscription", json!(9)),
+                led("r-5", "subscription", json!(2000)),
             ]
             .join("\n"),
         )
@@ -291,7 +360,7 @@ mod tests {
         std::fs::create_dir_all(dirs.run("r-1")).unwrap();
         std::fs::write(
             dirs.run("r-1").join("output.json"),
-            r#"{"verified":true,"reviewed":true,"checks":["test"]}"#,
+            r#"{"verified":true,"reviewed":true,"checks":["test"],"review":{"criteria":[{"id":"AC-1","status":"passed"}]},"rules":{"added":["r9"],"revised":[],"pruned":["r2"]}}"#,
         )
         .unwrap();
         let out = write(&dirs, "20261120-0130").unwrap();
@@ -299,17 +368,24 @@ mod tests {
             out["needsYou"],
             json!({ "incidents": 1, "decisions": 1, "approvals": 1, "parked": 1 })
         );
-        assert_eq!(out["spendUsd"], json!(0.0015));
+        assert_eq!(
+            out["spendUsd"],
+            json!(0.0035),
+            "a claimed run that never finished still counts"
+        );
         let r: Value =
             serde_json::from_str(&std::fs::read_to_string(dir.join("report.json")).unwrap())
                 .unwrap();
         assert_eq!(r["spend"]["callsWithUnknownCost"], 1);
-        assert_eq!(r["spend"]["byProvider"]["subscription/opus"]["calls"], 1);
+        assert_eq!(r["spend"]["byProvider"]["subscription/opus"]["calls"], 2);
         assert_eq!(
             r["spend"]["byTask"]["o/r#2/anthropic-api"]["usd"],
             json!(0.0005)
         );
         assert_eq!(r["needsYou"]["approvals"][0]["verified"], true);
+        assert_eq!(r["needsYou"]["approvals"][0]["pr"], 7);
+        assert_eq!(r["staleLockPid"], 4242);
+        assert_eq!(r["runs"]["r-1"]["rulesAdded"], json!(["r9"]));
         let md = std::fs::read_to_string(dir.join("report.md")).unwrap();
         let at = |s: &str| md.find(s).unwrap_or_else(|| panic!("{s} missing:\n{md}"));
         assert!(
@@ -322,6 +398,12 @@ mod tests {
             md.contains("/workgraph:shift decide o/r#2")
                 && md.contains("labelled wg:queued by stranger")
         );
+        assert!(
+            md.contains("- #7 ") && md.contains("/workgraph:work approve o/r#7`"),
+            "{md}"
+        );
+        assert!(md.contains("AC-1 passed") && md.contains("pid 4242"));
+        assert!(md.contains("- r-1: added [r9], revised [], pruned [r2]"));
         assert_eq!(latest(&dirs).unwrap().as_deref(), Some("20261120-0130"));
     }
 }
