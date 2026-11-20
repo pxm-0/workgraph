@@ -89,20 +89,21 @@ fn step(
     let cname = format!("wgsbx-{}-s{idx}", job.job);
     let mut args = podman::step(&job.job, &cname, &job.image, created, &job.limits);
     args.extend(podman::step_command(secs, cmd));
+    let started = Instant::now();
     let r = pm.run(&args, None, Duration::from_secs(u64::from(secs) + 60));
+    let ran_out = started.elapsed() >= Duration::from_secs(u64::from(secs));
     let inspected = pm.run(&podman::inspect(&cname), None, ADMIN);
-    let oom = serde_json::from_str::<serde_json::Value>(&inspected.out)
+    let oom_flag = serde_json::from_str::<serde_json::Value>(&inspected.out)
         .ok()
         .and_then(|v| v[0]["State"]["OOMKilled"].as_bool())
-        .unwrap_or(false)
-        || r.out.contains(podman::OOM_MARK);
+        .unwrap_or(false);
     let _ = pm.run(&podman::rm(&cname), None, ADMIN);
-    let exit = if r.timed_out {
-        124
-    } else {
-        i64::from(r.code.unwrap_or(-1))
-    };
-    let timed_out = r.timed_out || exit == 124 || (exit == 137 && !oom);
+    let code = i64::from(r.code.unwrap_or(-1));
+    // Judged by the agent's own clock: images' `timeout` differ (busybox's exits by the signal,
+    // 143), and a cgroup-wide OOM kill takes the wrapper too, so a 137 before the deadline is OOM.
+    let timed_out = r.timed_out || code == 124 || ran_out;
+    let oom = !timed_out && (oom_flag || r.out.contains(podman::OOM_MARK) || code == 137);
+    let exit = if timed_out { 124 } else { code };
     let result = StepResult {
         name: name.to_string(),
         exit,
