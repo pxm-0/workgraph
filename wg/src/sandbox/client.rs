@@ -387,6 +387,48 @@ mod tests {
     }
 
     #[test]
+    fn a_job_still_running_at_the_cap_comes_back_pending_not_blocking() {
+        let d = std::env::temp_dir().join(format!(
+            "wg-client-cap-{}-{}",
+            std::process::id(),
+            crate::journal::now_nanos()
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        let orb = d.join("orb");
+        std::fs::write(&orb, "#!/bin/sh\nfor a; do last=$a; done\necho \"{\\\"job\\\":\\\"$last\\\",\\\"pending\\\":true}\"\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&orb, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let c = Client {
+            orb: orb.to_string_lossy().into(),
+            machine: Machine {
+                machine: "m".into(),
+                user: "u".into(),
+                probe: String::new(),
+            },
+        };
+        let sb: RepoSandbox = toml::from_str(&format!(
+            "image = \"docker.io/library/node@sha256:{}\"",
+            "a".repeat(64)
+        ))
+        .unwrap();
+        let j = new_job(
+            &sb,
+            vec![Step {
+                name: "t".into(),
+                cmd: "sleep 600".into(),
+                timeout_secs: 900,
+            }],
+            "n",
+            false,
+        )
+        .unwrap();
+        let t = Instant::now();
+        assert_eq!(c.wait(&j, Duration::from_secs(5)).unwrap(), Polled::Pending);
+        assert!(t.elapsed() < Duration::from_secs(6), "never past the cap");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn a_fake_transport_round_trips_a_job() {
         let d = std::env::temp_dir().join(format!(
             "wg-client-{}-{}",
