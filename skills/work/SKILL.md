@@ -23,11 +23,14 @@ If none exists, stop: `claude plugin marketplace add pxm-0/haruspex` then `claud
    `${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json` and `<target>` maps `uname -sm`:
    `Darwin arm64` → `aarch64-apple-darwin`, `Darwin x86_64` → `x86_64-apple-darwin`,
    `Linux x86_64` → `x86_64-unknown-linux-gnu`.
-3. Not there yet: ask the user once to download it, naming the URL
+3. `${CLAUDE_PLUGIN_DATA}/wg-build/release/wg`, built by step 5 on an earlier run.
+4. None of these yet: ask the user once to download it, naming the URL
    `https://github.com/pxm-0/workgraph/releases/download/v<version>/wg-<target>`. On yes, download
    it and its `.sha256` into `${CLAUDE_PLUGIN_DATA}`, run `shasum -a 256 -c wg-<target>.sha256` there,
    and only if that passes rename it to `wg-<version>-<target>` and `chmod +x` it.
-4. No release asset and `cargo` exists: `cargo build --release --manifest-path ${CLAUDE_PLUGIN_ROOT}/wg/Cargo.toml --target-dir ${CLAUDE_PLUGIN_DATA}/wg-build`.
+5. No release asset and `cargo` exists: `cargo build --release --locked -p wg --manifest-path
+   ${CLAUDE_PLUGIN_ROOT}/Cargo.toml --target-dir ${CLAUDE_PLUGIN_DATA}/wg-build`, then use
+   `${CLAUDE_PLUGIN_DATA}/wg-build/release/wg`.
 
 ## 2. Run the workflow
 
