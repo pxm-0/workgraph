@@ -98,3 +98,7 @@ path = "tests/sandbox_podman.rs"
 [[test]]
 name = "shift_sandbox"
 path = "tests/shift_sandbox.rs"
+
+[[test]]
+name = "self_gate"
+path = "tests/self_gate.rs"
