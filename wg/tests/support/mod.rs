@@ -304,9 +304,12 @@ fn learn_reply(prompt: &str) -> Value {
     json!({ "rules": rules, "proposals": proposals })
 }
 
+/// A fresh directory per call: parallel tests can read the same clock, so a counter keeps them apart.
 pub fn temp(name: &str) -> PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let d = std::env::temp_dir().join(format!(
-        "wg-flow-{name}-{}-{}",
+        "wg-flow-{name}-{}-{}-{n}",
         std::process::id(),
         wg::journal::now_nanos()
     ));

@@ -249,3 +249,31 @@ fn every_call_runs_with_the_cleared_env_and_the_guard_hook() {
         .iter()
         .any(|a| a.starts_with("Edit(//") && a.ends_with("/src/a.js)")));
 }
+
+#[test]
+fn scenario_dirs_never_collide_across_parallel_tests() {
+    // Parallel scenarios share one process; a shared run dir mixes their journals.
+    let gate = Arc::new(std::sync::Barrier::new(16));
+    let threads: Vec<_> = (0..16)
+        .map(|_| {
+            let gate = gate.clone();
+            std::thread::spawn(move || {
+                (0..50)
+                    .map(|_| {
+                        gate.wait();
+                        temp("run")
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect();
+    let made: Vec<std::path::PathBuf> = threads
+        .into_iter()
+        .flat_map(|h| h.join().unwrap())
+        .collect();
+    let unique: std::collections::BTreeSet<_> = made.iter().collect();
+    assert_eq!(unique.len(), made.len());
+    for d in unique {
+        std::fs::remove_dir_all(d).unwrap();
+    }
+}
