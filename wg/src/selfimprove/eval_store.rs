@@ -22,12 +22,17 @@ pub fn store(dirs: &Dirs) -> PathBuf {
 
 /// The store is at the pinned commit with the pinned tree, and holds enough fixtures.
 pub fn checked_store(dirs: &Dirs) -> Result<Vec<Fixture>, String> {
-    let m = replay_check::manifest(replay_check::COMPILED)?;
+    checked_store_at(
+        &store(dirs),
+        &replay_check::manifest(replay_check::COMPILED)?,
+    )
+}
+
+pub fn checked_store_at(s: &Path, m: &replay_check::Manifest) -> Result<Vec<Fixture>, String> {
     if m.store.commit.is_empty() {
         return Err("no fixture store is pinned in eval/manifest.toml yet".into());
     }
-    let s = store(dirs);
-    let head = git(&s, &["rev-parse", "HEAD"], &[])
+    let head = git(s, &["rev-parse", "HEAD"], &[])
         .map_err(|e| format!("the fixture store at {} is missing: {e}", s.display()))?;
     if head != m.store.commit {
         return Err(format!(
@@ -35,11 +40,11 @@ pub fn checked_store(dirs: &Dirs) -> Result<Vec<Fixture>, String> {
             m.store.commit
         ));
     }
-    let tree = git(&s, &["ls-tree", "-r", &head], &[])?;
+    let tree = git(s, &["ls-tree", "-r", &head], &[])?;
     if format!("{:x}", Sha256::digest(tree.as_bytes())) != m.store.tree_sha256 {
         return Err("the fixture store's tree does not match its pinned sha256".into());
     }
-    let f = eval_live::fixtures(&s)?;
+    let f = eval_live::fixtures(s)?;
     eval_live::enough(&f, m.store.min_fixtures, m.store.min_needs_decision)?;
     Ok(f)
 }
@@ -317,4 +322,123 @@ fn hidden(ctx: &RunCtx, fx: &Fixture, dir: &Path, repo: &Path) -> Result<bool, S
     let nonce = crate::tokens_store::random_hex(8)?;
     let r = ctx.ports.sandbox.run(&nonce, steps)?;
     Ok(r.error.is_none() && r.steps.iter().all(|s| s.exit == 0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn sh(dir: &Path, script: &str) -> String {
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{script}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn the_store_must_match_its_pin_and_hold_enough_fixtures() {
+        let d = std::env::temp_dir().join(format!("wg-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let img = format!("docker.io/library/python@sha256:{}", "c".repeat(64));
+        for i in 0..10 {
+            let f = d.join(format!("fixtures/f{i}"));
+            std::fs::create_dir_all(&f).unwrap();
+            let status = if i < 3 { "needs_decision" } else { "done" };
+            std::fs::write(f.join("fixture.toml"), format!("repo = \"o/r\"\nbase_commit = \"{}\"\nexpected_status = \"{status}\"\nimage = \"{img}\"\nchecks = {{}}\n", "a".repeat(40))).unwrap();
+        }
+        sh(&d, "git init -q -b main && git config user.name t && git config user.email t@x.invalid && git add -A && git commit -qm f");
+        let head = sh(&d, "git rev-parse HEAD");
+        let tree = sh(&d, "git ls-tree -r HEAD");
+        let mut m = replay_check::manifest(replay_check::COMPILED).unwrap();
+        assert!(
+            checked_store_at(&d, &m)
+                .unwrap_err()
+                .contains("no fixture store is pinned"),
+            "the shipped pin is empty"
+        );
+        m.store.commit = head.clone();
+        m.store.tree_sha256 = format!("{:x}", Sha256::digest(tree.as_bytes()));
+        assert_eq!(checked_store_at(&d, &m).unwrap().len(), 10);
+        assert!(checked_store_at(&d.join("missing"), &m)
+            .unwrap_err()
+            .contains("missing"));
+        let bad_tree = replay_check::Manifest {
+            store: replay_check::Store {
+                tree_sha256: "0".repeat(64),
+                ..m.store.clone()
+            },
+            ..m.clone()
+        };
+        assert!(checked_store_at(&d, &bad_tree)
+            .unwrap_err()
+            .contains("tree"));
+        let more = replay_check::Manifest {
+            store: replay_check::Store {
+                min_fixtures: 11,
+                ..m.store.clone()
+            },
+            ..m.clone()
+        };
+        assert!(checked_store_at(&d, &more)
+            .unwrap_err()
+            .contains("at least 11"));
+        sh(&d, "git commit -q --allow-empty -m later");
+        assert!(checked_store_at(&d, &m).unwrap_err().contains("the pin is"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn each_arm_is_a_fresh_process_and_its_line_is_parsed() {
+        let d = std::env::temp_dir().join(format!("wg-procarms-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let exe = d.join("wg");
+        std::fs::write(&exe, "#!/bin/sh\necho \"$@\" > \"$(dirname \"$0\")/argv\"\ncase \"$*\" in *candidate*) echo '{\"error\":\"no sandbox\"}' ;; *) echo '{\"status\":\"needs_decision\",\"escalations\":[\"E1\"],\"gates\":[\"ready_to_build\"],\"schema_ok\":true,\"passed\":true,\"cost_micros\":7,\"incidents\":0,\"by_provider\":{\"subscription\":7}}' ;; esac\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let arms = ProcArms {
+            exe: exe.clone(),
+            overlay: d.join("overlay"),
+            tag: "eval-7".into(),
+        };
+        let fx = Fixture {
+            name: "f1".into(),
+            dir: d.join("f1"),
+            repo: "o/r".into(),
+            base_commit: "a".repeat(40),
+            expected_status: "needs_decision".into(),
+            image: String::new(),
+            checks: Default::default(),
+        };
+        let r = arms.run(&fx, Arm::Base).unwrap();
+        assert_eq!(
+            (r.status.as_str(), r.escalations.clone(), r.cost_micros),
+            ("needs_decision", vec!["E1".to_string()], 7)
+        );
+        assert_eq!(r.by_provider["subscription"], 7);
+        let argv = std::fs::read_to_string(d.join("argv")).unwrap();
+        assert!(
+            argv.contains("eval arm --fixture")
+                && argv.contains("--arm base --tag eval-7")
+                && !argv.contains("--overlay"),
+            "{argv}"
+        );
+        assert!(arms
+            .run(&fx, Arm::Candidate)
+            .unwrap_err()
+            .contains("no sandbox"));
+        assert!(std::fs::read_to_string(d.join("argv"))
+            .unwrap()
+            .contains("--overlay"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }
