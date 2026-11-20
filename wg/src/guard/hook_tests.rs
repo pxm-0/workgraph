@@ -44,6 +44,7 @@ fn fixture(name: &str) -> Fixture {
             prefixes: vec!["npm test".into()],
             ..BashRules::default()
         },
+        sandbox: None,
     };
     Fixture { root, m }
 }

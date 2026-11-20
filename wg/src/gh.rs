@@ -304,6 +304,25 @@ impl Gh {
         Ok(url.to_string())
     }
 
+    /// Creates or updates a `risky:<category>` label, so the PR can carry it (design §8.1).
+    pub fn ensure_label(&self, repo: &str, name: &str) -> Result<(), String> {
+        check_repo(repo)?;
+        crate::ids::gh_label(name)?;
+        self.run(&[
+            "label",
+            "create",
+            name,
+            "-R",
+            repo,
+            "--color",
+            "B60205",
+            "--description",
+            "workgraph: built and checked only in the sandbox",
+            "--force",
+        ])
+        .map(|_| ())
+    }
+
     pub fn pr_view(&self, repo: &str, n: u64) -> Result<Pr, String> {
         check_repo(repo)?;
         let v = self.json(&[

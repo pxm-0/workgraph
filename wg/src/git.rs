@@ -257,6 +257,30 @@ pub fn changed_since(dir: &Path, base: &str) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
+/// The diff of `files` against HEAD, with untracked ones as all-added text (at most 1 MB each), for
+/// the risk classifier's content rules (design §8.2).
+pub fn diff_with_new(dir: &Path, files: &[String]) -> Result<String, String> {
+    if files.is_empty() {
+        return Ok(String::new());
+    }
+    let mut args = vec!["diff", "--no-color", "HEAD", "--"];
+    args.extend(files.iter().map(String::as_str));
+    let mut out = git(dir, &args, &[])?;
+    let mut ls = vec!["ls-files", "-o", "--exclude-standard", "-z", "--"];
+    ls.extend(files.iter().map(String::as_str));
+    for f in git(dir, &ls, &[])?.split('\0').filter(|p| !p.is_empty()) {
+        let body = std::fs::read(dir.join(f)).map_err(|e| format!("cannot read {f}: {e}"))?;
+        let text = String::from_utf8_lossy(&body[..body.len().min(1 << 20)]).into_owned();
+        out.push_str(&format!("\n+++ b/{f}\n"));
+        for l in text.lines() {
+            out.push('+');
+            out.push_str(l);
+            out.push('\n');
+        }
+    }
+    Ok(out)
+}
+
 /// sha256 of the blob `rev:path`, or `None` when it does not exist there.
 pub fn blob_sha256(repo: &Path, rev: &str, path: &str) -> Result<Option<String>, String> {
     if !exists_at(repo, rev, path) {
@@ -324,6 +348,22 @@ mod tests {
             .status()
             .unwrap();
         assert!(ok.success(), "{script}");
+    }
+
+    #[test]
+    fn diff_with_new_shows_changed_and_untracked_lines_as_added() {
+        let d = std::env::temp_dir().join(format!("wg-git-diff-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("db")).unwrap();
+        sh(&d, "git init -q && git config user.name t && git config user.email t@x.invalid && echo a > db/a.js && echo z > other.js && git add -A && git commit -qm i && echo 'jwt.sign(x)' >> db/a.js && echo 'TRUNCATE t' > db/new.sql && echo 'rmtree(build)' >> other.js");
+        let text = diff_with_new(&d, &["db/".to_string()]).unwrap();
+        assert!(
+            text.contains("+jwt.sign(x)") && text.contains("+TRUNCATE t"),
+            "{text}"
+        );
+        assert!(!text.contains("rmtree"), "only the unit's files");
+        assert_eq!(diff_with_new(&d, &[]).unwrap(), "");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

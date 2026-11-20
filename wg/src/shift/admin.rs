@@ -84,6 +84,7 @@ pub fn resume(dirs: &Dirs, cfg: &Config, id: &str) -> Result<Value, String> {
         shift_id: id,
         journal: &j,
         deadline: u64::MAX,
+        sandbox: Default::default(),
     };
     let mut resumed = Vec::new();
     for (repo, n) in todo {

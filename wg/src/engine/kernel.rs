@@ -5,7 +5,7 @@
 use super::RunCtx;
 use crate::haruspex::contract::{self, Contract};
 use crate::haruspex::tamper;
-use crate::tokens::{CheckResult, ReviewPass};
+use crate::tokens::{CheckResult, ReviewPass, SandboxRun};
 use serde_json::Value;
 use wg_factory::api::{Escalation, Reading, Severity};
 use wg_factory::engine::read::dirty_escalation;
@@ -15,7 +15,7 @@ use wg_factory::plan::scope::dirty_overlap;
 /// The one blocker an honest Reading leaves (haruspex.py:867), pinned by a golden test.
 pub const PENDING_APPROVAL: &str = "Human approval for ready_to_build is pending.";
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Kernel {
     pub reading: Option<Reading>,
     pub challenge_escalations: Vec<Escalation>,
@@ -42,6 +42,12 @@ pub struct Kernel {
     pub pins: std::collections::BTreeMap<String, String>,
     /// See `driver::Start::baseline_floor`.
     pub baseline_floor: Option<Vec<String>>,
+    /// A risky unit was built, or the repo is always tainted: every later check, review command
+    /// and verify goes to the sandbox (design §8.1).
+    pub tainted: bool,
+    /// Risky units whose Worker or Fixer ran, sandboxed.
+    pub built_risky: Vec<String>,
+    pub sandbox_runs: Vec<SandboxRun>,
 }
 
 fn esc(id: &str, question: String, recommendation: &str) -> Escalation {
@@ -52,29 +58,6 @@ fn esc(id: &str, question: String, recommendation: &str) -> Escalation {
         recommendation: recommendation.into(),
         options: vec![],
     }
-}
-
-/// Planned files whose path says they are hard to undo or reach outside the repo (design §8.2;
-/// Phase 1 classifies planned files only).
-pub fn classify(files: &[String]) -> Option<String> {
-    const RISKY: [(&str, &str); 9] = [
-        ("migration", "a database migration"),
-        (".github/workflows/", "CI configuration"),
-        ("deploy", "a deploy"),
-        ("auth", "authentication or authorization"),
-        ("secret", "secrets"),
-        ("payment", "payments"),
-        (".env", "environment secrets"),
-        ("Dockerfile", "a container build"),
-        ("terraform", "infrastructure"),
-    ];
-    files.iter().find_map(|f| {
-        let lower = f.to_lowercase();
-        RISKY
-            .iter()
-            .find(|(p, _)| lower.contains(&p.to_lowercase()))
-            .map(|(_, why)| format!("{why} ({f})"))
-    })
 }
 
 impl Kernel {
@@ -111,8 +94,19 @@ impl Kernel {
         self.risky = r
             .units
             .iter()
-            .filter(|u| !u.risky)
-            .filter_map(|u| classify(&u.files).map(|why| (u.id.clone(), why)))
+            .filter_map(|u| {
+                let flagged = u.risky.then(|| {
+                    format!(
+                        "flagged: {}",
+                        u.risk_reason
+                            .as_deref()
+                            .unwrap_or("the Reading marked it risky")
+                    )
+                });
+                crate::risk::paths(&u.files)
+                    .or(flagged)
+                    .map(|why| (u.id.clone(), why))
+            })
             .collect();
         let mut escalations = r.escalations.clone();
         let task = ctx.ports.hx.task(&r.task_id)?;
@@ -188,6 +182,40 @@ impl Kernel {
             ),
             "Allow them if each is the repo's own check, run in its dev stack",
         )))
+    }
+
+    /// Risky by the Reading, the classifier on planned files, or a diff after the fact.
+    pub fn is_risky(&self, unit: &str) -> bool {
+        self.risky.iter().any(|(id, _)| id == unit)
+    }
+
+    /// Why risky work cannot run in the sandbox now; `None` when it can (design §8.1).
+    pub fn sandbox_blocker(&self, ctx: &RunCtx) -> Option<String> {
+        if let Some(why) = ctx.ports.sandbox.unavailable() {
+            return Some(why);
+        }
+        let Some(sb) = ctx
+            .cfg
+            .repo(&ctx.repo_name)
+            .and_then(|r| r.sandbox.as_ref())
+        else {
+            return Some("this repo has no [repo.sandbox]".into());
+        };
+        self.required
+            .iter()
+            .find(|n| !sb.checks.contains_key(*n))
+            .map(|n| format!("[repo.sandbox] has no command for check {n}"))
+    }
+
+    /// What the factory may know: which units are risky, the taint, and whether a sandbox is ready.
+    /// The sandbox is only asked when something needs it.
+    pub fn risk_view(&self, ctx: &RunCtx) -> wg_factory::api::RiskView {
+        let needs = !self.risky.is_empty() || self.tainted;
+        wg_factory::api::RiskView {
+            risky_units: self.risky.clone(),
+            tainted: self.tainted,
+            sandbox_ready: needs && self.sandbox_blocker(ctx).is_none(),
+        }
     }
 
     /// The Reading's units, in the factory's model (for the scope helpers).
@@ -331,13 +359,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_classifier_flags_risky_paths() {
-        let f = |p: &str| classify(&[p.to_string()]);
-        assert!(f("db/migrations/001.sql").unwrap().contains("migration"));
-        assert!(f(".github/workflows/ci.yml").is_some());
-        assert!(f("src/auth/login.ts").is_some());
-        assert!(f(".env.production").is_some());
-        assert_eq!(f("src/calc.py"), None);
+    fn the_pending_approval_blocker_is_pinned() {
         assert_eq!(
             PENDING_APPROVAL,
             "Human approval for ready_to_build is pending."

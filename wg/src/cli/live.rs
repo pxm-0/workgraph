@@ -63,6 +63,7 @@ fn probe_provider(
         tools: vec![],
         skills: vec![],
         bash: Default::default(),
+        sandbox: None,
     };
     let write = |p: &std::path::Path, v: &serde_json::Value| {
         std::fs::write(p, v.to_string()).map_err(|e| format!("cannot write {}: {e}", p.display()))

@@ -98,6 +98,25 @@ pub fn output(ctx: &RunCtx, ran: &Ran) -> Result<Value, String> {
     o.insert("risk".into(), haruspex["risk"].clone());
     o.insert("haruspex".into(), haruspex);
     o.insert("checks".into(), json!(k.gate));
+    o.insert("tainted".into(), json!(k.tainted));
+    o.insert(
+        "riskyBuilt".into(),
+        json!(k
+            .risky
+            .iter()
+            .filter(|(id, _)| k.built_risky.contains(id))
+            .map(|(id, why)| json!({ "id": id, "why": why, "label": format!("risky:{}", crate::risk::category(why)) }))
+            .collect::<Vec<_>>()),
+    );
+    o.insert(
+        "sandboxRuns".into(),
+        json!(k
+            .sandbox_runs
+            .iter()
+            .map(|r| json!({ "label": r.label(), "job": r.job(), "nonce": r.nonce(), "tree": r.tree(),
+                             "steps": r.steps(), "clean": r.clean() }))
+            .collect::<Vec<_>>()),
+    );
     o.insert("checksAlreadyFailing".into(), json!(k.left_out));
     o.insert("memorySaved".into(), json!(ran.memory_saved));
     o.insert(
@@ -131,11 +150,12 @@ pub fn markdown(out: &Value) -> String {
             .unwrap_or_default()
     };
     format!(
-        "# Run {}\n\nStatus: {} | verified: {} | reviewed: {}\nTask: {} on {}\nCost: ${} (calls with unknown cost: {})\n\n## Spend by stage/provider\n\n```json\n{}\n```\n\n## Done\n{}\n\n## Stuck\n{}\n\n## Skipped\n{}\n",
+        "# Run {}\n\nStatus: {} | verified: {} | reviewed: {} | tainted: {}\nTask: {} on {}\nCost: ${} (calls with unknown cost: {})\n\n## Spend by stage/provider\n\n```json\n{}\n```\n\n## Done\n{}\n\n## Stuck\n{}\n\n## Skipped\n{}\n\n## Sandbox (risky units built, SandboxRun evidence)\n{}\n{}\n",
         out["runId"].as_str().unwrap_or(""),
         out["status"].as_str().unwrap_or(""),
         out["verified"],
         out["reviewed"],
+        out["tainted"],
         out["taskId"].as_str().unwrap_or(""),
         out["branch"],
         out["costUsd"],
@@ -144,5 +164,7 @@ pub fn markdown(out: &Value) -> String {
         list(&out["done"]),
         list(&out["stuck"]),
         list(&out["skipped"]),
+        list(&out["riskyBuilt"]),
+        list(&out["sandboxRuns"]),
     )
 }

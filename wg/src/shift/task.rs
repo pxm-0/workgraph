@@ -31,6 +31,8 @@ pub struct Env<'a> {
     pub journal: &'a Journal,
     /// Unix seconds after which no new step starts (`[shift].until`).
     pub deadline: u64,
+    /// The sandbox doctor's verdict for this shift, shared by its tasks (design §7.3 step 3).
+    pub sandbox: crate::sandbox::client::Status,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -363,6 +365,12 @@ fn run(
     let pipeline = crate::pipelines::load(crate::assets::DEV_PIPELINE, e.cfg.max_calls_per_task)?;
     let stop_file = dirs.stop_file();
     let deadline = e.deadline;
+    let sandbox = crate::sandbox::client::SimSandbox {
+        cfg: e.cfg.clone(),
+        repo: repo.sandbox.clone(),
+        root: worktree.to_path_buf(),
+        status: e.sandbox.clone(),
+    };
     let ctx = RunCtx {
         ports: Ports {
             proc: &RealProc,
@@ -374,6 +382,7 @@ fn run(
                 root: worktree.to_path_buf(),
             },
             hx: &hx,
+            sandbox: &sandbox,
         },
         cfg: e.cfg,
         dirs: dirs.clone(),

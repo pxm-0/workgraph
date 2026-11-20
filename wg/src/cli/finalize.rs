@@ -46,7 +46,7 @@ pub fn finalize_at(
     std::env::set_current_dir(repo).map_err(|e| format!("cannot enter {}: {e}", repo.display()))?;
     let run_dir = super::run::run_dir_for(dirs, run)?;
     let key = tokens_store::key(&dirs.key())?;
-    let (meta, checks, review) = tokens_store::load(&run_dir.join("tokens.jsonl"), &key)?;
+    let (meta, checks, review, _) = tokens_store::load(&run_dir.join("tokens.jsonl"), &key)?;
     if meta.repo != repo.to_string_lossy() {
         return refuse(format!("run {run} belongs to {}", meta.repo));
     }
@@ -67,6 +67,11 @@ pub fn finalize_at(
         }
         if !meta.pins.contains_key(name) {
             return refuse(format!("check {name} was never pinned"));
+        }
+        if meta.tainted && latest.is_some_and(|c| c.target() != crate::tokens::Target::SimSandbox) {
+            return refuse(format!(
+                "the task is tainted but check {name} last ran on the host"
+            ));
         }
     }
     match &review {
@@ -96,6 +101,14 @@ pub fn finalize_at(
     {
         return refuse(format!("check {name} changed in project.json since Read"));
     }
+    let pins = if meta.tainted {
+        match sandbox_pins(cfg, repo, &meta) {
+            Ok(p) => p,
+            Err(why) => return refuse(why),
+        }
+    } else {
+        meta.pins.clone()
+    };
     let head = git::head(repo)?;
     let approval = HumanApproval::new(&meta.task_id, &head, by);
     let staged: Vec<String> = git::dirty_in(repo)?
@@ -109,10 +122,48 @@ pub fn finalize_at(
             message,
             evidence_message,
             staged,
-            pins: &meta.pins,
+            pins: &pins,
         },
     );
     out["runId"] = json!(run);
     out["taskId"] = json!(meta.task_id);
     Ok(out)
+}
+
+/// A tainted task never verifies on the Mac (design §9.5): every pinned check's `project.json`
+/// command becomes the repo's `[repo.sandbox].verify` string, so Haruspex verify runs it in the
+/// sandbox. Without one for every check, the kernel refuses.
+fn sandbox_pins(
+    cfg: &crate::config::Config,
+    repo: &std::path::Path,
+    meta: &tokens_store::RunMeta,
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    let host_refused =
+        "host verify refused for tainted task; add [repo.sandbox].verify or verify yourself";
+    let name = git::repo_name(&git::slug(repo));
+    let verify = cfg
+        .repo(&name)
+        .and_then(|r| r.sandbox.as_ref())
+        .map(|s| s.verify.clone())
+        .unwrap_or_default();
+    crate::ids::task_id(&meta.task_id)?;
+    let mut pins = std::collections::BTreeMap::new();
+    for check in meta.pins.keys() {
+        let cmd = verify.get(check).ok_or(host_refused)?;
+        pins.insert(check.clone(), cmd.replace("{task}", &meta.task_id));
+    }
+    let path = repo.join(".haruspex/project.json");
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| format!("cannot read project.json: {e}"))?;
+    let mut v: Value =
+        serde_json::from_str(&text).map_err(|e| format!("project.json is not JSON: {e}"))?;
+    for (check, cmd) in &pins {
+        v["commands"][check] = json!(cmd);
+    }
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&v).expect("serializes") + "\n",
+    )
+    .map_err(|e| format!("cannot pin project.json to the sandbox: {e}"))?;
+    Ok(pins)
 }

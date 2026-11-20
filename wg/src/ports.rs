@@ -18,6 +18,8 @@ pub trait CheckExec: Sync {
 pub trait Repo: Sync {
     fn changed(&self) -> Result<Vec<String>, String>;
     fn tree(&self) -> Result<String, String>;
+    /// The unified diff of `files` against HEAD, untracked files included as additions.
+    fn diff(&self, files: &[String]) -> Result<String, String>;
 }
 
 /// What the kernel asks of Haruspex: deterministic reads and the ready-to-build gate.
@@ -31,11 +33,24 @@ pub trait Haruspex: Sync {
     fn managed_hash(&self) -> Result<String, String>;
 }
 
+/// Where risky units and a tainted task's checks run (design §8): the sim, or nowhere.
+pub trait Sandbox: Sync {
+    /// `None` when risky work may run; otherwise why it parks.
+    fn unavailable(&self) -> Option<String>;
+    /// Runs `steps` on the worktree's tracked files; `Err` when the sandbox itself failed.
+    fn run(
+        &self,
+        nonce: &str,
+        steps: Vec<crate::sandbox::job::Step>,
+    ) -> Result<crate::sandbox::job::JobResult, String>;
+}
+
 pub struct Ports<'a> {
     pub proc: &'a dyn Proc,
     pub checks: &'a dyn CheckExec,
     pub repo: &'a dyn Repo,
     pub hx: &'a dyn Haruspex,
+    pub sandbox: &'a dyn Sandbox,
 }
 
 /// Checks through `sh -c` in the repo root with the scrubbed environment. In a shift, `prefix` is
@@ -80,5 +95,9 @@ impl Repo for GitRepo {
 
     fn tree(&self) -> Result<String, String> {
         crate::git::tree_fingerprint(&self.root)
+    }
+
+    fn diff(&self, files: &[String]) -> Result<String, String> {
+        crate::git::diff_with_new(&self.root, files)
     }
 }

@@ -5,6 +5,7 @@ pub mod convert;
 pub mod driver;
 pub mod kernel;
 pub mod publish;
+pub mod risk;
 
 use crate::budget::Ledger;
 use crate::config::Config;
