@@ -185,8 +185,10 @@ pub fn recover(dirs: &Dirs, cfg: &Config, gh: &Gh) -> Result<Value, String> {
 }
 
 /// Removes worktrees whose PR merged or closed, and stuck ones older than 14 days. A verified
-/// task of a repo with a release line keeps its status, so the line still takes it.
+/// task of a repo with a release line keeps its status, so the line still takes it. Run tmp dirs
+/// a crashed run left are swept first, so a `gh` failure does not stop that.
 pub fn gc(dirs: &Dirs, cfg: &Config, gh: &Gh) -> Result<Value, String> {
+    let tmp = crate::scratch::sweep_tmp(dirs);
     let mut removed = Vec::new();
     let mut kept = Vec::new();
     for rec in record::all(dirs)? {
@@ -221,7 +223,7 @@ pub fn gc(dirs: &Dirs, cfg: &Config, gh: &Gh) -> Result<Value, String> {
             },
         )?;
     }
-    Ok(json!({ "removed": removed, "kept": kept }))
+    Ok(json!({ "removed": removed, "kept": kept, "tmp": tmp }))
 }
 
 pub fn status(dirs: &Dirs) -> Result<Value, String> {

@@ -35,13 +35,10 @@ pub fn with_ctx<R>(
 ) -> Result<R, String> {
     let dirs = e.dirs;
     let run_dir = dirs.run(run_id);
-    for d in [
-        run_dir.join("logs"),
-        run_dir.join("guard"),
-        dirs.run_tmp(run_id),
-    ] {
+    for d in [run_dir.join("logs"), run_dir.join("guard")] {
         private_dir(&d)?;
     }
+    let _tmp = crate::scratch::RunTmp::create(dirs, run_id)?;
     let pin = e.cfg.haruspex.clone().ok_or("no Haruspex CLI is pinned")?;
     let hx = PinnedHaruspex::new(&pin, worktree, &[dirs.work(), dirs.state()])?;
     let stop_file = dirs.stop_file();

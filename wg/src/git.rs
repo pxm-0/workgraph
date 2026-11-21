@@ -245,8 +245,8 @@ pub fn release_worktree(repo: &Path, root: &Path, rel: &str, sha: &str) -> Resul
     path.canonicalize().map_err(|e| e.to_string())
 }
 
-/// Removes a task worktree, only under `root` after canonicalizing (design §14 checklist 2).
-pub fn remove_worktree(repo: &Path, root: &Path, path: &Path) -> Result<(), String> {
+/// `path` canonicalized, only when it is strictly under `root` (design §14 checklist 2).
+pub fn under(root: &Path, path: &Path) -> Result<PathBuf, String> {
     let (root, p) = (
         root.canonicalize()
             .map_err(|e| format!("{}: {e}", root.display()))?,
@@ -260,6 +260,12 @@ pub fn remove_worktree(repo: &Path, root: &Path, path: &Path) -> Result<(), Stri
             root.display()
         ));
     }
+    Ok(p)
+}
+
+/// Removes a task worktree, only under `root`.
+pub fn remove_worktree(repo: &Path, root: &Path, path: &Path) -> Result<(), String> {
+    let p = under(root, path)?;
     git(
         repo,
         &["worktree", "remove", "--force", &p.to_string_lossy()],
