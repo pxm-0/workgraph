@@ -1,7 +1,7 @@
 {
   "name": "workgraph",
   "description": "Run a coding task as a graph under a Haruspex Reading: test-first workers on the cheapest proven model, real check gates with model escalation, independent review against the criteria, and weighted rules learned per repo.",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "author": {
     "name": "Dustin A",
     "url": "https://github.com/pxm-0"
