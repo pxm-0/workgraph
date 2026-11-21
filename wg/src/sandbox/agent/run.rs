@@ -30,9 +30,22 @@ pub fn cleanup(pm: &dyn Podman, job: &str, vols: &[String]) -> Cleanup {
     // Each removal is best effort: what failed shows up in the leftover counts below.
     // Containers go before the pod: `pod rm` would take them but leave their anonymous volumes.
     let labelled = pm.run(&podman::leftovers("containers", job), None, ADMIN);
-    for id in labelled.out.split_whitespace() {
-        let _ = pm.run(&podman::rm(id), None, ADMIN);
-    }
+    // A failed rm is a leak even once `pod rm` takes the container: its anonymous volume has no
+    // label, so the counts below would miss it.
+    let rm_failed = labelled
+        .out
+        .split_whitespace()
+        .filter(|id| {
+            let r = pm.run(&podman::rm(id), None, ADMIN);
+            if !r.ok() {
+                eprintln!(
+                    "wg sandbox-agent: cannot remove container {id}: {}",
+                    crate::ids::one_line(&tail(&r.out), 300)
+                );
+            }
+            !r.ok()
+        })
+        .count() as u32;
     let _ = pm.run(&podman::pod_rm(job), None, ADMIN);
     let _ = pm.run(&podman::volume_rm(vols), None, ADMIN);
     let count = |kind: &str| {
@@ -45,7 +58,7 @@ pub fn cleanup(pm: &dyn Podman, job: &str, vols: &[String]) -> Cleanup {
         }
     };
     Cleanup {
-        containers_left: count("containers"),
+        containers_left: count("containers").saturating_add(rm_failed),
         volumes_left: count("volumes"),
     }
 }
@@ -379,6 +392,16 @@ pub mod tests {
             rules: vec![("volume ls", ran(1, ""))],
         };
         assert_eq!(cleanup(&failed_count, "j-1", &[]).volumes_left, u32::MAX);
+        let failed_rm = Fake {
+            calls: Mutex::new(vec![]),
+            rules: vec![
+                ("rm -f --volumes", ran(125, "volume in use")),
+                ("ps -a", ran(0, "abc\n")),
+            ],
+        };
+        let c = cleanup(&failed_rm, "j-1", &[]);
+        // One still listed, plus one for the failed rm whose anonymous volume no label can find.
+        assert_eq!(c.containers_left, 2, "a failed rm counts as left over");
     }
 
     #[test]
