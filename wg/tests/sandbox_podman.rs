@@ -204,6 +204,62 @@ fn a_postgres_service_starts_under_the_service_profile() {
     assert_eq!(r.steps[0].exit, 0, "{r:?}");
 }
 
+/// Volumes no container uses and no job labels: the anonymous ones a `VOLUME` image leaks. A
+/// concurrent job's anonymous volumes are in use, and its named ones are labelled.
+fn dangling_anonymous() -> std::collections::BTreeSet<String> {
+    let labelled = podman(&["volume", "ls", "-q", "--filter", "label=wg.job"]);
+    let labelled: Vec<&str> = labelled.lines().collect();
+    podman(&["volume", "ls", "-q", "--filter", "dangling=true"])
+        .lines()
+        .filter(|v| !labelled.contains(v))
+        .map(str::to_string)
+        .collect()
+}
+
+/// New dangling anonymous volumes since `before` that are still there 3 s later (a concurrent
+/// `rm --volumes` can briefly show one).
+fn leaked_since(before: &std::collections::BTreeSet<String>) -> Vec<String> {
+    let first = dangling_anonymous();
+    if first.is_subset(before) {
+        return vec![];
+    }
+    std::thread::sleep(Duration::from_secs(3));
+    let again = dangling_anonymous();
+    first
+        .difference(before)
+        .filter(|v| again.contains(*v))
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn an_image_volume_leaves_no_anonymous_volume_behind() {
+    if !enabled() {
+        return;
+    }
+    let pg = image("postgres");
+    let before = dangling_anonymous();
+    // Both the step and the data-less service run an image that declares a `VOLUME`.
+    let mut j = job(&pg, &[("t", "true", 30)]);
+    j.services = vec![Service {
+        name: "db".into(),
+        image: pg.clone(),
+        env: [("POSTGRES_PASSWORD".to_string(), "sandbox-only".to_string())].into(),
+        data: None,
+    }];
+    let r = run(&j);
+    assert_eq!(r.steps[0].exit, 0, "{r:?}");
+    let dir = PathBuf::from(std::env::var("HOME").unwrap())
+        .join("jobs")
+        .join(&j.job);
+    assert!(
+        dir.join("job.json").exists() && !dir.join("src.tar").exists(),
+        "the tar goes once imported"
+    );
+    let leaked = leaked_since(&before);
+    assert!(leaked.is_empty(), "anonymous volumes left: {leaked:?}");
+}
+
 #[test]
 fn the_reaper_spares_an_unlabelled_decoy() {
     if !enabled() {
@@ -211,6 +267,7 @@ fn the_reaper_spares_an_unlabelled_decoy() {
     }
     let bb = image("busybox");
     let (decoy, old) = (format!("decoy-{}", hex()), format!("j-{}", hex()));
+    let before = dangling_anonymous();
     podman(&["create", "--name", &decoy, &bb, "true"]);
     podman(&[
         "create",
@@ -220,7 +277,8 @@ fn the_reaper_spares_an_unlabelled_decoy() {
         &format!("wg.job={old}"),
         "--label",
         "wg.created=1",
-        &bb,
+        // postgres declares a `VOLUME`: the reaper must take the anonymous volume with it.
+        &image("postgres"),
         "true",
     ]);
     let v = agent(&["reap", "--older-than", "3600"], &[]);
@@ -230,6 +288,8 @@ fn the_reaper_spares_an_unlabelled_decoy() {
         "the decoy stays"
     );
     assert!(!podman(&["ps", "-a", "--format", "{{.Names}}"]).contains(&old));
+    let leaked = leaked_since(&before);
+    assert!(leaked.is_empty(), "anonymous volumes left: {leaked:?}");
     podman(&["rm", "-f", &decoy]);
 }
 

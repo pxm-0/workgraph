@@ -8,21 +8,22 @@ use std::time::Duration;
 
 const T: Duration = Duration::from_secs(120);
 
-/// `(kind, list argv, id field, remove argv prefix)`.
+/// `(kind, list argv, id field, remove argv prefix)`. Containers go first, with `--volumes`:
+/// `pod rm` would take them but leave the anonymous volumes an image's `VOLUME` made.
 fn kinds() -> [(&'static str, Vec<String>, &'static str, Vec<String>); 3] {
     let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
     [
+        (
+            "containers",
+            s(&["ps", "-a", "--filter", "label=wg.job", "--format", "json"]),
+            "Id",
+            s(&["rm", "-f", "--volumes"]),
+        ),
         (
             "pods",
             s(&["pod", "ps", "--filter", "label=wg.job", "--format", "json"]),
             "Id",
             s(&["pod", "rm", "-f"]),
-        ),
-        (
-            "containers",
-            s(&["ps", "-a", "--filter", "label=wg.job", "--format", "json"]),
-            "Id",
-            s(&["rm", "-f"]),
         ),
         (
             "volumes",
@@ -48,6 +49,8 @@ pub fn stale(listed: &Value, id_field: &str, older: u64, now: u64) -> Vec<String
         .into_iter()
         .flatten()
         .filter(|o| o["Labels"]["wg.job"].is_string())
+        // An infra container can only go with its pod.
+        .filter(|o| o["IsInfra"] != true)
         .filter(|o| {
             o["Labels"]["wg.created"]
                 .as_str()
@@ -96,7 +99,8 @@ mod tests {
             { "Id": "new", "Labels": { "wg.job": "j-2", "wg.created": "9950" } },
             { "Id": "nocreated", "Labels": { "wg.job": "j-3" } },
             { "Id": "decoy", "Labels": { "app": "argus" } },
-            { "Id": "nolabels" }
+            { "Id": "nolabels" },
+            { "Id": "infra", "IsInfra": true, "Labels": { "wg.job": "j-1", "wg.created": "1" } }
         ]);
         assert_eq!(stale(&listed, "Id", 7200, 10_000), ["old", "nocreated"]);
     }
@@ -121,16 +125,27 @@ mod tests {
                     ),
                 ),
                 ("volume rm -f v1", ran(1, "busy")),
-                ("ps -a", ran(0, "[]")),
+                (
+                    "ps -a",
+                    ran(
+                        0,
+                        r#"[{"Id":"c1","Labels":{"wg.job":"j-1","wg.created":"1"}}]"#,
+                    ),
+                ),
             ],
         };
         let out = reap(&pm, 7200, 100_000).unwrap();
         assert_eq!(
             out["removed"],
-            json!({ "pods": 1, "containers": 0, "volumes": 1 })
+            json!({ "pods": 1, "containers": 1, "volumes": 1 })
         );
         assert_eq!(out["failed"], json!(["volumes v1"]));
         let calls = pm.calls.lock().unwrap().clone();
+        let at = |c: &str| calls.iter().position(|x| x == c).unwrap();
+        assert!(
+            at("rm -f --volumes c1") < at("pod rm -f p1"),
+            "containers and their volumes go before the pod"
+        );
         assert!(calls.iter().all(|c| !c.contains("prune")));
         assert!(calls
             .iter()

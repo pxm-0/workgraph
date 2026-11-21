@@ -100,6 +100,11 @@ fn common(job: &str, name: &str, created: u64, l: &Limits) -> Vec<String> {
         "--env-file",
         "/dev/null",
         "--read-only",
+        // Bounded file logs: journald would keep a second copy of every step's output.
+        "--log-driver",
+        "k8s-file",
+        "--log-opt",
+        "max-size=1m",
     ]));
     a
 }
@@ -176,8 +181,9 @@ pub fn inspect(name: &str) -> Vec<String> {
     s(&["inspect", name, "--format", "json"])
 }
 
+/// `--volumes` takes the anonymous volumes an image's `VOLUME` made; `pod rm` has no such flag.
 pub fn rm(name: &str) -> Vec<String> {
-    s(&["rm", "-f", "--time", "5", name])
+    s(&["rm", "-f", "--volumes", "--time", "5", name])
 }
 
 pub fn pod_rm(job: &str) -> Vec<String> {
@@ -356,6 +362,10 @@ mod tests {
             "--env-file",
             "/dev/null",
             "--read-only",
+            "--log-driver",
+            "k8s-file",
+            "--log-opt",
+            "max-size=1m",
             "--tmpfs",
             "/tmp:rw,nosuid,nodev,size=512m",
             "--cap-drop",
@@ -412,6 +422,7 @@ mod tests {
         assert!(leftovers("volumes", "j-1").contains(&"label=wg.job=j-1".to_string()));
         assert!(leftovers("containers", "j-1").contains(&"label=wg.job=j-1".to_string()));
         assert_eq!(volume_rm(&["a".into()]), ["volume", "rm", "-f", "a"]);
+        assert_eq!(rm("c"), ["rm", "-f", "--volumes", "--time", "5", "c"]);
         let e = env();
         assert!(e
             .iter()

@@ -85,8 +85,9 @@ jobs:
           podman pull -q "$PG"
       - name: Sandbox suite
         run: XDG_RUNTIME_DIR="/run/user/$(id -u)" WG_PODMAN=1 cargo test --locked -p wg --test sandbox_podman -- --test-threads 2
+      # The runner starts with no volumes, so any dangling one is an anonymous volume a job leaked.
       - name: Nothing labelled is left
-        run: test -z "$(podman ps -a --filter label=wg.job -q)" && test -z "$(podman volume ls --filter label=wg.job -q)"
+        run: test -z "$(podman ps -a --filter label=wg.job -q)" && test -z "$(podman volume ls --filter label=wg.job -q)" && test -z "$(podman volume ls --filter dangling=true -q)"
       - name: Diagnostics
         if: failure()
         run: |
