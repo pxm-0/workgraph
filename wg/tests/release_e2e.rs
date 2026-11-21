@@ -44,10 +44,10 @@ fn push_to_branch(f: &Fx, branch: &str) {
 
 /// A release-on repo whose issue 1 went through dev and QA to a PR the owner approved and merged
 /// (after `late`, a commit pushed past the approval).
-fn approved_and_merged(name: &str, cli: &str, late: bool) -> Fx {
+fn approved_and_merged(name: &str, cli: &str, late: bool, rehearsal: &str) -> Fx {
     let f = fx(name, cli, &["o/r"], "");
     f.with_sandbox(false);
-    f.append_toml("release_rehearsal = [\"python3 check.py\"]");
+    f.append_toml(&format!("release_rehearsal = [\"{rehearsal}\"]"));
     f.set_repo("o/r", "release", "true");
     f.issue(
         "o/r",
@@ -218,25 +218,11 @@ fn dev_qa_draft_pr_approval_then_release_stops_at_the_owners_gate() {
         .iter()
         .any(|e| e["kind"] == "parked" && e["human"] == "ready-to-release"));
 
-    // At the merge commit, verified there, the plan written, and nothing approved or deployed.
+    // The release worktree is scratch once the chain stops at the owner's gate.
     let wt = PathBuf::from(rel_worktree(&f));
-    assert_eq!(sh(&wt, "git rev-parse HEAD"), sha);
-    let task: Value = serde_json::from_str(
-        &std::fs::read_to_string(wt.join(".haruspex/tasks/T-001.json")).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(task["status"], "ready_for_release");
-    assert!(task["release_plan"]["rollback_steps"][0].is_string());
-    let state: Value =
-        serde_json::from_str(&std::fs::read_to_string(wt.join(".haruspex/state.json")).unwrap())
-            .unwrap();
-    assert_eq!(state["approvals"]["ready_to_release"]["status"], "pending");
-    assert!(state["gates"]["ready_to_release"]["status"] != "passed");
-    let evidence = sh(&wt, "ls .haruspex/evidence/checks | wc -l");
-    assert!(
-        evidence.parse::<u32>().unwrap() >= 2,
-        "verify ran again here"
-    );
+    assert!(!wt.exists(), "{}", wt.display());
+    assert!(!sh(&f.repo("o/r"), "git worktree list").contains("release-1"));
+    assert_eq!(kinds(&sj, "release_worktree_removed")[0]["issue"], 1);
 
     assert_eq!(f.labels("o/r", 1), ["wg:release-ready"]);
     assert_eq!(f.record("o/r", 1)["status"], "release-ready");
@@ -338,7 +324,7 @@ fn a_seeded_e2e_failure_is_fixed_by_one_blamed_round_re_reviewed_and_published()
 #[test]
 fn a_release_incident_labels_the_issue_with_its_class_only_and_stops_the_shift() {
     let Some(cli) = cli() else { return };
-    let f = approved_and_merged("release-incident", &cli, false);
+    let f = approved_and_merged("release-incident", &cli, false, "python3 check.py");
     std::fs::write(f.home.join("release-incident"), "").unwrap();
     let out = f.shift();
     let id = out["shift"].as_str().unwrap().to_string();
@@ -362,7 +348,7 @@ fn a_release_incident_labels_the_issue_with_its_class_only_and_stops_the_shift()
 #[test]
 fn a_pr_merged_past_the_verified_head_is_release_stuck_listed_and_retryable() {
     let Some(cli) = cli() else { return };
-    let f = approved_and_merged("release-late", &cli, true);
+    let f = approved_and_merged("release-late", &cli, true, "python3 check.py");
     let out = f.shift();
     let id = out["shift"].as_str().unwrap().to_string();
     let sj = shift_journal(&f, &id);
@@ -384,4 +370,20 @@ fn a_pr_merged_past_the_verified_head_is_release_stuck_listed_and_retryable() {
     let (code, r) = f.wg(&["shift", "retry-release", "--repo", "o/r", "--issue", "1"]);
     assert_eq!((code, &r["status"]), (0, &json!("verified")), "{r}");
     assert_eq!(f.record("o/r", 1)["status"], "verified");
+}
+
+#[test]
+fn a_release_stuck_after_its_chain_ran_keeps_its_worktree() {
+    let Some(cli) = cli() else { return };
+    let f = approved_and_merged("release-stuck-kept", &cli, false, "exit 1");
+    let out = f.shift();
+    let id = out["shift"].as_str().unwrap().to_string();
+    let sj = shift_journal(&f, &id);
+    assert_eq!(kinds(&sj, "release_started").len(), 1, "{sj:?}");
+    assert_eq!(
+        kinds(&sj, "release_finished")[0]["outcome"],
+        "release-stuck"
+    );
+    assert!(kinds(&sj, "release_worktree_removed").is_empty());
+    assert!(PathBuf::from(rel_worktree(&f)).exists());
 }

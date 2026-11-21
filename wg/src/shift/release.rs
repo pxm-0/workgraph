@@ -82,6 +82,7 @@ pub fn line(e: &Env, repo: &RepoCfg) -> Result<Option<String>, String> {
                     "release_parked",
                     json!({ "repo": repo.name, "issue": issue, "why": why, "run": out["runId"] }),
                 )?;
+                remove_worktree(e, repo, issue)?;
                 continue;
             }
             // The shift stops; GitHub learns the class only (§7.3 step 8).
@@ -130,6 +131,10 @@ pub fn line(e: &Env, repo: &RepoCfg) -> Result<Option<String>, String> {
             "release_finished",
             json!({ "repo": repo.name, "issue": issue, "pr": pr, "merge": merge, "outcome": status, "run": run, "note": note }),
         )?;
+        // A stuck release or an incident keeps its worktree for the owner's diagnosis.
+        if status == "release-ready" {
+            remove_worktree(e, repo, issue)?;
+        }
         if status == "incident" {
             return Ok(Some("an incident in the release line".into()));
         }
@@ -156,6 +161,32 @@ fn stuck(pr: u64, note: &str, run: Option<String>) -> Outcome {
         run,
         Some(crate::ids::one_line(note, 500)),
     )
+}
+
+/// Where `issue`'s release worktree lives, relative to the worktrees root.
+fn worktree_rel(repo: &str, issue: u64) -> String {
+    format!("{}/release-{issue}", record::slug(repo))
+}
+
+/// Removes `issue`'s release worktree through the path-guarded git helper; a failure is journaled
+/// and never fails the release line.
+fn remove_worktree(e: &Env, repo: &RepoCfg, issue: u64) -> Result<(), String> {
+    let root = e.dirs.worktrees();
+    let path = root.join(worktree_rel(&repo.name, issue));
+    if !path.exists() {
+        return Ok(());
+    }
+    match crate::git::remove_worktree(Path::new(&repo.path), &root, &path) {
+        Ok(()) => e.journal.append(
+            "release_worktree_removed",
+            json!({ "repo": repo.name, "issue": issue, "path": path }),
+        ),
+        Err(why) => e.journal.append(
+            "warning",
+            json!({ "warning": format!("release worktree {}: {why}", path.display()) }),
+        ),
+    }
+    .map(|_| ())
 }
 
 /// The PR merged with the head the owner verified, or the release is refused: a commit pushed to
@@ -241,7 +272,7 @@ fn prepare(e: &Env, repo: &RepoCfg, rec: TaskRecord, merge: &str) -> Result<(End
     let worktree = crate::git::release_worktree(
         Path::new(&repo.path),
         &e.dirs.worktrees(),
-        &format!("{}/release-{}", record::slug(&repo.name), rec.issue),
+        &worktree_rel(&repo.name, rec.issue),
         merge,
     )?;
     let tainted = repo.always_tainted || tainted_earlier(e.dirs, &rec.runs);
