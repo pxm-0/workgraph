@@ -51,18 +51,32 @@ fn remove(root: &Path, path: &Path) -> Result<(), String> {
 }
 
 /// A live pid holding the shift lock or a memory lock. Locks name a pid, not a run, so any live
-/// holder may own any tmp dir.
-fn live_holder(dirs: &Dirs) -> Option<u32> {
-    let memory_locks = std::fs::read_dir(dirs.memory_root())
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "lock"));
-    std::iter::once(dirs.shift_lock())
-        .chain(memory_locks)
-        .filter_map(|p| lock::holder(&p))
-        .find(|pid| lock::alive(*pid))
+/// holder may own any tmp dir. A lock dir or lock file it cannot read is an error, never "no lock":
+/// this check is all that stands between a live run and its tmp dir.
+fn live_holder(dirs: &Dirs) -> Result<Option<u32>, String> {
+    let memory_locks: Vec<PathBuf> = match std::fs::read_dir(dirs.memory_root()) {
+        Ok(rd) => rd
+            .map(|e| e.map(|e| e.path()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("cannot list {}: {e}", dirs.memory_root().display()))?
+            .into_iter()
+            .filter(|p| p.extension().is_some_and(|x| x == "lock"))
+            .collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
+        Err(e) => return Err(format!("cannot list {}: {e}", dirs.memory_root().display())),
+    };
+    for p in std::iter::once(dirs.shift_lock()).chain(memory_locks) {
+        let pid = match std::fs::read_to_string(&p) {
+            Ok(text) => lock::first_pid(&text),
+            // Released between listing and reading, or never taken.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(format!("cannot read {}: {e}", p.display())),
+        };
+        if let Some(pid) = pid.filter(|pid| lock::alive(*pid)) {
+            return Ok(Some(pid));
+        }
+    }
+    Ok(None)
 }
 
 fn modified(p: &Path) -> Result<SystemTime, String> {
@@ -71,48 +85,61 @@ fn modified(p: &Path) -> Result<SystemTime, String> {
         .map_err(|e| format!("{}: {e}", p.display()))
 }
 
-/// Entries of `dir` with their mtimes; a missing `dir` has none.
-fn entries(dir: &Path) -> Result<Vec<(PathBuf, SystemTime)>, String> {
+/// Readable entries with their mtimes, and one error per entry that could not be read.
+type Listing = (Vec<(PathBuf, SystemTime)>, Vec<String>);
+
+/// Entries of `dir` that `wanted` names, with their mtimes, and an error for each one that could
+/// not be read; a missing `dir` has none. Names are filtered before the stat, so one bad entry
+/// elsewhere in `dir` stops nothing.
+fn entries(dir: &Path, wanted: impl Fn(&Path) -> bool) -> Result<Listing, String> {
     let rd = match std::fs::read_dir(dir) {
         Ok(rd) => rd,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((vec![], vec![])),
         Err(e) => return Err(format!("cannot list {}: {e}", dir.display())),
     };
-    rd.map(|e| {
-        let p = e
-            .map_err(|e| format!("cannot list {}: {e}", dir.display()))?
-            .path();
-        Ok((p.clone(), modified(&p)?))
-    })
-    .collect()
+    let (found, errors): (Vec<_>, Vec<_>) = rd
+        .map(|e| {
+            e.map(|e| e.path())
+                .map_err(|e| format!("cannot list {}: {e}", dir.display()))
+        })
+        .filter(|p| p.as_ref().map_or(true, |p| wanted(p)))
+        .map(|p| p.and_then(|p| modified(&p).map(|m| (p, m))))
+        .partition(Result::is_ok);
+    Ok((
+        found.into_iter().map(Result::unwrap).collect(),
+        errors.into_iter().map(Result::unwrap_err).collect(),
+    ))
 }
 
-/// Removes `paths` under `root`, reporting each as removed or with its error.
-fn remove_all(root: &Path, paths: Vec<PathBuf>) -> Value {
-    let (removed, errors): (Vec<_>, Vec<_>) = paths
+/// Removes `paths` under `root`, reporting each as removed or with its error, after `errors`.
+fn remove_all(root: &Path, paths: Vec<PathBuf>, errors: Vec<String>) -> Value {
+    let (removed, failed): (Vec<_>, Vec<_>) = paths
         .into_iter()
         .map(|p| remove(root, &p).map(|_| p.display().to_string()))
         .partition(Result::is_ok);
     json!({
         "removed": removed.into_iter().map(Result::unwrap).collect::<Vec<_>>(),
-        "errors": errors.into_iter().map(Result::unwrap_err).collect::<Vec<_>>(),
+        "errors": errors.into_iter().chain(failed.into_iter().map(Result::unwrap_err)).collect::<Vec<_>>(),
     })
 }
 
 /// Tmp dirs older than a day, left by runs that died. Skipped while a run or shift is live.
 pub fn sweep_tmp(dirs: &Dirs) -> Value {
-    if let Some(pid) = live_holder(dirs) {
-        return json!({ "skipped": format!("pid {pid} holds a wg lock") });
+    match live_holder(dirs) {
+        Ok(Some(pid)) => return json!({ "skipped": format!("pid {pid} holds a wg lock") }),
+        Err(e) => return json!({ "skipped": format!("cannot check wg locks: {e}") }),
+        Ok(None) => {}
     }
     let root = tmp_root(dirs);
     let now = SystemTime::now();
-    match entries(&root) {
-        Ok(es) => remove_all(
+    match entries(&root, |_| true) {
+        Ok((es, errors)) => remove_all(
             &root,
             es.into_iter()
                 .filter(|(_, m)| now.duration_since(*m).is_ok_and(|age| age > TMP_MAX_AGE))
                 .map(|(p, _)| p)
                 .collect(),
+            errors,
         ),
         Err(e) => json!({ "removed": [], "errors": [e] }),
     }
@@ -121,15 +148,13 @@ pub fn sweep_tmp(dirs: &Dirs) -> Value {
 /// Removes all but the newest `DOCTOR_KEEP` doctor probe run dirs.
 pub fn prune_doctor(dirs: &Dirs) -> Value {
     let root = dirs.state().join("runs");
-    match entries(&root) {
-        Ok(es) => {
-            let mut probes: Vec<_> = es
-                .into_iter()
-                .filter(|(p, _)| {
-                    p.file_name()
-                        .is_some_and(|n| n.to_string_lossy().starts_with("doctor-"))
-                })
-                .collect();
+    let is_probe = |p: &Path| {
+        p.file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with("doctor-"))
+    };
+    match entries(&root, is_probe) {
+        Ok((probes, errors)) => {
+            let mut probes = probes;
             probes.sort_by_key(|(_, m)| std::cmp::Reverse(*m));
             remove_all(
                 &root,
@@ -138,6 +163,7 @@ pub fn prune_doctor(dirs: &Dirs) -> Value {
                     .skip(DOCTOR_KEEP)
                     .map(|(p, _)| p)
                     .collect(),
+                errors,
             )
         }
         Err(e) => json!({ "removed": [], "errors": [e] }),
@@ -227,6 +253,62 @@ mod tests {
         std::fs::create_dir_all(d.work().join("tmp")).unwrap();
         assert!(remove(&d.work().join("tmp"), &outside).is_err());
         assert!(outside.exists());
+        let _ = std::fs::remove_dir_all(&d.home);
+    }
+
+    #[test]
+    fn sweep_skips_when_a_lock_cannot_be_read() {
+        let d = home("unreadable");
+        let old = d.run_tmp("r-old");
+        dir_aged(&old, 2 * DAY);
+        // A dir where a lock file should be: it exists but reading it fails.
+        std::fs::create_dir_all(d.memory_root().join("o__r.lock")).unwrap();
+        let out = sweep_tmp(&d);
+        assert!(
+            out["skipped"]
+                .as_str()
+                .is_some_and(|s| s.contains("cannot read")),
+            "{out}"
+        );
+        assert!(old.exists());
+
+        // A memory root that cannot be listed is no lock either.
+        std::fs::remove_dir_all(d.memory_root()).unwrap();
+        std::fs::write(d.memory_root(), "").unwrap();
+        let out = sweep_tmp(&d);
+        assert!(
+            out["skipped"]
+                .as_str()
+                .is_some_and(|s| s.contains("cannot list")),
+            "{out}"
+        );
+        assert!(old.exists());
+        let _ = std::fs::remove_dir_all(&d.home);
+    }
+
+    #[test]
+    fn a_bad_entry_is_its_own_error_and_others_are_still_pruned() {
+        let d = home("badentry");
+        for i in 0..5u64 {
+            dir_aged(
+                &d.run(&format!("doctor-{i}")),
+                Duration::from_secs(60 * (i + 1)),
+            );
+        }
+        let runs = d.state().join("runs");
+        std::os::unix::fs::symlink(d.home.join("gone"), runs.join("r-dangling")).unwrap();
+        let out = prune_doctor(&d);
+        assert_eq!(
+            out["errors"],
+            json!([]),
+            "only doctor-* entries are stat'd: {out}"
+        );
+        assert_eq!(out["removed"].as_array().map(Vec::len), Some(2), "{out}");
+
+        std::os::unix::fs::symlink(d.home.join("gone"), runs.join("doctor-dangling")).unwrap();
+        let out = prune_doctor(&d);
+        assert_eq!(out["errors"].as_array().map(Vec::len), Some(1), "{out}");
+        assert!(d.run("doctor-0").exists() && d.run("doctor-2").exists());
         let _ = std::fs::remove_dir_all(&d.home);
     }
 }
