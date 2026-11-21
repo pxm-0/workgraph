@@ -82,6 +82,9 @@ pub fn line(e: &Env, repo: &RepoCfg) -> Result<Option<String>, String> {
                     "release_parked",
                     json!({ "repo": repo.name, "issue": issue, "why": why, "run": out["runId"] }),
                 )?;
+                // Only a parked release drops its worktree: the next shift recreates it. A ready
+                // release keeps it, as the owner's ready-to-release gate reads its Haruspex task
+                // and state; a stuck one or an incident keeps it for diagnosis.
                 remove_worktree(e, repo, issue)?;
                 continue;
             }
@@ -131,10 +134,6 @@ pub fn line(e: &Env, repo: &RepoCfg) -> Result<Option<String>, String> {
             "release_finished",
             json!({ "repo": repo.name, "issue": issue, "pr": pr, "merge": merge, "outcome": status, "run": run, "note": note }),
         )?;
-        // A stuck release or an incident keeps its worktree for the owner's diagnosis.
-        if status == "release-ready" {
-            remove_worktree(e, repo, issue)?;
-        }
         if status == "incident" {
             return Ok(Some("an incident in the release line".into()));
         }

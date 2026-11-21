@@ -218,11 +218,27 @@ fn dev_qa_draft_pr_approval_then_release_stops_at_the_owners_gate() {
         .iter()
         .any(|e| e["kind"] == "parked" && e["human"] == "ready-to-release"));
 
-    // The release worktree is scratch once the chain stops at the owner's gate.
+    // At the merge commit, verified there, the plan written, and nothing approved or deployed.
+    // The worktree stays: the owner records ready-to-release in its Haruspex state.
+    assert!(kinds(&sj, "release_worktree_removed").is_empty());
     let wt = PathBuf::from(rel_worktree(&f));
-    assert!(!wt.exists(), "{}", wt.display());
-    assert!(!sh(&f.repo("o/r"), "git worktree list").contains("release-1"));
-    assert_eq!(kinds(&sj, "release_worktree_removed")[0]["issue"], 1);
+    assert_eq!(sh(&wt, "git rev-parse HEAD"), sha);
+    let task: Value = serde_json::from_str(
+        &std::fs::read_to_string(wt.join(".haruspex/tasks/T-001.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(task["status"], "ready_for_release");
+    assert!(task["release_plan"]["rollback_steps"][0].is_string());
+    let state: Value =
+        serde_json::from_str(&std::fs::read_to_string(wt.join(".haruspex/state.json")).unwrap())
+            .unwrap();
+    assert_eq!(state["approvals"]["ready_to_release"]["status"], "pending");
+    assert!(state["gates"]["ready_to_release"]["status"] != "passed");
+    let evidence = sh(&wt, "ls .haruspex/evidence/checks | wc -l");
+    assert!(
+        evidence.parse::<u32>().unwrap() >= 2,
+        "verify ran again here"
+    );
 
     assert_eq!(f.labels("o/r", 1), ["wg:release-ready"]);
     assert_eq!(f.record("o/r", 1)["status"], "release-ready");
