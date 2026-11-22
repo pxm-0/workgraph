@@ -215,7 +215,7 @@ impl Gh {
         self.run(&args).map(|_| ())
     }
 
-    pub(crate) fn body_file(&self, body: &str) -> Result<PathBuf, String> {
+    fn body_file(&self, body: &str) -> Result<PathBuf, String> {
         crate::state_dirs::private_dir(&self.scratch)?;
         let p = self
             .scratch
@@ -224,20 +224,36 @@ impl Gh {
         Ok(p)
     }
 
+    /// Writes `body` to a file, hands its path to `call`, and removes the file whatever `call`
+    /// returned: bodies are scratch once `gh` has read them.
+    pub(crate) fn with_body_file<T>(
+        &self,
+        body: &str,
+        call: impl FnOnce(&str) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let p = self.body_file(body)?;
+        let out = call(&p.to_string_lossy());
+        if let Err(e) = std::fs::remove_file(&p) {
+            // A leftover body must not fail a call that went through.
+            eprintln!("wg: cannot remove {}: {e}", p.display());
+        }
+        out
+    }
+
     pub fn comment(&self, repo: &str, n: u64, body: &str) -> Result<(), String> {
         check_repo(repo)?;
-        let f = self.body_file(body)?;
-        let f = f.to_string_lossy();
-        self.run(&[
-            "issue",
-            "comment",
-            &n.to_string(),
-            "-R",
-            repo,
-            "--body-file",
-            &f,
-        ])
-        .map(|_| ())
+        self.with_body_file(body, |f| {
+            self.run(&[
+                "issue",
+                "comment",
+                &n.to_string(),
+                "-R",
+                repo,
+                "--body-file",
+                f,
+            ])
+            .map(|_| ())
+        })
     }
 
     /// The PR whose head is `branch`, in any state.
@@ -274,33 +290,33 @@ impl Gh {
         labels: &[String],
     ) -> Result<String, String> {
         check_repo(repo)?;
-        let f = self.body_file(body)?;
-        let f = f.to_string_lossy();
-        let mut args = vec![
-            "pr",
-            "create",
-            "-R",
-            repo,
-            "--head",
-            head,
-            "--base",
-            base,
-            "--title",
-            title,
-            "--body-file",
-            &f,
-        ];
-        if draft {
-            args.push("--draft");
-        }
-        for l in labels {
-            // A self-lane PR is opened with wg:self; no issue ever gets it from the factory.
-            if !(l == "wg:self" && crate::git::self_branch(head)) {
-                crate::ids::gh_label(l)?;
+        let out = self.with_body_file(body, |f| {
+            let mut args = vec![
+                "pr",
+                "create",
+                "-R",
+                repo,
+                "--head",
+                head,
+                "--base",
+                base,
+                "--title",
+                title,
+                "--body-file",
+                f,
+            ];
+            if draft {
+                args.push("--draft");
             }
-            args.extend(["--label", l.as_str()]);
-        }
-        let out = self.run(&args)?;
+            for l in labels {
+                // A self-lane PR is opened with wg:self; no issue ever gets it from the factory.
+                if !(l == "wg:self" && crate::git::self_branch(head)) {
+                    crate::ids::gh_label(l)?;
+                }
+                args.extend(["--label", l.as_str()]);
+            }
+            self.run(&args)
+        })?;
         let url = out
             .lines()
             .rev()
@@ -422,12 +438,30 @@ mod tests {
             .is_ok());
         assert!(g.edit_labels("not a repo", 1, &[], &[]).is_err());
         assert!(g.comment("o/r", 3, "hello `$(rm -rf ~)`").is_ok());
-        let bodies: Vec<_> = std::fs::read_dir(&g.scratch).unwrap().collect();
-        assert_eq!(bodies.len(), 1);
         assert!(g
             .pr_create("o/r", "wg/1-x", "main", "feat: x", "b", true, &[])
             .unwrap_err()
             .contains("no URL"));
+        assert_eq!(std::fs::read_dir(&g.scratch).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn body_files_are_removed_once_gh_returns_success_or_failure() {
+        let seen = std::env::temp_dir().join(format!("wg-gh-seen-{}", std::process::id()));
+        let _ = std::fs::remove_file(&seen);
+        let ok = fake(
+            "body-ok",
+            &format!(
+                "for a; do last=$a; done; cat \"$last\" > {}",
+                seen.display()
+            ),
+        );
+        ok.comment("o/r", 3, "the body").unwrap();
+        assert_eq!(std::fs::read_to_string(&seen).unwrap(), "the body");
+        assert_eq!(std::fs::read_dir(&ok.scratch).unwrap().count(), 0);
+        let failing = fake("body-fail", "exit 1");
+        assert!(failing.comment("o/r", 3, "the body").is_err());
+        assert_eq!(std::fs::read_dir(&failing.scratch).unwrap().count(), 0);
     }
 
     #[test]

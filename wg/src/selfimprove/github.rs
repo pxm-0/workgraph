@@ -247,17 +247,18 @@ pub fn label_pr(gh: &Gh, repo: &str, n: u64, label: &str) -> Result<(), String> 
 
 pub fn comment_pr(gh: &Gh, repo: &str, n: u64, body: &str) -> Result<(), String> {
     crate::config::repo_slug(repo)?;
-    let f = gh.body_file(body)?;
-    gh.run(&[
-        "pr",
-        "comment",
-        &n.to_string(),
-        "-R",
-        repo,
-        "--body-file",
-        &f.to_string_lossy(),
-    ])
-    .map(|_| ())
+    gh.with_body_file(body, |f| {
+        gh.run(&[
+            "pr",
+            "comment",
+            &n.to_string(),
+            "-R",
+            repo,
+            "--body-file",
+            f,
+        ])
+        .map(|_| ())
+    })
 }
 
 /// Files an issue and returns its number. The label is checked by `gh_label`, so `wg:self` can
@@ -272,19 +273,20 @@ pub fn create_issue(
     crate::config::repo_slug(repo)?;
     crate::ids::gh_label(label)?;
     let title = crate::ids::one_line(title, 120);
-    let f = gh.body_file(body)?;
-    let out = gh.run(&[
-        "issue",
-        "create",
-        "-R",
-        repo,
-        "--title",
-        &title,
-        "--body-file",
-        &f.to_string_lossy(),
-        "--label",
-        label,
-    ])?;
+    let out = gh.with_body_file(body, |f| {
+        gh.run(&[
+            "issue",
+            "create",
+            "-R",
+            repo,
+            "--title",
+            &title,
+            "--body-file",
+            f,
+            "--label",
+            label,
+        ])
+    })?;
     out.lines()
         .rev()
         .find_map(|l| {
