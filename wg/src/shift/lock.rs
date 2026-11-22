@@ -23,7 +23,7 @@ pub fn alive(pid: u32) -> bool {
         .is_ok_and(|s| s.success())
 }
 
-fn first_pid(text: &str) -> Option<u32> {
+pub(crate) fn first_pid(text: &str) -> Option<u32> {
     text.split_whitespace().next()?.parse().ok()
 }
 

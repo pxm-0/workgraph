@@ -187,13 +187,10 @@ pub fn run(case: &Case, home: &Path, step: driver::Step) -> Result<Replayed, Str
     };
     let run_id = "r-replay0".to_string();
     let run_dir = dirs.run(&run_id);
-    for d in [
-        run_dir.join("logs"),
-        run_dir.join("guard"),
-        dirs.run_tmp(&run_id),
-    ] {
+    for d in [run_dir.join("logs"), run_dir.join("guard")] {
         crate::state_dirs::private_dir(&d)?;
     }
+    let _tmp = crate::scratch::RunTmp::create(&dirs, &run_id)?;
     let cfg = config(case)?;
     let read = case.replies.get("read").cloned().unwrap_or(Value::Null);
     let units = read["units"].as_array().cloned().unwrap_or_default();

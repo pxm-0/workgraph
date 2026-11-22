@@ -49,9 +49,27 @@ fn probe_provider(
 ) -> Result<String, String> {
     let id = format!("doctor-{}", crate::tokens_store::random_hex(4)?);
     let dir = dirs.run(&id);
-    let tmp = dirs.run_tmp(&id);
     private_dir(&dir)?;
-    private_dir(&tmp)?;
+    let tmp = crate::scratch::RunTmp::create(dirs, &id)?;
+    let verdict = call(cfg, dirs, provider, &id, &dir, &dirs.run_tmp(&id));
+    drop(tmp);
+    // Logged, never fatal: the verdict stands whatever the cleanup finds.
+    let pruned = crate::scratch::prune_doctor(dirs);
+    for e in pruned["errors"].as_array().into_iter().flatten() {
+        eprintln!("wg doctor: {}", e.as_str().unwrap_or_default());
+    }
+    verdict
+}
+
+/// The probe's call itself, in the run dir `dir` with `tmp` as its cwd.
+fn call(
+    cfg: &Config,
+    dirs: &Dirs,
+    provider: &crate::claude::providers::Provider,
+    id: &str,
+    dir: &std::path::Path,
+    tmp: &std::path::Path,
+) -> Result<String, String> {
     let manifest_path = dir.join("doctor.manifest.json");
     let manifest = Manifest {
         label: "doctor".into(),
@@ -101,12 +119,12 @@ fn probe_provider(
             &EnvInput {
                 home: &dirs.home,
                 user: &std::env::var("USER").unwrap_or_default(),
-                tmpdir: &tmp,
-                run: &id,
+                tmpdir: tmp,
+                run: id,
                 manifest: &manifest_path,
             },
         ),
-        cwd: tmp.clone(),
+        cwd: tmp.to_path_buf(),
         stdin: "Reply with ok = true.".into(),
         timeout: Duration::from_secs(120),
     });
@@ -114,7 +132,7 @@ fn probe_provider(
         .map_err(|e| format!("cannot keep the envelope: {e}"))?;
     let classified = classify(raw.exit, raw.timed_out, &raw.stdout);
     // Every call is ledgered, the doctor's too.
-    let ledger = Ledger::new(&dirs.ledger(), &id, 1);
+    let ledger = Ledger::new(&dirs.ledger(), id, 1);
     let lease = ledger.lease("doctor", &provider.id, provider.model(Tier::Haiku))?;
     let env = match &classified {
         Ok(e) => e.clone(),

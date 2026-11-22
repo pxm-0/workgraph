@@ -214,13 +214,10 @@ pub fn arm(
         status: Default::default(),
     };
     let run_dir = dirs.run(&run_id);
-    for d in [
-        run_dir.join("logs"),
-        run_dir.join("guard"),
-        dirs.run_tmp(&run_id),
-    ] {
+    for d in [run_dir.join("logs"), run_dir.join("guard")] {
         crate::state_dirs::private_dir(&d)?;
     }
+    let _tmp = crate::scratch::RunTmp::create(dirs, &run_id)?;
     let ctx = RunCtx {
         ports: crate::ports::Ports {
             proc: &crate::ports::RealProc,

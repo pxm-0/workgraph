@@ -116,13 +116,10 @@ pub fn run(args: &[String]) -> Result<Value, String> {
     if run_dir.exists() {
         return Err(format!("run {run_id} already exists"));
     }
-    for d in [
-        run_dir.join("logs"),
-        run_dir.join("guard"),
-        dirs.run_tmp(&run_id),
-    ] {
+    for d in [run_dir.join("logs"), run_dir.join("guard")] {
         private_dir(&d)?;
     }
+    let _tmp = crate::scratch::RunTmp::create(&dirs, &run_id)?;
     let hx = PinnedHaruspex::new(&pin, &repo, &[dirs.work(), dirs.state()])?;
     let slug = git::slug(&repo);
     let sandbox = crate::sandbox::client::SimSandbox {
