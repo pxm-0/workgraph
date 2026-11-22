@@ -1403,8 +1403,9 @@ as `vm_host_reach: accepted`, so the report keeps stating it.
    - The Mac treats the patch as untrusted. It decodes it; `git apply --numstat -z` must list only
      paths in the unit's `files`; it must be ≤ 2 MB; then `git apply --check`, then `git apply`.
    - Anything else is refused and reported to the fixer.
-6. **Cleanup** always runs, through a drop guard plus explicit steps: `pod rm -f`, `volume rm -f`
-   of the job's volumes, then a count of leftovers with `--filter label=wg.job=<job>`. Any
+6. **Cleanup** always runs, through a drop guard plus explicit steps: `rm -f --volumes` of every
+   container labelled `wg.job=<job>` (so the anonymous volumes of an image's `VOLUME` go too;
+   `pod rm` has no `-v`), `pod rm -f`, `volume rm -f` of the job's volumes, then a count of leftovers with `--filter label=wg.job=<job>`. Any
    leftover marks the sandbox dirty for the rest of the shift.
 7. **Result.** One JSON line: `{job, nonce, steps:[{name, exit, timed_out, oom, tail}], patch?,
    cleanup:{containers_left, volumes_left}}`. Tails are capped at 40 lines and 8 KB, the whole

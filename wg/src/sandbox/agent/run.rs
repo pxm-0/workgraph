@@ -24,15 +24,34 @@ pub fn volumes(job: &Job) -> Vec<String> {
     v
 }
 
-/// Removes the pod (and so every container in it), the job's volumes and any stray labelled
-/// container, then counts what is still there.
+/// Removes every labelled container with its anonymous volumes, then the pod and the job's
+/// volumes, then counts what is still there.
 pub fn cleanup(pm: &dyn Podman, job: &str, vols: &[String]) -> Cleanup {
     // Each removal is best effort: what failed shows up in the leftover counts below.
+    // Containers go before the pod: `pod rm` would take them but leave their anonymous volumes.
+    let labelled = pm.run(&podman::job_containers(job), None, ADMIN);
+    // A failed rm is a leak even once `pod rm` takes the container: its anonymous volume has no
+    // label, so the counts below would miss it.
+    let rm_failed = labelled
+        .out
+        .lines()
+        .filter_map(|l| {
+            let mut f = l.split_whitespace();
+            let id = f.next()?;
+            (f.next() != Some("true")).then_some(id)
+        })
+        .filter(|id| {
+            let r = pm.run(&podman::rm(id), None, ADMIN);
+            if !r.ok() {
+                eprintln!(
+                    "wg sandbox-agent: cannot remove container {id}: {}",
+                    crate::ids::one_line(&tail(&r.out), 300)
+                );
+            }
+            !r.ok()
+        })
+        .count() as u32;
     let _ = pm.run(&podman::pod_rm(job), None, ADMIN);
-    let strays = pm.run(&podman::leftovers("containers", job), None, ADMIN);
-    for id in strays.out.split_whitespace() {
-        let _ = pm.run(&podman::rm(id), None, ADMIN);
-    }
     let _ = pm.run(&podman::volume_rm(vols), None, ADMIN);
     let count = |kind: &str| {
         let r = pm.run(&podman::leftovers(kind, job), None, ADMIN);
@@ -44,7 +63,7 @@ pub fn cleanup(pm: &dyn Podman, job: &str, vols: &[String]) -> Cleanup {
         }
     };
     Cleanup {
-        containers_left: count("containers"),
+        containers_left: count("containers").saturating_add(rm_failed),
         volumes_left: count("volumes"),
     }
 }
@@ -115,7 +134,22 @@ fn step(
     (result, r.out)
 }
 
-/// Executes `job` with its work tar at `tar`. Never fails: sandbox problems are the result's `error`.
+/// The work now lives in the src volume. Only the store's own `src.tar` is removed; a removal
+/// that fails is logged and the reaper takes the job dir later.
+fn drop_tar(tar: &Path) {
+    if tar.file_name() != Some("src.tar".as_ref()) {
+        return;
+    }
+    match std::fs::remove_file(tar) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            eprintln!("wg sandbox-agent: cannot remove {}: {e}", tar.display())
+        }
+        _ => {}
+    }
+}
+
+/// Executes `job` with its work tar at `tar` (the store's `src.tar`, deleted once imported).
+/// Never fails: sandbox problems are the result's `error`.
 pub fn execute(pm: &dyn Podman, job: &Job, tar: &Path, created: u64) -> JobResult {
     let vols = volumes(job);
     let mut guard = Guard {
@@ -142,6 +176,7 @@ pub fn execute(pm: &dyn Podman, job: &Job, tar: &Path, created: u64) -> JobResul
             pm.run(&podman::volume_import(&vols[0]), Some(tar), ADMIN),
             "volume import",
         )?;
+        drop_tar(tar);
         for svc in &job.services {
             let mut a = podman::service(&job.job, svc, created, &job.limits);
             a.insert(1, "-d".into());
@@ -348,12 +383,68 @@ pub mod tests {
         assert!(r.steps.is_empty());
         assert_eq!(r.cleanup.containers_left, 1, "a leftover is counted");
         let calls = pm.calls.lock().unwrap().clone();
-        assert!(calls.iter().any(|c| c == "rm -f --time 5 abc"));
+        let rm = calls
+            .iter()
+            .position(|c| c == "rm -f --volumes --time 5 abc")
+            .unwrap();
+        let pod_rm = calls.iter().position(|c| c.starts_with("pod rm")).unwrap();
+        assert!(
+            rm < pod_rm,
+            "containers and their volumes go before the pod"
+        );
         let failed_count = Fake {
             calls: Mutex::new(vec![]),
             rules: vec![("volume ls", ran(1, ""))],
         };
         assert_eq!(cleanup(&failed_count, "j-1", &[]).volumes_left, u32::MAX);
+        let failed_rm = Fake {
+            calls: Mutex::new(vec![]),
+            rules: vec![
+                ("rm -f --volumes", ran(125, "volume in use")),
+                ("ps -a", ran(0, "abc\n")),
+            ],
+        };
+        let c = cleanup(&failed_rm, "j-1", &[]);
+        // One still listed, plus one for the failed rm whose anonymous volume no label can find.
+        assert_eq!(c.containers_left, 2, "a failed rm counts as left over");
+        let with_infra = Fake {
+            calls: Mutex::new(vec![]),
+            rules: vec![("ps -a", ran(0, "inf true\nabc false\n"))],
+        };
+        let _ = cleanup(&with_infra, "j-1", &[]);
+        let calls = with_infra.calls.lock().unwrap().clone();
+        assert!(calls.iter().any(|c| c == "rm -f --volumes --time 5 abc"));
+        assert!(
+            !calls
+                .iter()
+                .any(|c| c.starts_with("rm ") && c.ends_with(" inf")),
+            "the infra container goes with the pod, not by rm"
+        );
+    }
+
+    #[test]
+    fn the_tar_goes_once_imported_and_stays_when_the_import_fails() {
+        let dir = std::env::temp_dir().join(format!(
+            "wg-run-tar-{}-{}",
+            std::process::id(),
+            crate::journal::now_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tar = dir.join("src.tar");
+        let failing = Fake {
+            calls: Mutex::new(vec![]),
+            rules: vec![("volume import", ran(125, "no space left"))],
+        };
+        std::fs::write(&tar, b"TAR").unwrap();
+        execute(&failing, &job(&[("t", "true")]), &tar, 7);
+        assert!(tar.exists(), "kept for a failed import");
+        let ok = Fake {
+            calls: Mutex::new(vec![]),
+            rules: vec![],
+        };
+        let r = execute(&ok, &job(&[("t", "true")]), &tar, 7);
+        assert!(r.error.is_none() && !tar.exists(), "{r:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
