@@ -29,12 +29,17 @@ pub fn volumes(job: &Job) -> Vec<String> {
 pub fn cleanup(pm: &dyn Podman, job: &str, vols: &[String]) -> Cleanup {
     // Each removal is best effort: what failed shows up in the leftover counts below.
     // Containers go before the pod: `pod rm` would take them but leave their anonymous volumes.
-    let labelled = pm.run(&podman::leftovers("containers", job), None, ADMIN);
+    let labelled = pm.run(&podman::job_containers(job), None, ADMIN);
     // A failed rm is a leak even once `pod rm` takes the container: its anonymous volume has no
     // label, so the counts below would miss it.
     let rm_failed = labelled
         .out
-        .split_whitespace()
+        .lines()
+        .filter_map(|l| {
+            let mut f = l.split_whitespace();
+            let id = f.next()?;
+            (f.next() != Some("true")).then_some(id)
+        })
         .filter(|id| {
             let r = pm.run(&podman::rm(id), None, ADMIN);
             if !r.ok() {
@@ -402,6 +407,19 @@ pub mod tests {
         let c = cleanup(&failed_rm, "j-1", &[]);
         // One still listed, plus one for the failed rm whose anonymous volume no label can find.
         assert_eq!(c.containers_left, 2, "a failed rm counts as left over");
+        let with_infra = Fake {
+            calls: Mutex::new(vec![]),
+            rules: vec![("ps -a", ran(0, "inf true\nabc false\n"))],
+        };
+        let _ = cleanup(&with_infra, "j-1", &[]);
+        let calls = with_infra.calls.lock().unwrap().clone();
+        assert!(calls.iter().any(|c| c == "rm -f --volumes --time 5 abc"));
+        assert!(
+            !calls
+                .iter()
+                .any(|c| c.starts_with("rm ") && c.ends_with(" inf")),
+            "the infra container goes with the pod, not by rm"
+        );
     }
 
     #[test]

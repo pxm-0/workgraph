@@ -196,6 +196,20 @@ pub fn volume_rm(names: &[String]) -> Vec<String> {
     a
 }
 
+/// A job's containers as `<id> <is-infra>` lines: the pod's infra container can only go with
+/// the pod, so cleanup must not `rm` it.
+pub fn job_containers(job: &str) -> Vec<String> {
+    let filter = format!("label=wg.job={job}");
+    s(&[
+        "ps",
+        "-a",
+        "--filter",
+        &filter,
+        "--format",
+        "{{.ID}} {{.IsInfra}}",
+    ])
+}
+
 /// Ids of a job's leftover containers (`ps`) or volumes (`volume ls`), always label-filtered.
 pub fn leftovers(kind: &str, job: &str) -> Vec<String> {
     let filter = format!("label=wg.job={job}");
@@ -421,6 +435,7 @@ mod tests {
         assert_eq!(volume_import("v"), ["volume", "import", "v", "-"]);
         assert!(leftovers("volumes", "j-1").contains(&"label=wg.job=j-1".to_string()));
         assert!(leftovers("containers", "j-1").contains(&"label=wg.job=j-1".to_string()));
+        assert!(job_containers("j-1").contains(&"{{.ID}} {{.IsInfra}}".to_string()));
         assert_eq!(volume_rm(&["a".into()]), ["volume", "rm", "-f", "a"]);
         assert_eq!(rm("c"), ["rm", "-f", "--volumes", "--time", "5", "c"]);
         let e = env();
