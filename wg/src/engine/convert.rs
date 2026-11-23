@@ -25,6 +25,9 @@ fn scope(s: &str) -> Option<Scope> {
 
 fn rule(r: &Value) -> Option<Rule> {
     let pos = |k: &str| r[k].as_f64().filter(|x| x.is_finite() && *x > 0.0);
+    let check = r["check"]
+        .as_str()
+        .map(|c| crate::ids::one_line(c, wg_factory::learn::rules::CHECK_CHARS));
     Some(Rule {
         id: r["id"].as_str()?.into(),
         text: r["text"].as_str()?.into(),
@@ -32,7 +35,14 @@ fn rule(r: &Value) -> Option<Rule> {
         scope: scope(r["scope"].as_str()?)?,
         a: pos("a")?,
         b: pos("b")?,
-        check: r["check"].as_str().map(str::to_string),
+        check: check.clone(),
+        // A name without its check could retire a rule nobody can see the reason for.
+        check_name: check.and(
+            r["checkName"]
+                .as_str()
+                .filter(|n| crate::ids::check_name(n).is_ok())
+                .map(str::to_string),
+        ),
     })
 }
 
@@ -83,6 +93,9 @@ pub fn rule_json(r: &Rule) -> Value {
     let mut v = json!({ "id": r.id, "text": r.text, "scope": r.scope.name(), "sig": r.sig, "a": num(r.a), "b": num(r.b) });
     if let Some(c) = &r.check {
         v["check"] = json!(c);
+    }
+    if let Some(n) = &r.check_name {
+        v["checkName"] = json!(n);
     }
     v
 }
@@ -146,10 +159,18 @@ pub fn review(r: &Review) -> Value {
     })
 }
 
+/// One row of the rule table: a rule and the check that enforces it (or will).
+fn enforcer(r: &Rule) -> Value {
+    json!({ "id": r.id, "text": r.text, "check": r.check, "checkName": r.check_name })
+}
+
 fn proposal(p: &wg_factory::api::Proposal) -> Value {
     let mut v = json!({ "category": p.category, "proposal": p.proposal, "evidence": p.evidence });
     if let Some(sig) = &p.sig {
         v["sig"] = json!(sig);
+    }
+    if let Some(n) = &p.check_name {
+        v["checkName"] = json!(n);
     }
     v
 }
@@ -174,7 +195,8 @@ pub fn outcome(o: &Outcome) -> Map<String, Value> {
             "added": o.rules.added, "revised": o.rules.revised, "pruned": o.rules.pruned,
             "inPlay": o.rules.in_play,
             "top": o.rules.top.iter().map(|r| json!({ "id": r.id, "weight": num(((w(r) * 100.0).round()) / 100.0), "scope": r.scope.name(), "text": r.text })).collect::<Vec<_>>(),
-            "stopgaps": o.rules.stopgaps.iter().map(|r| json!({ "id": r.id, "text": r.text, "check": r.check })).collect::<Vec<_>>(),
+            "stopgaps": o.rules.stopgaps.iter().map(enforcer).collect::<Vec<_>>(),
+            "retired": o.rules.retired.iter().map(enforcer).collect::<Vec<_>>(),
         },
         "proposals": o.proposals.iter().map(proposal).collect::<Vec<_>>(),
     });
@@ -214,7 +236,7 @@ mod tests {
     #[test]
     fn a_stopgap_keeps_its_check_through_memory_and_reaches_the_report() {
         let raw = json!({ "version": 1, "runs": 1, "nextId": 2, "checks": [],
-            "rules": [{ "id": "r1", "text": "t", "scope": "all", "sig": "s", "a": 2, "b": 1, "check": "eslint ban" }],
+            "rules": [{ "id": "r1", "text": "t", "scope": "all", "sig": "s", "a": 2, "b": 1, "check": "eslint ban", "checkName": "no-effect" }],
             "models": {} });
         let (m, _) = memory_from(&raw);
         assert_eq!(m.rules[0].check.as_deref(), Some("eslint ban"));
@@ -235,13 +257,38 @@ mod tests {
             models: vec![],
             rules: wg_factory::api::RulesReport {
                 stopgaps: m.rules.clone(),
+                retired: m.rules.clone(),
                 ..Default::default()
             },
             proposals: vec![],
         };
+        let row =
+            json!([{ "id": "r1", "text": "t", "check": "eslint ban", "checkName": "no-effect" }]);
+        assert_eq!(outcome(&o)["rules"]["stopgaps"], row);
+        assert_eq!(outcome(&o)["rules"]["retired"], row);
+        let (bad, _) = memory_from(
+            &json!({ "rules": [{ "id": "r1", "text": "t", "scope": "all",
+            "sig": "s", "a": 2, "b": 1, "check": "c", "checkName": "Not A Name" }] }),
+        );
         assert_eq!(
-            outcome(&o)["rules"]["stopgaps"],
-            json!([{ "id": "r1", "text": "t", "check": "eslint ban" }])
+            bad.rules[0].check_name, None,
+            "an invalid name never matches a check"
+        );
+        let long = "x".repeat(300) + "\nsecond line";
+        let (edited, _) = memory_from(
+            &json!({ "rules": [{ "id": "r1", "text": "t", "scope": "all",
+            "sig": "s", "a": 2, "b": 1, "check": long, "checkName": "ok" }] }),
+        );
+        let c = edited.rules[0].check.as_deref().unwrap();
+        assert!(c.chars().count() == 240 && !c.contains('\n'));
+        assert_eq!(edited.rules[0].check_name.as_deref(), Some("ok"));
+        let (orphan, _) = memory_from(
+            &json!({ "rules": [{ "id": "r1", "text": "t", "scope": "all",
+            "sig": "s", "a": 2, "b": 1, "checkName": "ok" }] }),
+        );
+        assert_eq!(
+            orphan.rules[0].check_name, None,
+            "a name never travels without its check"
         );
     }
 }

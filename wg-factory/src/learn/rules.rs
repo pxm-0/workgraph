@@ -25,11 +25,14 @@ pub fn with_checks(drafts: &[RuleDraft], proposals: &[Proposal]) -> Vec<RuleDraf
     drafts
         .iter()
         .map(|d| {
-            let check = proposals
+            let found = proposals
                 .iter()
-                .find(|p| p.category == "automated-check" && p.sig.as_deref() == Some(&d.sig))
-                .map(|p| p.proposal.trim().chars().take(CHECK_CHARS).collect());
-            RuleDraft { check, ..d.clone() }
+                .find(|p| p.category == "automated-check" && p.sig.as_deref() == Some(&d.sig));
+            RuleDraft {
+                check: found.map(|p| p.proposal.trim().chars().take(CHECK_CHARS).collect()),
+                check_name: found.and_then(|p| p.check_name.clone()),
+                ..d.clone()
+            }
         })
         .collect()
 }
@@ -41,6 +44,29 @@ pub fn stopgaps(rules: &[Rule]) -> Vec<Rule> {
         .filter(|r| r.check.is_some())
         .cloned()
         .collect()
+}
+
+/// Splits off the stopgaps whose check is now approved under its name: the check enforces the
+/// rule, so the prose copy goes. Returns `(kept, retired)`.
+pub fn retire(rules: &[Rule], approved: &[String]) -> (Vec<Rule>, Vec<Rule>) {
+    rules
+        .iter()
+        .cloned()
+        .partition(|r| !r.check_name.as_ref().is_some_and(|n| approved.contains(n)))
+}
+
+/// A rewritten rule's check: a recurring stopgap is still waiting for its old check unless a new
+/// one is proposed, and the description and name always move together.
+fn pending(r: &Rule, p: &RuleDraft) -> Rule {
+    if p.check.is_some() {
+        Rule {
+            check: p.check.clone(),
+            check_name: p.check_name.clone(),
+            ..r.clone()
+        }
+    } else {
+        r.clone()
+    }
 }
 
 pub fn weight(r: &Rule) -> f64 {
@@ -106,9 +132,7 @@ pub fn apply(scored: &[Rule], phrased: &[RuleDraft], next_id: u64) -> Learned {
                 Rule {
                     text: String::from(p.text.trim()),
                     scope: p.scope,
-                    // A recurring stopgap is still waiting for its check unless a new one is proposed.
-                    check: p.check.clone().or_else(|| r.check.clone()),
-                    ..r.clone()
+                    ..pending(r, p)
                 }
             }
             None => r.clone(),
@@ -133,6 +157,7 @@ pub fn apply(scored: &[Rule], phrased: &[RuleDraft], next_id: u64) -> Learned {
             a: 2.0,
             b: 1.0,
             check: p.check.clone(),
+            check_name: p.check_name.clone(),
         });
     }
     let all: Vec<Rule> = rewritten.into_iter().chain(fresh).collect();
@@ -171,6 +196,7 @@ mod tests {
             a,
             b,
             check: None,
+            check_name: None,
         }
     }
 
@@ -219,6 +245,7 @@ mod tests {
             text: format!(" new {sig} "),
             scope: Scope::All,
             check: None,
+            check_name: None,
         };
         let got = apply(
             &scored,
@@ -246,6 +273,7 @@ mod tests {
             proposal: String::from(text),
             evidence: String::from("e"),
             sig: sig.map(String::from),
+            check_name: sig.map(|s| format!("{s}-check")),
         }
     }
 
@@ -255,6 +283,7 @@ mod tests {
             text: format!("rule {sig}"),
             scope: Scope::Worker,
             check: check.map(String::from),
+            check_name: check.map(|_| format!("{sig}-check")),
         }
     }
 
@@ -281,6 +310,7 @@ mod tests {
             got[0].check.as_deref(),
             Some("ban useEffect in src/ui via eslint")
         );
+        assert_eq!(got[0].check_name.as_deref(), Some("lint-check"));
         assert_eq!(
             got[1].check, None,
             "a coding standard is a judgement call, not a check"
@@ -312,5 +342,27 @@ mod tests {
         assert_eq!(ids(&stopgaps(&got.rules)).len(), 2);
         let replaced = apply(&[by("r1")], &[draft("known", Some("better check"))], 8);
         assert_eq!(replaced.rules[0].check.as_deref(), Some("better check"));
+        assert_eq!(replaced.rules[0].check_name.as_deref(), Some("known-check"));
+    }
+
+    #[test]
+    fn a_stopgap_retires_once_its_check_is_approved_under_its_name() {
+        let mut lint = rule("r1", Scope::Worker, "lint", 3.0, 1.0);
+        lint.check = Some(String::from("eslint ban"));
+        lint.check_name = Some(String::from("no-effect"));
+        let mut waiting = rule("r2", Scope::Worker, "nav", 3.0, 1.0);
+        waiting.check = Some(String::from("import boundary"));
+        waiting.check_name = Some(String::from("boundaries"));
+        let judgement = rule("r3", Scope::All, "judge", 3.0, 1.0);
+        let (kept, retired) = retire(
+            &[lint, waiting, judgement],
+            &[String::from("no-effect"), String::from("unit")],
+        );
+        assert_eq!(ids(&retired), ["r1"]);
+        assert_eq!(ids(&kept), ["r2", "r3"]);
+        assert!(
+            retire(&kept, &[]).1.is_empty(),
+            "nothing approved, nothing retires"
+        );
     }
 }

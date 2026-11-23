@@ -16,7 +16,7 @@ A Claude Code plugin that runs a coding task as a graph under a
 | Build | learned per unit size | Test-first workers (`mattpocock-skills:tdd`), independent units in parallel, on the cheapest model proven in this repo |
 | Check / Fix | `wg` / one tier up per round | The kernel runs the owner-approved check commands itself and exit codes decide; no agent reports a check result. Only the blamed unit goes back (`mattpocock-skills:diagnosing-bugs`), max 3 rounds |
 | Review | opus | Independent Spec and Standards review (`mattpocock-skills:code-review`) against the Haruspex criteria; writes verdicts into the task. One fix and re-review round |
-| Learn | sonnet, then `wg` | Score the rules in play, turn fixed failures into rules, and propose guardrails in the `mattpocock-skills:retro` style (never applied unasked). A mechanical failure gets an automated-check proposal, and its rule is kept only as a stopgap, listed every run until you land the check. The kernel validates and writes the memory |
+| Learn | sonnet, then `wg` | Score the rules in play, turn fixed failures into rules, and propose guardrails in the `mattpocock-skills:retro` style (never applied unasked). A mechanical failure gets an automated-check proposal with a check name, and its rule is kept only as a stopgap, listed every run and retired once you approve a check under that name. The kernel validates and writes the memory |
 | You | `wg finalize --run`, no model | Approve the build gate and commit. One command commits, records the gates, runs Haruspex `verify` and the verification gate; a PR opens only if it passes |
 
 **Risk policy.** Everything below critical is mitigated without asking: assumptions are validated

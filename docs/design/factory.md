@@ -1682,11 +1682,24 @@ the sanitizer, so a faulty factory cannot write a bad memory file.
 
 **Checks before rules.** A deterministic check beats a written rule, so an `automated-check`
 proposal may carry the `sig` of the fixed failure it would catch (only that category may, and only
-a sig this run fixed). The rule learned for the same sig is then saved as a stopgap: it keeps the
-check's text (one line, at most 240 characters) in an optional `check` field,
-and every run's `rules.stopgaps` lists each stopgap and its pending check until the owner lands the
-check and deletes the rule from memory. A rewrite keeps the pending check unless a new one is
-proposed. The check text never enters a prompt (only rule text does), so the §10.3 sanitizer
+a sig this run fixed), together with the `checkName` (an `ids::check_name`) the owner should approve
+it under; a sig without a name, or a name without a sig, is refused. The rule learned for the same
+sig is then saved as a stopgap: it keeps the check's text (one line, at most 240 characters) in an
+optional `check` field and the name in `checkName`. Memory is the rule table of the `/correct`
+skill in pstack (cursor/plugins): each stopgap row pairs a rule with the check meant to enforce
+it. Every run's `rules.stopgaps` lists the pending rows (an early end reports them from memory), and
+the first run whose gate includes a stopgap's `checkName` drops the rule from memory and lists it
+in `rules.retired`: once a check enforces it, the prose copy only spends a prompt slot. The gate is
+the approved checks minus those already failing at baseline, since a broken check enforces
+nothing. Retirement runs on the credited rules before birth, pruning and the `MAX_RULES` cap, so a
+retired stopgap never takes a slot from a rule that still earns it. A proposal whose `checkName`
+is already one of this run's checks is not linked (that check let the failure through, so it
+cannot be the fix, and linking it would retire the rule in the run that learned it); the rule is
+kept as a plain rule and the run logs why. On load, `check` is cut to one line of 240 characters
+and a `checkName` without a `check` is dropped. A rewrite keeps the pending pair
+unless a new check is proposed, and the text and name always move together. The name only proves
+that an approved check with that name exists, not that it catches this sig: approving it is the
+owner's call. The check text never enters a prompt (only rule text does), so the §10.3 sanitizer
 does not apply to it and cannot cost the rule.
 
 The four retro categories stay shown, never applied. Phase 5 adds `factory` (something

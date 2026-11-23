@@ -89,7 +89,8 @@ means nothing was checked), the independent review (passed, criterion verdicts, 
 files changed outside the plan, the model each unit ran on, rules added / revised / pruned with
 top weights, spend per stage and provider from `spend`, and the `proposals` (guardrail ideas from
 the retro lens: list them, never apply them unasked). List `rules.stopgaps` first: each is a rule
-standing in for an automated check nobody has landed yet, and landing that check is the real fix. Run `git diff --stat` and include it.
+standing in for an automated check nobody has landed yet, and landing that check (approved under
+its `checkName`) is the real fix and retires the rule. Name any `rules.retired` too. Run `git diff --stat` and include it.
 Skipped risky units are the user's to do, or to approve one at a time.
 
 ## 7. The user's one approval
