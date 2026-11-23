@@ -5,6 +5,7 @@ pub mod convert;
 pub mod driver;
 pub mod kernel;
 pub mod publish;
+pub mod qa_proof;
 pub mod risk;
 pub mod stage_exec;
 

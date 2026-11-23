@@ -209,6 +209,16 @@ pub struct Finding {
     pub severity: Severity,
     pub file: Option<String>,
     pub summary: String,
+    /// A QA finding's repro, which the kernel reran and saw fail; review findings carry none.
+    pub repro: Option<Repro>,
+}
+
+/// What a QA explorer ran to show a finding: the command, what it printed, what it should have.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Repro {
+    pub command: String,
+    pub output: String,
+    pub expected: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]

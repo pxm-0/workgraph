@@ -79,6 +79,28 @@ mod tests {
         )
         .unwrap();
         assert!(!v.passed && v.findings[0].summary == "crashes on empty input");
+        assert!(v.findings[0].repro.is_none());
+        let r = verdict(&json!({ "passed": false, "findings": [
+            { "id": "QA-1", "severity": "high", "summary": "s",
+              "repro": { "command": "node -e 'f(\"\")'", "output": "TypeError:\n boom", "expected": "[]" } },
+            { "id": "QA-2", "severity": "high", "summary": "s",
+              "repro": { "command": "cat <<EOF\nx\nEOF", "output": "x", "expected": "y" } }] }))
+        .unwrap();
+        let repro = r.findings[0].repro.as_ref().unwrap();
+        assert_eq!(
+            (repro.command.as_str(), repro.output.as_str()),
+            ("node -e 'f(\"\")'", "TypeError:  boom")
+        );
+        assert_eq!(
+            r.findings[1].repro.as_ref().unwrap().command,
+            "",
+            "a multi-line command is never run"
+        );
+        assert!(verdict(
+            &json!({ "passed": false, "findings": [{ "id": "Q", "severity": "high", "summary": "s",
+            "repro": { "command": "x", "output": "y" } }] })
+        )
+        .is_err());
         assert!(verdict(
             &json!({ "passed": true, "findings": [{ "id": "x", "severity": "high",
             "file": "../etc/passwd", "summary": "s" }] })

@@ -45,6 +45,18 @@ pub fn qa_set(ctx: &RunCtx) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The approved `(project, factory)` check strings a call may run on the Mac: the gate's, plus
+/// the QA set's for a QA explorer.
+pub fn approved(ctx: &RunCtx, k: &Kernel, with_qa: bool) -> Vec<(String, String)> {
+    let qa = if with_qa { qa_set(ctx) } else { vec![] };
+    k.required
+        .iter()
+        .chain(qa.iter())
+        .filter_map(|n| ctx.cfg.check(&ctx.repo_name, n))
+        .map(|e| (e.project.clone(), e.factory.clone()))
+        .collect()
+}
+
 /// Turns a factory call into the kernel's request, or refuses it.
 pub fn llm(ctx: &RunCtx, k: &Kernel, c: &LlmCall, max_units: usize) -> Result<Request, Refusal> {
     crate::ids::label(&c.label).map_err(refuse)?;
@@ -116,17 +128,9 @@ pub fn llm(ctx: &RunCtx, k: &Kernel, c: &LlmCall, max_units: usize) -> Result<Re
     let task_id = k.task_id();
     let hx = format!("python3 {}", ctx.haruspex_cli);
     let prompt = crate::render::render(template, &c.vars, &[("hx", hx)]).map_err(refuse)?;
-    let qa = if c.role == Role::QaExplorer {
-        qa_set(ctx)
-    } else {
-        vec![]
-    };
-    let approved: Vec<String> = k
-        .required
-        .iter()
-        .chain(qa.iter())
-        .filter_map(|n| ctx.cfg.check(&ctx.repo_name, n))
-        .flat_map(|e| [e.project.clone(), e.factory.clone()])
+    let approved: Vec<String> = approved(ctx, k, c.role == Role::QaExplorer)
+        .into_iter()
+        .flat_map(|(project, factory)| [project, factory])
         .collect();
     let secret_roots = [".workgraph", ".ssh", ".config"]
         .iter()

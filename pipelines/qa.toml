@@ -17,7 +17,7 @@ role = "qa-explorer"
 model = "sonnet"
 effort = "high"
 prompt = "qa-explore"        # negative and recovery paths, throwaway scripts in <run>/tmp only
-schema = "verdict"           # {passed, findings[{id, severity, file, summary}]}
+schema = "verdict"           # {passed, findings[{id, severity, file, summary, repro{command, output, expected}}]}; only kernel-proven findings count (§6.4a)
 gate = { field = "passed", equals = true }
 on_fail = "fix"              # blamed findings, one round, recheck, run explore again
 max_turns = 60

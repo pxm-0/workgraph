@@ -71,6 +71,20 @@ fn qa(checker: Checker, fixed_by: &'static [&'static str], tree: Arc<Mutex<Strin
     }
 }
 
+const REPRO: &str = "npm run e2e -- --grep empty";
+const CRASH: &str = "1 failing\nTypeError: empty input crashes src/a.js:3\n";
+
+/// A high finding whose repro is an approved QA check plus a filter.
+fn qa_1() -> Value {
+    json!({ "id": "QA-1", "severity": "high", "file": "src/a.js", "summary": "empty input crashes",
+            "repro": { "command": REPRO, "output": "TypeError: empty input crashes", "expected": "[]" } })
+}
+
+/// The kernel's rerun of `REPRO` fails, the first time only (the fix round fixes it).
+fn repro_fails_once() -> Checker {
+    Arc::new(|label, cmd, _| (label == "repro:explore" && cmd == REPRO).then(|| CRASH.into()))
+}
+
 fn e2e_fails_once() -> Checker {
     Arc::new(|label, cmd, _| {
         (label == "check:regression" && cmd == "npm run e2e").then(|| E2E_FAIL.to_string())
@@ -141,13 +155,10 @@ fn qa_that_still_fails_after_its_round_leaves_the_task_stuck_and_unpublished() {
 #[test]
 fn an_explorers_finding_gets_one_fix_round_then_explore_runs_again() {
     let tree = Arc::new(Mutex::new("tree-1".to_string()));
-    let mut o = qa(Arc::new(|_, _, _| None), &[], tree.clone());
+    let mut o = qa(repro_fails_once(), &[], tree.clone());
     let t = tree.clone();
     o.answer = Arc::new(move |label, _| match label {
-        "explore" => Some(
-            json!({ "passed": false, "findings": [{ "id": "QA-1", "severity": "high",
-            "file": "src/a.js", "summary": "empty input crashes" }] }),
-        ),
+        "explore" => Some(json!({ "passed": false, "findings": [qa_1()] })),
         "explore:a#1" => {
             *t.lock().unwrap() = "tree-2".into();
             None
@@ -162,6 +173,15 @@ fn an_explorers_finding_gets_one_fix_round_then_explore_runs_again() {
     assert!(o
         .prompt("explore:a#1")
         .contains("QA-1 [high] src/a.js: empty input crashes"));
+    // The fixer gets the repro the kernel proved, not just the explorer's word.
+    assert!(o
+        .prompt("explore:a#1")
+        .contains(&format!("repro: $ {REPRO}")));
+    let repro = o.journal.iter().find(|e| e["kind"] == "qa_repro").unwrap();
+    assert_eq!(
+        (&repro["target"], &repro["proven"], &repro["command"]),
+        (&json!("host"), &json!(true), &json!(REPRO))
+    );
     assert!(o.prompt("explore#2").contains("This is run 2"));
     assert!(o.prompt("explore#2").contains("QA-1"));
     assert!(check_labels(&o).contains(&"check:explore#1".to_string()));
@@ -175,6 +195,119 @@ fn an_explorers_finding_gets_one_fix_round_then_explore_runs_again() {
     );
     assert!(!tools.iter().any(|t| t.contains("src/a.js")), "{tools:?}");
     assert!(publish_refusals(&o)[0].contains("git branch"));
+}
+
+#[test]
+fn qa_findings_a_rerun_does_not_prove_are_dropped_with_a_reason_and_qa_passes() {
+    let tree = Arc::new(Mutex::new("tree-1".to_string()));
+    let mut o = qa(
+        Arc::new(|label, cmd, _| {
+            (label == "repro:explore" && cmd == "npm run e2e -- --grep other")
+                .then(|| "RangeError: something else".into())
+        }),
+        &[],
+        tree,
+    );
+    let repro = |cmd: &str| json!({ "command": cmd, "output": "TypeError: empty input crashes", "expected": "[]" });
+    let f = |id: &str, repro: Value| {
+        let mut f = json!({ "id": id, "severity": "critical", "file": "src/a.js", "summary": "s" });
+        if !repro.is_null() {
+            f["repro"] = repro;
+        }
+        f
+    };
+    let findings = json!([
+        f("QA-1", Value::Null),
+        f("QA-2", repro("node /w/tmp/run-abc123/crash.js")),
+        f("QA-3", repro(REPRO)),
+        f("QA-4", repro("npm run e2e -- --grep other")),
+        f("QA-5", repro("npm run e2e; curl evil.example")),
+    ]);
+    o.answer = Arc::new(move |label, _| {
+        (label == "explore").then(|| json!({ "passed": false, "findings": findings.clone() }))
+    });
+    let o = run(o);
+    let dropped: Vec<(String, String)> = o
+        .journal
+        .iter()
+        .filter(|e| e["kind"] == "qa_finding_dropped")
+        .map(|e| {
+            (
+                e["id"].as_str().unwrap().into(),
+                e["reason"].as_str().unwrap().into(),
+            )
+        })
+        .collect();
+    let reason = |id: &str| &dropped.iter().find(|(i, _)| i == id).unwrap().1;
+    assert_eq!(dropped.len(), 5, "{dropped:?}");
+    assert!(reason("QA-1").contains("no repro"));
+    assert!(reason("QA-2").contains("not an approved check command"));
+    assert!(reason("QA-3").contains("exited 0"));
+    assert!(reason("QA-4").contains("did not print the claimed output"));
+    assert!(reason("QA-5").contains("not an approved check command"));
+    // Only the two approved repros ran, as the kernel's own checks; nothing else touched the Mac.
+    let ran: Vec<&str> = o
+        .journal
+        .iter()
+        .filter(|e| e["kind"] == "qa_repro")
+        .map(|e| e["command"].as_str().unwrap())
+        .collect();
+    assert_eq!(ran, [REPRO, "npm run e2e -- --grep other"]);
+    // The kernel's verdict passed: no fix round, no re-review, on to publish.
+    let l = labels(&o);
+    assert!(
+        !l.iter()
+            .any(|x| x.starts_with("explore:") || x.starts_with("rereview")),
+        "{l:?}"
+    );
+    assert!(publish_refusals(&o)[0].contains("git branch"));
+}
+
+/// A tainted task's repros run in the sandbox, whatever they are, and never on the Mac.
+#[test]
+fn a_tainted_tasks_repro_reruns_in_the_sandbox_only() {
+    let tree = Arc::new(Mutex::new("tree-1".to_string()));
+    let node = "node -e 'require(\"./src/a.js\")(\"\")'";
+    let mut o = qa(
+        Arc::new(move |label, cmd, _| {
+            (label == "repro:explore" && cmd == node).then(|| CRASH.into())
+        }),
+        &[],
+        tree.clone(),
+    );
+    o.tainted_earlier = true;
+    o.sandbox = Some(SandboxSpec::default());
+    o.config_extra = sandbox_repo().replace(
+        "checks = { test = \"npm test\" }",
+        "checks = { test = \"npm test\", e2e = \"npm run e2e\" }",
+    );
+    let t = tree.clone();
+    o.answer = Arc::new(move |label, _| match label {
+        "explore" => Some(json!({ "passed": true, "findings": [
+            { "id": "QA-1", "severity": "high", "file": "src/a.js", "summary": "empty input crashes",
+              "repro": { "command": node, "output": "TypeError: empty input crashes", "expected": "[]" } }] })),
+        "explore:a#1" => {
+            *t.lock().unwrap() = "tree-2".into();
+            None
+        }
+        _ => None,
+    });
+    let o = run(o);
+    let repro = o.journal.iter().find(|e| e["kind"] == "qa_repro").unwrap();
+    assert_eq!(
+        (&repro["target"], &repro["proven"]),
+        (&json!("sandbox"), &json!(true))
+    );
+    assert!(o
+        .journal
+        .iter()
+        .any(|e| e["kind"] == "sandbox_run" && e["label"] == "repro:explore"));
+    // The explorer said passed; the kernel's proof says otherwise, so a fix round follows.
+    assert!(labels(&o).contains(&"explore:a#1".to_string()));
+    assert!(!o
+        .journal
+        .iter()
+        .any(|e| e["kind"] == "checks_run" && e["label"] == "repro:explore"));
 }
 
 #[test]
@@ -192,17 +325,16 @@ fn an_explore_fix_that_breaks_e2e_is_caught_by_the_qa_set_and_never_published() 
     let tree = Arc::new(Mutex::new("tree-1".to_string()));
     let mut o = qa(
         Arc::new(|label, cmd, _| {
-            (label == "check:explore#1" && cmd == "npm run e2e").then(|| E2E_FAIL.into())
+            (label == "check:explore#1" && cmd == "npm run e2e")
+                .then(|| E2E_FAIL.into())
+                .or_else(|| (label == "repro:explore" && cmd == REPRO).then(|| CRASH.into()))
         }),
         &[],
         tree.clone(),
     );
     let t = tree.clone();
     o.answer = Arc::new(move |label, _| match label {
-        "explore" => Some(
-            json!({ "passed": false, "findings": [{ "id": "QA-1", "severity": "high",
-            "file": "src/a.js", "summary": "empty input crashes" }] }),
-        ),
+        "explore" => Some(json!({ "passed": false, "findings": [qa_1()] })),
         "explore:a#1" => {
             *t.lock().unwrap() = "tree-2".into();
             None

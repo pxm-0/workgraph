@@ -630,6 +630,23 @@ impl Loop<'_> {
                 }
                 super::stage_exec::release_reply(self.ctx, reply)?
             }
+            (Role::QaExplorer, Ok(Reply::Verdict(v))) => {
+                // Only findings the kernel's own rerun proves reach the factory (design §6.4a).
+                match super::qa_proof::prove(self.ctx, &self.k, &c.label, v) {
+                    Ok(proven) => a.reply = Ok(Reply::Verdict(proven)),
+                    Err(why) if why.starts_with("sandbox unavailable") => {
+                        self.ctx
+                            .journal
+                            .append("parked", json!({ "label": c.label, "reason": why }))?;
+                        return Ok(Some(End::Parked(why)));
+                    }
+                    Err(why) => {
+                        return Ok(Some(End::Failed(format!(
+                            "cannot rerun the QA explorer's repros: {why}"
+                        ))))
+                    }
+                }
+            }
             (Role::Reviewer, Ok(Reply::Review(rv))) => {
                 self.k.review = Some(rv.clone());
                 if rv.passed && c.tier == Tier::Opus {
