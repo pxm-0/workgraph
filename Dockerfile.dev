@@ -1,0 +1,33 @@
+# The argus-dev test image (Argus docs/DEV_ENV_PROTOCOL.md): personal-sandbox has no network, so
+# the toolchain, every crate and a pre-built test binary are baked in here. Same pinned bases and
+# packages as .devcontainer/Dockerfile; bump the tags and digests in both, with rust-toolchain.toml.
+FROM node:22.23.5-trixie-slim@sha256:68c76cfad89921b927eae28ba21407475e29d0ce450afcdbe70c1532db042b64 AS node
+
+FROM rust:1.100.0-slim-trixie@sha256:6f14b2b4b278ec0d50aa1d69541c304ce0f95e0f6268487aa9924af1c2e9aebe AS dev
+
+# git and python3 for the wg tests, jq for the finalize fixture, procps for `wg check`'s kill(1).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates git jq procps python3 \
+ && rm -rf /var/lib/apt/lists/*
+
+# node and npm because the finalize fixture's check is `npm test`.
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
+
+# rust-toolchain.toml names these; without them rustup would try to download at test time.
+RUN rustup component add rustfmt clippy llvm-tools-preview \
+ && rustup target add thumbv7em-none-eabihf
+
+RUN useradd --create-home dev && mkdir -p /app /out && chown dev:dev /app /out
+USER dev
+ENV CARGO_HOME=/home/dev/.cargo CARGO_NET_OFFLINE=true
+WORKDIR /app
+
+# shortcut: crates download again on every source edit; split out a manifests-only layer with
+# stub targets if image builds get slow.
+COPY --chown=dev:dev . .
+RUN CARGO_NET_OFFLINE=false cargo fetch --locked \
+ && cargo test --workspace --locked --no-run
+
+CMD ["cargo", "test", "--workspace", "--locked"]
