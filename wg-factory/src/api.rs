@@ -209,6 +209,17 @@ pub struct Finding {
     pub severity: Severity,
     pub file: Option<String>,
     pub summary: String,
+    /// A QA finding's repro, which the kernel reran before the factory sees it (design §6.5).
+    pub repro: Option<Repro>,
+}
+
+/// What a QA explorer ran to show a finding: one sandbox command that exits non-zero while the
+/// problem is there, what it printed, and what correct code would print.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Repro {
+    pub cmd: String,
+    pub output: String,
+    pub expected: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]

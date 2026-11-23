@@ -1,8 +1,8 @@
 //! QA and release pipelines end to end with fakes (design §6.2, §16 Phase 4): a seeded e2e failure
 //! fixed by one blamed round through the build fix loop, re-reviewed, then published; an explorer's
-//! finding fixed and explored again; a QA fix published without its re-review refused; a QA set
-//! the kernel requires at publish whatever the factory does; a new stage added with TOML and a
-//! prompt only; and the release line stopping at the owner's gate only on the kernel's evidence.
+//! finding kept only when the kernel's sandbox rerun of its repro fails (§6.5), fixed and explored
+//! again; a QA fix published without its re-review refused; a QA set the kernel requires at
+//! publish whatever the factory does; a new stage added with TOML and a prompt only; and the release line stopping at the owner's gate only on the kernel's evidence.
 
 mod support;
 
@@ -77,6 +77,43 @@ fn e2e_fails_once() -> Checker {
     })
 }
 
+const REPRO: &str = "node -e 'require(\"./src/a\")(\"\")'";
+
+/// A finding as the explorer reports it, with its repro.
+fn finding(id: &str, cmd: &str) -> Value {
+    json!({ "id": id, "severity": "high", "file": "src/a.js", "summary": "empty input crashes",
+            "repro": { "cmd": cmd, "output": "TypeError: x.trim is not a function", "expected": "exit 0, empty result" } })
+}
+
+/// `qa` with a ready sandbox, where the kernel reruns the explorer's repros.
+fn qa_sandboxed(checker: Checker, tree: Arc<Mutex<String>>) -> Opts {
+    Opts {
+        sandbox: Some(SandboxSpec::default()),
+        config_extra: sandbox_repo(),
+        ..qa(checker, &[], tree)
+    }
+}
+
+/// The repro `cmd` fails when the kernel reruns it after the explorer call `explore`.
+fn repro_fails(cmd: &'static str) -> Checker {
+    Arc::new(move |label, c, _| {
+        (label.starts_with("explore.repro") && c == cmd).then(|| "TypeError".to_string())
+    })
+}
+
+fn dropped(o: &Out) -> Vec<(String, String)> {
+    o.journal
+        .iter()
+        .filter(|e| e["kind"] == "qa_finding_dropped")
+        .map(|e| {
+            (
+                e["id"].as_str().unwrap().to_string(),
+                e["reason"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
 #[test]
 fn a_seeded_e2e_failure_in_qa_is_fixed_by_one_blamed_round_re_reviewed_then_published() {
     let tree = Arc::new(Mutex::new("tree-1".to_string()));
@@ -139,15 +176,12 @@ fn qa_that_still_fails_after_its_round_leaves_the_task_stuck_and_unpublished() {
 }
 
 #[test]
-fn an_explorers_finding_gets_one_fix_round_then_explore_runs_again() {
+fn an_explorers_proven_finding_gets_one_fix_round_then_explore_runs_again() {
     let tree = Arc::new(Mutex::new("tree-1".to_string()));
-    let mut o = qa(Arc::new(|_, _, _| None), &[], tree.clone());
+    let mut o = qa_sandboxed(repro_fails(REPRO), tree.clone());
     let t = tree.clone();
     o.answer = Arc::new(move |label, _| match label {
-        "explore" => Some(
-            json!({ "passed": false, "findings": [{ "id": "QA-1", "severity": "high",
-            "file": "src/a.js", "summary": "empty input crashes" }] }),
-        ),
+        "explore" => Some(json!({ "passed": false, "findings": [finding("QA-1", REPRO)] })),
         "explore:a#1" => {
             *t.lock().unwrap() = "tree-2".into();
             None
@@ -159,18 +193,45 @@ fn an_explorers_finding_gets_one_fix_round_then_explore_runs_again() {
     assert!(pos(&l, "explore") < pos(&l, "explore:a#1"));
     assert!(pos(&l, "explore:a#1") < pos(&l, "explore#2"));
     assert!(pos(&l, "explore#2") < pos(&l, "rereview#1"));
-    assert!(o
-        .prompt("explore:a#1")
-        .contains("QA-1 [high] src/a.js: empty input crashes"));
+    // The fixer sees the finding with the repro the kernel reran.
+    let fix = o.prompt("explore:a#1");
+    assert!(
+        fix.contains("QA-1 [high] src/a.js: empty input crashes"),
+        "{fix}"
+    );
+    assert!(
+        fix.contains(&format!(
+            "repro (the kernel reran it and it failed): {REPRO}"
+        )),
+        "{fix}"
+    );
+    assert!(fix.contains("expected: exit 0, empty result"), "{fix}");
     assert!(o.prompt("explore#2").contains("This is run 2"));
     assert!(o.prompt("explore#2").contains("QA-1"));
     assert!(check_labels(&o).contains(&"check:explore#1".to_string()));
-    // The explorer is read-only but for the run's tmp, and runs the QA checks as given.
+    // The repro ran in the sandbox, not on the Mac, and was kept.
+    let rerun = o
+        .journal
+        .iter()
+        .find(|e| e["kind"] == "sandbox_run" && e["what"] == "qa repro")
+        .unwrap();
+    assert_eq!(
+        rerun["steps"],
+        json!([{ "name": "repro-1", "exit": 1, "timed_out": false, "oom": false }])
+    );
+    assert!(dropped(&o).is_empty());
+    // The explorer is read-only but for the run's tmp; with a sandbox it runs commands only there.
     let call = o.call("explore");
     assert_eq!(call.model, "sonnet");
     let tools = allowed(call);
     assert!(
-        tools.contains(&"Bash(npm run e2e:*)".to_string()),
+        tools
+            .iter()
+            .any(|t| t.contains("sandbox exec --task T-001")),
+        "{tools:?}"
+    );
+    assert!(
+        !tools.iter().any(|t| t.contains("npm run e2e")),
         "{tools:?}"
     );
     assert!(!tools.iter().any(|t| t.contains("src/a.js")), "{tools:?}");
@@ -190,19 +251,17 @@ fn an_honest_qa_with_no_fix_makes_no_re_review_call() {
 #[test]
 fn an_explore_fix_that_breaks_e2e_is_caught_by_the_qa_set_and_never_published() {
     let tree = Arc::new(Mutex::new("tree-1".to_string()));
-    let mut o = qa(
-        Arc::new(|label, cmd, _| {
-            (label == "check:explore#1" && cmd == "npm run e2e").then(|| E2E_FAIL.into())
+    let repro = repro_fails(REPRO);
+    let mut o = qa_sandboxed(
+        Arc::new(move |label, cmd, n| {
+            ((label == "check:explore#1" && cmd == "npm run e2e").then(|| E2E_FAIL.into()))
+                .or_else(|| repro(label, cmd, n))
         }),
-        &[],
         tree.clone(),
     );
     let t = tree.clone();
     o.answer = Arc::new(move |label, _| match label {
-        "explore" => Some(
-            json!({ "passed": false, "findings": [{ "id": "QA-1", "severity": "high",
-            "file": "src/a.js", "summary": "empty input crashes" }] }),
-        ),
+        "explore" => Some(json!({ "passed": false, "findings": [finding("QA-1", REPRO)] })),
         "explore:a#1" => {
             *t.lock().unwrap() = "tree-2".into();
             None
@@ -339,6 +398,72 @@ fn a_new_stage_needs_only_toml_and_a_prompt() {
         .prompt
         .contains("Scan the change for add a thing (a (src/a.js); b (src/b.js))"));
     assert!(publish_refusals(&o)[0].contains("git branch"));
+}
+
+#[test]
+fn a_finding_whose_rerun_does_not_fail_is_dropped_with_its_reason() {
+    let tree = Arc::new(Mutex::new("tree-1".to_string()));
+    let mut o = qa_sandboxed(repro_fails(REPRO), tree.clone());
+    let t = tree.clone();
+    o.answer = Arc::new(move |label, _| match label {
+        // QA-2's repro passes on the kernel's rerun: a claim, not a proof.
+        "explore" => Some(json!({ "passed": false, "findings": [
+            finding("QA-1", REPRO), finding("QA-2", "node -e 'process.exit(0)'")] })),
+        "explore:a#1" => {
+            *t.lock().unwrap() = "tree-2".into();
+            None
+        }
+        _ => None,
+    });
+    let o = run(o);
+    assert_eq!(
+        dropped(&o),
+        [(
+            "QA-2".to_string(),
+            "the kernel's rerun of the repro exited 0".to_string()
+        )]
+    );
+    let fix = o.prompt("explore:a#1");
+    assert!(fix.contains("QA-1") && !fix.contains("QA-2"), "{fix}");
+}
+
+#[test]
+fn unproven_findings_alone_pass_qa_and_send_nothing_back() {
+    let tree = Arc::new(Mutex::new("tree-1".to_string()));
+    let mut o = qa_sandboxed(Arc::new(|_, _, _| None), tree);
+    o.answer = Arc::new(|label, _| {
+        (label == "explore")
+            .then(|| json!({ "passed": false, "findings": [finding("QA-1", "exit 0")] }))
+    });
+    let o = run(o);
+    assert_eq!(dropped(&o)[0].0, "QA-1");
+    let l = labels(&o);
+    assert!(
+        !l.iter().any(|x| x.starts_with("explore:")
+            || x.starts_with("explore#")
+            || x.starts_with("rereview")),
+        "{l:?}"
+    );
+    assert!(publish_refusals(&o)[0].contains("git branch"));
+}
+
+#[test]
+fn without_a_sandbox_no_repro_runs_and_every_finding_is_dropped() {
+    // The Mac runs only approved command strings: a repro never runs there, even untainted.
+    let tree = Arc::new(Mutex::new("tree-1".to_string()));
+    let mut o = qa(Arc::new(|_, _, _| None), &[], tree);
+    o.answer = Arc::new(|label, _| {
+        (label == "explore")
+            .then(|| json!({ "passed": false, "findings": [finding("QA-1", REPRO)] }))
+    });
+    let o = run(o);
+    let d = dropped(&o);
+    assert_eq!(d[0].0, "QA-1");
+    assert!(d[0].1.starts_with("sandbox unavailable"), "{d:?}");
+    assert!(!o.journal.iter().any(|e| e["what"] == "qa repro"));
+    // Untainted and without a sandbox, the explorer keeps the approved checks.
+    assert!(allowed(o.call("explore")).contains(&"Bash(npm run e2e:*)".to_string()));
+    assert!(!labels(&o).iter().any(|x| x.starts_with("explore:")));
 }
 
 /// The release line for T-001 with a three-step rehearsal; `tweak` changes the scenario.

@@ -27,11 +27,11 @@ struct WireVerdict {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct WireFinding {
-    id: String,
-    severity: String,
+    pub(super) id: String,
+    pub(super) severity: String,
     #[serde(default)]
-    file: Option<String>,
-    summary: String,
+    pub(super) file: Option<String>,
+    pub(super) summary: String,
 }
 
 /// Criterion ids must be known; finding files must be repo paths.
@@ -87,6 +87,7 @@ pub(super) fn finding(f: WireFinding) -> Result<Finding, String> {
         severity: severity(&f.severity)?,
         file,
         summary: one_line(&f.summary, 1000),
+        repro: None,
     })
 }
 

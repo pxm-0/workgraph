@@ -101,8 +101,10 @@ pub fn schema(id: SchemaId) -> Value {
             json!({
                 "passed": b,
                 "findings": list(obj(
-                    json!({ "id": s(), "severity": severity(), "file": s(), "summary": s() }),
-                    &["id", "severity", "summary"],
+                    json!({ "id": s(), "severity": severity(), "file": s(), "summary": s(),
+                            "repro": obj(json!({ "cmd": s(), "output": s(), "expected": s() }),
+                                         &["cmd", "output", "expected"]) }),
+                    &["id", "severity", "summary", "repro"],
                 )),
             }),
             &["passed", "findings"],

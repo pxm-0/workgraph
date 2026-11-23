@@ -630,6 +630,12 @@ impl Loop<'_> {
                 }
                 super::stage_exec::release_reply(self.ctx, reply)?
             }
+            // A finding counts only when the kernel's own rerun of its repro fails (design §6.5).
+            (Role::QaExplorer, Ok(Reply::Verdict(v))) => {
+                a.reply = Ok(Reply::Verdict(super::qa_proof::prove(
+                    self.ctx, &c.label, v,
+                )?));
+            }
             (Role::Reviewer, Ok(Reply::Review(rv))) => {
                 self.k.review = Some(rv.clone());
                 if rv.passed && c.tier == Tier::Opus {

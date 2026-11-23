@@ -181,8 +181,14 @@ pub fn verdict_problem(findings: &[Finding]) -> String {
     let lines: Vec<String> = findings
         .iter()
         .map(|f| {
+            let repro = f.repro.as_ref().map_or(String::new(), |r| {
+                format!(
+                    "\n  repro (the kernel reran it and it failed): {}\n  it printed: {}\n  expected: {}",
+                    r.cmd, r.output, r.expected
+                )
+            });
             format!(
-                "- {} [{}] {}: {}",
+                "- {} [{}] {}: {}{repro}",
                 f.id,
                 f.severity.name(),
                 f.file.as_deref().unwrap_or(""),

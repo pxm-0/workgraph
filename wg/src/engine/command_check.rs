@@ -96,8 +96,12 @@ pub fn llm(ctx: &RunCtx, k: &Kernel, c: &LlmCall, max_units: usize) -> Result<Re
             });
         }
     }
-    if matches!(c.role, Role::Reviewer | Role::QaExplorer) && k.tainted {
-        if let Some(why) = k.sandbox_blocker(ctx) {
+    // The QA explorer runs its repros in the sandbox whenever there is one, so what it reports is
+    // what the kernel's rerun will see (design §6.5); untainted and without one, it runs only the
+    // approved checks and its findings will be dropped unproven.
+    let qa_contained = c.role == Role::QaExplorer && ctx.ports.sandbox.unavailable().is_none();
+    if matches!(c.role, Role::Reviewer | Role::QaExplorer) && (k.tainted || qa_contained) {
+        if let Some(why) = k.sandbox_blocker(ctx).filter(|_| k.tainted) {
             return Err(refuse(format!(
                 "the task is tainted and its review commands run only in the sandbox, which is unavailable: {why}"
             )));

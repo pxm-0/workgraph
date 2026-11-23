@@ -578,7 +578,7 @@ owner's `deploy-oreochi`) cannot be invoked, and a guard crash leaves only the l
 | work/fix, risky unit | as above | Work | as above | Read Glob Grep Skill(·) Edit Write Bash(·) | only `<wg> sandbox exec --unit <U> --` and `<wg> sandbox poll --job` (Phase 3); Phase 1-2: the call is refused | the unit's `files` |
 | review (Reviewer) | **opus only** (kernel-refused otherwise) / default | Review | 60 / 1800 s | Read Glob Grep Skill(·) Edit Write Bash(·) | approved check commands (only `<wg> sandbox exec --task` / `poll` when tainted); `git diff`, `git status` | `.haruspex/tasks/<id>.json` (no removals or waivers, §9.4); `<run>/tmp/**` |
 | learn (Learner) | sonnet / default | Learn | 3 / 600 s | none | none | none |
-| qa explore (QaExplorer, Ph 4) | sonnet / high | Verdict | 60 / 1200 s | Read Glob Grep Skill(·) Bash(·) | approved QA check commands (sandbox only when tainted) | `<run>/tmp/**` |
+| qa explore (QaExplorer, Ph 4) | sonnet / high | Verdict | 60 / 1200 s | Read Glob Grep Skill(·) Bash(·) | approved QA check commands; `wg sandbox exec --task` only, whenever the sandbox is ready (§6.5) | `<run>/tmp/**` |
 | release notes / plan (ReleaseWriter, Ph 4) | haiku / default, opus / high | ReleaseNotes / ReleasePlan | 20, 40 / 900 s | Read Glob Grep Edit | none | `.haruspex/tasks/<id>.json` (plan only) |
 | doctor live | haiku / low | `{ok: bool}` | 2 / 120 s | none | none | none |
 
@@ -819,8 +819,9 @@ kind = "agent"
 role = "qa-explorer"
 model = "sonnet"
 effort = "high"
-prompt = "qa-explore"        # negative and recovery paths with throwaway scripts in <run>/tmp
-schema = "verdict"           # {passed, findings[{id, severity, file, summary}]}
+prompt = "qa-explore"        # negative and recovery paths; each finding carries a repro
+schema = "verdict"           # {passed, findings[{id, severity, file, summary, repro{cmd, output, expected}}]}
+                             # the kernel reruns each repro in the sandbox; only failing ones count (§6.5)
 gate = { field = "passed", equals = true }
 on_fail = "fix"              # blame_review over the findings, one round, recheck, re-run explore
 
@@ -970,6 +971,38 @@ deterministic.
 7. Learn: credit in-play rules; turn fixed signatures plus review evidence into the learn call
    (only when memory can be saved); rewrite, birth and prune rules; update model stats;
    `SaveMemory`; `Finish` with the run.js output fields (§11.1).
+
+### 6.5 A QA finding counts only when a run proves it
+
+The QA explorer's verdict would otherwise be the one place where an agent's unverified claim
+sends units back for fixes (§1.4). So, after pstack's `/interrogate` ("a finding survives only
+when a run proves it"), every QA finding carries the repro the explorer ran, and the kernel
+reruns it before the factory sees the verdict (`engine/qa_proof.rs`):
+
+- **The repro** (`verdict` schema, parsed in `untrusted/stage.rs`): `cmd`, one shell line of at
+  most 4096 bytes with no control characters (the sandbox's own step rule), which exits non-zero
+  while the problem is there; `output`, what it printed for the explorer; `expected`, what
+  correct code would print. A finding without one, or with a `cmd` the sandbox would refuse,
+  fails the parse.
+- **Where it runs.** A repro is untrusted agent output, so it runs only in the sim sandbox (§8.3:
+  no network, no host mounts, read-only root, limits), on the worktree's tracked files, in jobs
+  of at most 8 steps with 300 s per repro, whatever the task's taint. The Mac runs only
+  owner-approved command strings (§14 item 1), so an untainted task is no exception. The
+  explorer itself gets the `--task` sandbox grant whenever the sandbox is ready, so it can run
+  the repro the kernel will rerun; untainted without a sandbox it keeps the approved checks.
+- **The decision is the exit code.** A finding stays only if its rerun exits non-zero without
+  timing out or running out of memory. Otherwise it is dropped, and the journal records
+  `qa_finding_dropped {label, id, severity, reason}`: no repro, the rerun exited 0, timed out,
+  ran out of memory, returned no result, or the sandbox was unavailable (then every finding is
+  dropped and QA explore cannot send anything back). Each rerun job is journalled as
+  `sandbox_run` with `what: "qa repro"`.
+- **`passed` is the kernel's.** The verdict the factory sees holds only the kept findings, and
+  `passed` is true unless one of them is high or critical, whatever the explorer said. Fixers and
+  the explorer's second run see each kept finding with its repro, output and expected output.
+
+Residual: a repro that fails for a reason unrelated to its summary (`exit 1`) still counts. It
+costs one bounded fix round, no worse than an unproven finding before this rule, and the fixer
+sees the command.
 
 ---
 
@@ -1242,6 +1275,7 @@ skipped untrusted issues, and argus fingerprint before and after (Phase 3).
   `wg sandbox exec`, its layer checks and its fix-round checks.
 - Once a risky unit is built, the task is **tainted**. Every later check, review command and QA
   suite for that task goes to the sandbox too.
+- A QA explorer's repros go to the sandbox in every task, tainted or not (§6.5).
 - If the sandbox is unavailable, the unit and its dependants park ("sandbox unavailable:
   `<reason>`"). They never fall back to the Mac.
 - A deploy unit's script runs against nothing (no network). A payments unit runs against mocks. A
@@ -2073,8 +2107,8 @@ journalled as warnings.
 Checklist:
 
 1. **Host execution.** Product checks and worker commands run only as owner-approved command
-   strings, normally through the repo's compose dev stack. Risky execution happens only in the sim
-   pod. The kernel's own commands are fixed argv: git, gh, python3 haruspex, orb, and `security`,
+   strings, normally through the repo's compose dev stack. Risky execution, and every QA repro the
+   kernel reruns (§6.5), happens only in the sim pod. The kernel's own commands are fixed argv: git, gh, python3 haruspex, orb, and `security`,
    run only by `wg auth key` (D5).
 2. **Git.** Branches are only `wg/*` and `wg-self/*`, plus `fixture/*` on
    `pxm-0/workgraph-eval` for `wg eval capture` (§12.4); pushes to anything else, including the
