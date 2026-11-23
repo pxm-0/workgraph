@@ -111,6 +111,10 @@ struct WireProposal {
     category: String,
     proposal: String,
     evidence: String,
+    #[serde(default)]
+    sig: Option<String>,
+    #[serde(default, rename = "checkName")]
+    check_name: Option<String>,
 }
 
 /// The retro categories, plus `factory` (something workgraph itself did badly, design §10.4):
@@ -144,20 +148,43 @@ pub fn learn(v: &Value, ctx: &Ctx) -> Result<Learn, String> {
                 sig: r.sig,
                 text: r.text,
                 scope,
+                check: None,
+                check_name: None,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
     let proposals = w
         .proposals
         .into_iter()
-        .map(|p| {
+        .map(|mut p| {
+            p.sig = p.sig.filter(|s| !s.trim().is_empty());
+            p.check_name = p.check_name.filter(|s| !s.trim().is_empty());
             if !CATEGORIES.contains(&p.category.as_str()) {
                 return Err("a proposal has an unknown category".to_string());
+            }
+            if let Some(sig) = &p.sig {
+                if p.category != "automated-check" {
+                    return Err("only an automated-check proposal may name a signature".to_string());
+                }
+                if !ctx.fixed_sigs.contains(sig) {
+                    return Err("a proposal names a signature this run did not fix".to_string());
+                }
+            }
+            match (&p.sig, &p.check_name) {
+                (Some(_), Some(name)) => crate::ids::check_name(name)?,
+                (None, None) => {}
+                _ => {
+                    return Err(
+                        "a check proposal needs both sig and checkName, or neither".to_string()
+                    )
+                }
             }
             Ok(Proposal {
                 category: p.category,
                 proposal: one_line(&p.proposal, 1000),
                 evidence: one_line(&p.evidence, 1000),
+                sig: p.sig,
+                check_name: p.check_name,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -219,5 +246,36 @@ mod tests {
         ] {
             assert!(learn(&bad, &ctx()).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn only_an_automated_check_may_link_a_fixed_signature() {
+        let prop = |c: &str, sig: &str| json!({ "category": c, "proposal": "p", "evidence": "e", "sig": sig, "checkName": "no-effect" });
+        let ok = json!({ "rules": [], "proposals": [prop("automated-check", "npm test | x")] });
+        assert_eq!(
+            learn(&ok, &ctx()).unwrap().proposals[0].sig.as_deref(),
+            Some("npm test | x")
+        );
+        assert_eq!(
+            learn(&ok, &ctx()).unwrap().proposals[0]
+                .check_name
+                .as_deref(),
+            Some("no-effect")
+        );
+        let judgement =
+            json!({ "rules": [], "proposals": [prop("coding-standard", "npm test | x")] });
+        assert!(learn(&judgement, &ctx())
+            .unwrap_err()
+            .contains("only an automated-check"));
+        let blank = json!({ "rules": [], "proposals": [{ "category": "navigation", "proposal": "p", "evidence": "e", "sig": " ", "checkName": "" }] });
+        assert_eq!(learn(&blank, &ctx()).unwrap().proposals[0].sig, None);
+        let unnamed = json!({ "rules": [], "proposals": [{ "category": "automated-check", "proposal": "p", "evidence": "e", "sig": "npm test | x" }] });
+        assert!(learn(&unnamed, &ctx())
+            .unwrap_err()
+            .contains("both sig and checkName"));
+        let bad_name = json!({ "rules": [], "proposals": [{ "category": "automated-check", "proposal": "p", "evidence": "e", "sig": "npm test | x", "checkName": "No Effect!" }] });
+        assert!(learn(&bad_name, &ctx()).unwrap_err().contains("check name"));
+        let unknown = json!({ "rules": [], "proposals": [prop("automated-check", "other")] });
+        assert!(learn(&unknown, &ctx()).unwrap_err().contains("did not fix"));
     }
 }
