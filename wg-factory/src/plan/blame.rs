@@ -105,6 +105,7 @@ mod tests {
             severity: sev,
             file: Some(file.to_string()),
             summary: String::new(),
+            repro: None,
         };
         let review = Review {
             passed: false,

@@ -414,6 +414,10 @@ Reading `checks` becomes `[{name, command}]`, and Learn proposals gain the categ
   - At most 64 KB.
 - **Challenge.** `assign` references known criteria. Unknown unit ids are kept and logged, as today.
 - **Review.** Criterion ids are known; finding files are `RepoPath`s.
+- **Verdict** (QA explorer). At most 50 findings, files are `RepoPath`s. Each finding may carry
+  `repro: {command, output, expected}`; `output` and `expected` are capped single lines, and a
+  `command` that is not one line of at most 4096 bytes is kept empty (never rewritten), so the
+  kernel drops that finding rather than run something the explorer did not write (§6.4a).
 - **Learn.** Every `sig` is in this run's fixed-signature set; rule text passes the sanitizer (§10.3).
 
 ### 4.4 State is values
@@ -820,7 +824,7 @@ role = "qa-explorer"
 model = "sonnet"
 effort = "high"
 prompt = "qa-explore"        # negative and recovery paths with throwaway scripts in <run>/tmp
-schema = "verdict"           # {passed, findings[{id, severity, file, summary}]}
+schema = "verdict"           # {passed, findings[{id, severity, file, summary, repro{command, output, expected}}]}; only kernel-proven findings count (§6.4a)
 gate = { field = "passed", equals = true }
 on_fail = "fix"              # blame_review over the findings, one round, recheck, re-run explore
 
@@ -970,6 +974,40 @@ deterministic.
 7. Learn: credit in-play rules; turn fixed signatures plus review evidence into the learn call
    (only when memory can be saved); rewrite, birth and prune rules; update model stats;
    `SaveMemory`; `Finish` with the run.js output fields (§11.1).
+
+### 6.4a QA findings count only when a run proves them
+
+The explorer's verdict is an agent's claim, so the kernel treats it as it treats a check result
+the agent reports: it reruns the evidence itself and lets the exit code decide (§1.4). Before the
+factory sees a `Verdict`, `engine/qa_proof.rs`:
+
+1. Takes each finding's `repro` (the one-line command the explorer ran, a line it printed, and
+   what it should have printed). A finding with no repro, or an empty command, is dropped.
+2. Reruns the command **under the containment the explorer's own commands had**, never more:
+   - **tainted task:** in the sim sandbox (§8), in jobs of at most 8 `repro-<n>` steps of 120 s
+     each, nonce `<run>:repro:<label>`. The command is untrusted, like a risky worker's
+     `wg sandbox exec`: the pod restricts the environment (no network, no host path, read-only
+     root, no capabilities), not the command. A sandbox that cannot run parks the task; it never
+     falls back to the Mac.
+   - **otherwise:** on the Mac only when the command passes the guard's prefix rule against the
+     approved `project` or `factory` strings of the gate and QA checks (an approved check plus
+     arguments free of shell metacharacters, §5.4), and then it runs as the `factory` string
+     through the kernel's check runner. Anything else is dropped ("not an approved check command,
+     and the task is not sandboxed"). No new host command is ever run.
+3. Keeps the finding only when the rerun exits non-zero **and** its output tail contains the
+   claimed `output` (whitespace normalized, at least 8 characters). A runner that fails to start
+   ends the run rather than dropping findings for want of a runner.
+4. Recomputes `passed` as "no kept high or critical finding"; the explorer's own `passed` is
+   ignored. Each rerun is journaled as `qa_repro` (command, exit, target, proven) and each
+   dropped finding as `qa_finding_dropped` with its reason.
+
+Kept findings reach the fixers with their repro (`verdict_problem`), so the fix round and the
+explorer's run 2 start from the failing command. Residual risk: an explorer can still write a
+repro that fails for a reason unrelated to its summary (say, `false` plus an echo); the rerun
+proves the repro, not the summary, and the journal shows the command for the owner to judge.
+On an untainted task the explorer can only cite approved checks, which already passed in
+`regression`, so most of its findings will be dropped there; giving it a sandbox grant whenever a
+sandbox is ready is a separate decision (it widens what the explorer may run).
 
 ---
 
@@ -2097,7 +2135,8 @@ Checklist:
 1. **Host execution.** Product checks and worker commands run only as owner-approved command
    strings, normally through the repo's compose dev stack. Risky execution happens only in the sim
    pod. The kernel's own commands are fixed argv: git, gh, python3 haruspex, orb, and `security`,
-   run only by `wg auth key` (D5).
+   run only by `wg auth key` (D5). A QA explorer's repro, which the kernel reruns, is held to the
+   same rule: in the sim pod when the task is tainted, else only as an approved check (§6.4a).
 2. **Git.** Branches are only `wg/*` and `wg-self/*`, plus `fixture/*` on
    `pxm-0/workgraph-eval` for `wg eval capture` (§12.4); pushes to anything else, including the
    eval repo's `main`, are refused in `git.rs`, and the pre-push hook refuses main. No `reset`, `clean`, `stash` or `checkout --` in

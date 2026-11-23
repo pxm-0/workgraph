@@ -5,7 +5,7 @@ use crate::ids::one_line;
 use crate::paths::repo_path;
 use serde::Deserialize;
 use serde_json::Value;
-use wg_factory::api::{CriterionVerdict, Finding, Review};
+use wg_factory::api::{CriterionVerdict, Finding, Repro, Review};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -32,6 +32,17 @@ pub(super) struct WireFinding {
     #[serde(default)]
     file: Option<String>,
     summary: String,
+    /// A QA explorer's only (the review schema has no such field).
+    #[serde(default)]
+    repro: Option<WireRepro>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct WireRepro {
+    command: String,
+    output: String,
+    expected: String,
 }
 
 /// Criterion ids must be known; finding files must be repo paths.
@@ -67,7 +78,7 @@ pub fn parse(v: &Value, ctx: &Ctx) -> Result<Review, String> {
     let findings = w
         .findings
         .into_iter()
-        .map(finding)
+        .map(|f| finding(f).map(|f| Finding { repro: None, ..f }))
         .collect::<Result<Vec<_>, String>>()?;
     Ok(Review {
         passed: w.passed,
@@ -76,7 +87,9 @@ pub fn parse(v: &Value, ctx: &Ctx) -> Result<Review, String> {
     })
 }
 
-/// A finding's file must be a repo path; its text is one capped line.
+/// A finding's file must be a repo path; its text is one capped line. A repro command that is not
+/// one line of at most 4096 bytes is kept empty, never rewritten, so the kernel drops the finding
+/// as unproven (design §6.4a) instead of running something the explorer did not write.
 pub(super) fn finding(f: WireFinding) -> Result<Finding, String> {
     let file = match f.file.as_deref().map(str::trim) {
         None | Some("") => None,
@@ -87,6 +100,15 @@ pub(super) fn finding(f: WireFinding) -> Result<Finding, String> {
         severity: severity(&f.severity)?,
         file,
         summary: one_line(&f.summary, 1000),
+        repro: f.repro.map(|r| Repro {
+            command: if crate::sandbox::job::command(&r.command, "").is_ok() {
+                r.command
+            } else {
+                String::new()
+            },
+            output: one_line(&r.output, 2000),
+            expected: one_line(&r.expected, 1000),
+        }),
     })
 }
 
