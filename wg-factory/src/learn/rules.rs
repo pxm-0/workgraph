@@ -1,7 +1,7 @@
 //! Weighted rules: credit for rules in play, birth from fixed failures, rewrite, prune and cap.
 
 use super::cap_pair;
-use crate::api::{Rule, RuleDraft, Scope};
+use crate::api::{Proposal, Rule, RuleDraft, Scope};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -16,6 +16,32 @@ pub const MAX_RULES: usize = 30;
 pub const HELD: f64 = 0.25;
 /// Penalty when its failure came back anyway.
 pub const RECURRED: f64 = 1.0;
+/// A stopgap's check is persisted with the rule, so it obeys the same length cap as rule text.
+pub const CHECK_CHARS: usize = 240;
+
+/// Marks each draft whose failure also got an `automated-check` proposal as a stopgap for that
+/// check: the deterministic check is the fix, the rule only covers the runs until it lands.
+pub fn with_checks(drafts: &[RuleDraft], proposals: &[Proposal]) -> Vec<RuleDraft> {
+    drafts
+        .iter()
+        .map(|d| {
+            let check = proposals
+                .iter()
+                .find(|p| p.category == "automated-check" && p.sig.as_deref() == Some(&d.sig))
+                .map(|p| p.proposal.trim().chars().take(CHECK_CHARS).collect());
+            RuleDraft { check, ..d.clone() }
+        })
+        .collect()
+}
+
+/// The rules still standing in for a check the owner has not landed.
+pub fn stopgaps(rules: &[Rule]) -> Vec<Rule> {
+    rules
+        .iter()
+        .filter(|r| r.check.is_some())
+        .cloned()
+        .collect()
+}
 
 pub fn weight(r: &Rule) -> f64 {
     r.a / (r.a + r.b)
@@ -80,6 +106,8 @@ pub fn apply(scored: &[Rule], phrased: &[RuleDraft], next_id: u64) -> Learned {
                 Rule {
                     text: String::from(p.text.trim()),
                     scope: p.scope,
+                    // A recurring stopgap is still waiting for its check unless a new one is proposed.
+                    check: p.check.clone().or_else(|| r.check.clone()),
                     ..r.clone()
                 }
             }
@@ -104,6 +132,7 @@ pub fn apply(scored: &[Rule], phrased: &[RuleDraft], next_id: u64) -> Learned {
             sig: p.sig.clone(),
             a: 2.0,
             b: 1.0,
+            check: p.check.clone(),
         });
     }
     let all: Vec<Rule> = rewritten.into_iter().chain(fresh).collect();
@@ -141,6 +170,7 @@ mod tests {
             sig: String::from(sig),
             a,
             b,
+            check: None,
         }
     }
 
@@ -188,6 +218,7 @@ mod tests {
             sig: String::from(sig),
             text: format!(" new {sig} "),
             scope: Scope::All,
+            check: None,
         };
         let got = apply(
             &scored,
@@ -207,5 +238,79 @@ mod tests {
         let capped = apply(&many, &[], 1);
         assert_eq!(capped.rules.len(), MAX_RULES);
         assert_eq!(capped.pruned.len(), 5);
+    }
+
+    fn prop(category: &str, sig: Option<&str>, text: &str) -> Proposal {
+        Proposal {
+            category: String::from(category),
+            proposal: String::from(text),
+            evidence: String::from("e"),
+            sig: sig.map(String::from),
+        }
+    }
+
+    fn draft(sig: &str, check: Option<&str>) -> RuleDraft {
+        RuleDraft {
+            sig: String::from(sig),
+            text: format!("rule {sig}"),
+            scope: Scope::Worker,
+            check: check.map(String::from),
+        }
+    }
+
+    #[test]
+    fn only_an_automated_check_for_the_same_failure_makes_a_rule_a_stopgap() {
+        let drafts = [
+            draft("lint", None),
+            draft("judgement", None),
+            draft("nav", None),
+        ];
+        let long = "x".repeat(CHECK_CHARS + 50);
+        let proposals = [
+            prop(
+                "automated-check",
+                Some("lint"),
+                " ban useEffect in src/ui via eslint ",
+            ),
+            prop("coding-standard", Some("judgement"), "prefer small units"),
+            prop("automated-check", None, "unlinked check"),
+            prop("automated-check", Some("nav"), &long),
+        ];
+        let got = with_checks(&drafts, &proposals);
+        assert_eq!(
+            got[0].check.as_deref(),
+            Some("ban useEffect in src/ui via eslint")
+        );
+        assert_eq!(
+            got[1].check, None,
+            "a coding standard is a judgement call, not a check"
+        );
+        assert_eq!(
+            got[2].check.as_ref().map(|c| c.chars().count()),
+            Some(CHECK_CHARS)
+        );
+    }
+
+    #[test]
+    fn stopgaps_are_born_kept_on_rewrite_and_reported() {
+        let mut old = rule("r1", Scope::Worker, "known", 3.0, 2.0);
+        old.check = Some(String::from("old check"));
+        let plain = rule("r2", Scope::Worker, "plain", 3.0, 1.0);
+        let got = apply(
+            &[old, plain],
+            &[draft("known", None), draft("fresh", Some("new check"))],
+            7,
+        );
+        let by = |id: &str| got.rules.iter().find(|r| r.id == id).unwrap().clone();
+        assert_eq!(
+            by("r1").check.as_deref(),
+            Some("old check"),
+            "rewrite keeps the pending check"
+        );
+        assert_eq!(by("r7").check.as_deref(), Some("new check"));
+        assert_eq!(by("r2").check, None);
+        assert_eq!(ids(&stopgaps(&got.rules)).len(), 2);
+        let replaced = apply(&[by("r1")], &[draft("known", Some("better check"))], 8);
+        assert_eq!(replaced.rules[0].check.as_deref(), Some("better check"));
     }
 }

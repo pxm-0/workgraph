@@ -8,7 +8,7 @@ use crate::api::{
     Command, LlmFailure, Memory, Outcome, Reply, Role, RuleDraft, RulesReport, SchemaId, Status,
 };
 use crate::learn::models::update;
-use crate::learn::rules::{apply, credit};
+use crate::learn::rules::{apply, credit, stopgaps, with_checks};
 use crate::model::{Answer, Phase, RunState};
 use crate::plan::scope::out_of_scope;
 use alloc::format;
@@ -138,11 +138,13 @@ pub fn on_learn(s: &mut RunState, a: &Answer, out: &mut Vec<Command>) {
     let phrased: Vec<RuleDraft> = match a {
         Answer::Reply(Reply::Learn(l), _) => {
             s.proposals = l.proposals.clone();
-            l.rules
+            let kept: Vec<RuleDraft> = l
+                .rules
                 .iter()
                 .filter(|p| s.fixed_sigs.contains(&p.sig) && !p.text.trim().is_empty())
                 .cloned()
-                .collect()
+                .collect();
+            with_checks(&kept, &l.proposals)
         }
         Answer::Failed(why) => {
             let what = if *why == LlmFailure::Invalid {
@@ -195,6 +197,7 @@ fn finish(s: &mut RunState, phrased: &[RuleDraft], out: &mut Vec<Command>) {
         pruned: learned.pruned,
         in_play: s.in_play.clone(),
         top: learned.rules.iter().take(5).cloned().collect(),
+        stopgaps: stopgaps(&learned.rules),
     };
     super::stages::begin(s, o, out);
 }

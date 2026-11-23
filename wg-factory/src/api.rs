@@ -223,6 +223,8 @@ pub struct RuleDraft {
     pub sig: String,
     pub text: String,
     pub scope: Scope,
+    /// The automated check proposed for the same failure: the rule is a stopgap until it lands.
+    pub check: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -230,6 +232,8 @@ pub struct Proposal {
     pub category: String,
     pub proposal: String,
     pub evidence: String,
+    /// For an `automated-check`: the fixed failure it would catch deterministically.
+    pub sig: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -302,6 +306,8 @@ pub struct Rule {
     pub sig: String,
     pub a: f64,
     pub b: f64,
+    /// Set while the rule only stands in for an automated check the owner has not landed yet.
+    pub check: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -568,6 +574,8 @@ pub struct RulesReport {
     pub pruned: Vec<String>,
     pub in_play: Vec<String>,
     pub top: Vec<Rule>,
+    /// Every stopgap rule still waiting for its check, reported each run until the owner acts.
+    pub stopgaps: Vec<Rule>,
 }
 
 /// What the factory reports. The kernel fills `verified`, `reviewed` and the gate from its own

@@ -91,7 +91,7 @@ pub fn schema(id: SchemaId) -> Value {
                 )),
                 "proposals": list(obj(
                     json!({ "category": { "type": "string", "enum": ["automated-check", "coding-standard", "navigation", "haruspex-profile", "factory"] },
-                            "proposal": s(), "evidence": s() }),
+                            "proposal": s(), "evidence": s(), "sig": s() }),
                     &["category", "proposal", "evidence"],
                 )),
             }),

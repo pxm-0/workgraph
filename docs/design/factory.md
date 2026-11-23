@@ -1680,6 +1680,15 @@ the sanitizer, so a faulty factory cannot write a bad memory file.
 
 ### 10.4 Proposals
 
+**Checks before rules.** A deterministic check beats a written rule, so an `automated-check`
+proposal may carry the `sig` of the fixed failure it would catch (only that category may, and only
+a sig this run fixed). The rule learned for the same sig is then saved as a stopgap: it keeps the
+check's text (one line, at most 240 characters) in an optional `check` field,
+and every run's `rules.stopgaps` lists each stopgap and its pending check until the owner lands the
+check and deletes the rule from memory. A rewrite keeps the pending check unless a new one is
+proposed. The check text never enters a prompt (only rule text does), so the §10.3 sanitizer
+does not apply to it and cannot cost the rule.
+
 The four retro categories stay shown, never applied. Phase 5 adds `factory` (something
 workgraph itself did badly). These proposals derive from target-repo evidence (Z4: issue text,
 code, check output), so they are untrusted: they are filed with the label `wg:self-proposed`,

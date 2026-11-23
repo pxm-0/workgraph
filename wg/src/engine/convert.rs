@@ -32,6 +32,7 @@ fn rule(r: &Value) -> Option<Rule> {
         scope: scope(r["scope"].as_str()?)?,
         a: pos("a")?,
         b: pos("b")?,
+        check: r["check"].as_str().map(str::to_string),
     })
 }
 
@@ -79,7 +80,11 @@ pub fn memory_from(m: &Value) -> (Memory, usize) {
 }
 
 pub fn rule_json(r: &Rule) -> Value {
-    json!({ "id": r.id, "text": r.text, "scope": r.scope.name(), "sig": r.sig, "a": num(r.a), "b": num(r.b) })
+    let mut v = json!({ "id": r.id, "text": r.text, "scope": r.scope.name(), "sig": r.sig, "a": num(r.a), "b": num(r.b) });
+    if let Some(c) = &r.check {
+        v["check"] = json!(c);
+    }
+    v
 }
 
 /// Memory v1. Model entries the factory did not touch keep their original JSON.
@@ -141,6 +146,14 @@ pub fn review(r: &Review) -> Value {
     })
 }
 
+fn proposal(p: &wg_factory::api::Proposal) -> Value {
+    let mut v = json!({ "category": p.category, "proposal": p.proposal, "evidence": p.evidence });
+    if let Some(sig) = &p.sig {
+        v["sig"] = json!(sig);
+    }
+    v
+}
+
 /// The factory's part of the output (design §11.1); the kernel adds its own fields.
 pub fn outcome(o: &Outcome) -> Map<String, Value> {
     let size = |s: Size| if s == Size::Large { "large" } else { "small" };
@@ -161,8 +174,9 @@ pub fn outcome(o: &Outcome) -> Map<String, Value> {
             "added": o.rules.added, "revised": o.rules.revised, "pruned": o.rules.pruned,
             "inPlay": o.rules.in_play,
             "top": o.rules.top.iter().map(|r| json!({ "id": r.id, "weight": num(((w(r) * 100.0).round()) / 100.0), "scope": r.scope.name(), "text": r.text })).collect::<Vec<_>>(),
+            "stopgaps": o.rules.stopgaps.iter().map(|r| json!({ "id": r.id, "text": r.text, "check": r.check })).collect::<Vec<_>>(),
         },
-        "proposals": o.proposals.iter().map(|p| json!({ "category": p.category, "proposal": p.proposal, "evidence": p.evidence })).collect::<Vec<_>>(),
+        "proposals": o.proposals.iter().map(proposal).collect::<Vec<_>>(),
     });
     v.as_object().cloned().unwrap_or_default()
 }
@@ -195,5 +209,39 @@ mod tests {
         assert!(crate::memory::validate(&back).is_ok());
         let (empty, _) = memory_from(&json!({}));
         assert_eq!((empty.runs, empty.next_id), (0, 1));
+    }
+
+    #[test]
+    fn a_stopgap_keeps_its_check_through_memory_and_reaches_the_report() {
+        let raw = json!({ "version": 1, "runs": 1, "nextId": 2, "checks": [],
+            "rules": [{ "id": "r1", "text": "t", "scope": "all", "sig": "s", "a": 2, "b": 1, "check": "eslint ban" }],
+            "models": {} });
+        let (m, _) = memory_from(&raw);
+        assert_eq!(m.rules[0].check.as_deref(), Some("eslint ban"));
+        let back = memory_to(&m, &raw["models"]);
+        assert_eq!(back["rules"], raw["rules"]);
+        assert!(crate::memory::validate(&back).is_ok());
+        let o = Outcome {
+            status: Status::ReadyForReview,
+            note: None,
+            review: None,
+            done: vec![],
+            skipped: vec![],
+            stuck: vec![],
+            fix_rounds: 0,
+            review_fix_rounds: 0,
+            out_of_scope: vec![],
+            committable: vec![],
+            models: vec![],
+            rules: wg_factory::api::RulesReport {
+                stopgaps: m.rules.clone(),
+                ..Default::default()
+            },
+            proposals: vec![],
+        };
+        assert_eq!(
+            outcome(&o)["rules"]["stopgaps"],
+            json!([{ "id": "r1", "text": "t", "check": "eslint ban" }])
+        );
     }
 }
