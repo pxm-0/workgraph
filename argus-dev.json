@@ -1,0 +1,16 @@
+{
+  "project": "workgraph",
+  "build": {
+    "context": ".",
+    "dockerfile": "Dockerfile.dev",
+    "target": "dev"
+  },
+  "test": {
+    "command": ["bash", "-o", "pipefail", "-c", "cargo test --workspace --locked 2>&1 | tee /out/cargo-test.log"],
+    "env": {
+      "CI": "1",
+      "CARGO_NET_OFFLINE": "true"
+    },
+    "timeoutSeconds": 3600
+  }
+}
