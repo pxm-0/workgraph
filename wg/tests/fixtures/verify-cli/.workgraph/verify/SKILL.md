@@ -7,7 +7,7 @@ description: Drive the todo CLI the way a user does and capture terminal transcr
 
 - **Launch:** nothing to build or keep alive. Each journey runs `./todo` with its own empty
   `TODO_FILE` in a scratch dir.
-- **Doctor:** `./todo` exists and is executable. `run` checks this first and exits 3 if not.
+- **Doctor:** the tools `run` needs (`dirname`, `mktemp`, `grep`, `cut`, a sha256 tool) are on `PATH`. `run` checks this first and exits 75 (environment unusable) if not. A missing or broken `./todo` is not a doctor failure: it fails the features.
 - **Drive:** `TODO_FILE=<scratch>/x.txt ./todo add <text>` and `./todo list`. The prompts and
   outputs are the handles: `added: <text>` and `<n>. <text>`.
 - **Evidence:** `WG_EVIDENCE_DIR/<feature>/transcript.txt` (each command, its output, `[exit N]`)

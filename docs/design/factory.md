@@ -991,9 +991,10 @@ factory sees a `Verdict`, `engine/qa_proof.rs`:
      falls back to the Mac.
    - **otherwise:** on the Mac only when the command passes the guard's prefix rule against the
      approved `project` or `factory` strings of the gate and QA checks (an approved check plus
-     arguments free of shell metacharacters, §5.4), and then it runs as the `factory` string
-     through the kernel's check runner. Anything else is dropped ("not an approved check command,
-     and the task is not sandboxed"). No new host command is ever run.
+     arguments free of shell metacharacters, §5.4), never an `evidence = true` check (§9.6), and
+     then it runs as the `factory` string through the kernel's check runner. Anything else is
+     dropped ("not an approved check command, and the task is not sandboxed"). No new host
+     command is ever run.
 3. Keeps the finding only when the rerun exits non-zero **and** its output tail contains the
    claimed `output` (whitespace normalized, at least 8 characters). A runner that fails to start
    ends the run rather than dropping findings for want of a runner.
@@ -1658,18 +1659,39 @@ user-facing feature and the observable end state that proves it works.
 
 **Repo side.** The harness lives in the target repo, under `.workgraph/verify/`:
 
-- `SKILL.md`: the pstack sections, written for an agent reading it cold.
-- `run`: an executable that is the one deterministic entry point. It launches the app from an
-  empty data dir, runs the doctor, drives every mapped feature, writes evidence, cleans up, and
-  exits 0 only if every feature passed.
+- `SKILL.md`: the pstack sections, written for an agent reading it cold. It names the app's entry
+  points, the only repo paths outside `.workgraph/verify/` that `run` may call.
+- `run`: an executable that is the one deterministic entry point. It runs the doctor, launches the
+  app from an empty data dir, drives every mapped feature, writes evidence, cleans up, and exits 0
+  only if every feature passed. Its assertions live under `.workgraph/verify/`. It does not
+  delegate them to the repo's specs, scripts or fixtures, which a unit could weaken without
+  touching the harness.
 - `features/README.md` and `features/<id>.md`: the map. `<id>` follows the check-name grammar.
   Each file has pstack's four H2s plus a **Proof** line: the end state the journey asserts.
 
-The harness is repo code like any other, so the dev pipeline and review cover changes to it. The
-owner approves the command that runs it (below), not each journey.
+The harness is repo code, but the code under change must not be able to grade itself. Each run
+pins one **base**, the commit its worktree started from, and records it in the evidence. Three
+rules follow:
 
-**Decision: an owner-approved `qa_checks` entry, not a new stage kind.** A `qa_checks` entry
-already has what runtime verification needs:
+- **Risk.** `.workgraph/verify/**` is a risk path (`risk.rs`, category `harness`). A task whose
+  units touch it is tainted, so every run of the harness from that task happens in the sim pod.
+- **Harness changes go to the owner.** If `base..tree` touches `.workgraph/verify/`, the kernel
+  raises an escalation that carries the diff's sha256. It works the way an `accepted_risk` the
+  Reader proposed does (§9.4): publish refuses while it is open, a shift parks the task at
+  `needs_decision`, and finalize accepts the evidence only when the owner's decision names that
+  escalation. Adding or removing a feature file counts, so the owner approves every feature a
+  task claims to prove or drops.
+- **Pinned map.** Validation uses the map at the tree under test. Any id at the base that is
+  missing there is listed as removed in `RuntimeEvidence`, and the removal rides on the same
+  escalation. It is never a validation error blamed on units, and it never passes without the
+  owner's answer.
+
+The `run` rule above is not mechanically enforced. A harness that reads assertions from elsewhere
+in the repo defeats the escalation, and the review of the first harness is where that is caught.
+This is a stated residual risk.
+
+**Decision: an owner-approved QA check, not a new stage kind.** A QA check already has what
+runtime verification needs:
 
 - the owner approves its exact command through `wg config allow-check` (§9.3);
 - the kernel runs it, never an LLM;
@@ -1678,59 +1700,144 @@ already has what runtime verification needs:
 - it mints a `CheckResult` at the tree it ran against (§4.1).
 
 A new stage kind would either be agent-driven, so an LLM could narrate a drive it never made, or
-kernel-driven, which would duplicate `checks`. The one new thing is evidence, so the check entry
-gains one owner-approved flag:
+kernel-driven, which would duplicate `checks`. The one new thing is evidence, so `[[check]]`
+gains one owner-approved field, set by `allow-check --evidence`:
 
 ```toml
-qa_checks.verify = { project = ".workgraph/verify/run", factory = "run --rm -T workspace .workgraph/verify/run", evidence = true }
-[repo.sandbox]
-checks = { verify = ".workgraph/verify/run" }
+[[check]]
+repo = "pxm-0/kadath"
+name = "verify"
+project = "docker compose -f compose.dev.yml run --rm -T workspace .workgraph/verify/run"
+factory = "run --rm -T verify .workgraph/verify/run"
+evidence = true
+
+[[repo]]
+name = "pxm-0/kadath"
+qa_checks = ["verify"]
 ```
 
-The QA explorer does not change role. Its prompt gains `SKILL.md` and the feature map as shared
-vocabulary, so its findings name features ("`list`: empty list exits 1"). What it drives by hand
-stays a finding. It is never evidence.
+The `factory` string names a `verify` service that only the owner's factory compose override
+defines:
+
+```yaml
+services:
+  verify:
+    extends: workspace
+    environment: [WG_EVIDENCE_DIR]
+    volumes: ["${WG_EVIDENCE_DIR:?}:${WG_EVIDENCE_DIR:?}:rw"]
+```
+
+The mount is on that service alone. `factory_compose` loads the override for `install` and every
+check, and for those calls `WG_EVIDENCE_DIR` is unset, so a mount on `workspace` would break all
+of them. `allow-check --evidence` refuses a `project` string that is not the repo's compose
+invocation, because a bare `.workgraph/verify/run` would run task-editable code directly on the
+Mac (§14, item 1). `wg doctor` checks that the override defines `verify`.
+
+Evidence checks stay out of every agent's reach:
+
+- the CHECKS step (§9.3) refuses a Reading whose `required_checks` names one;
+- `command_check::approved` leaves them out for every role, so their strings are in no agent's
+  Bash allowlist;
+- `qa_proof::host_command` (§6.4a) never maps a repro onto one.
+
+Run without `WG_EVIDENCE_DIR`, the harness always fails the same way, so otherwise an agent could
+"prove" any finding with it, or gate on it without evidence. The explorer's prompt does not
+change. It may Read `SKILL.md` and the map like any repo file, and anything it drives by hand stays
+a finding that the kernel's rerun must prove. It is never evidence.
 
 **Evidence.** For a check with `evidence = true` the kernel:
 
-1. creates an empty dir `<run>/evidence/<label>/<check>` and passes it as `WG_EVIDENCE_DIR`, the
-   only variable added to the scrubbed environment. The owner's factory compose override mounts
-   it at the same path;
-2. runs the check as usual, recording its exit code and tail;
-3. validates what the harness left there (`wg/src/runtime_verify.rs`). The validator treats
-   `manifest.json` (`{v:1, features:[{id, passed, artifacts:[{path, sha256}]}]}`) as untrusted
-   and accepts it only if:
-   - the manifest is at most 64 KB and has no unknown fields;
-   - the set of feature ids equals the set in `features/`, so a mapped feature with no evidence
-     fails, and so does an unmapped one;
-   - every artifact is a relative path to a regular file under the dir, with no `..` and no
-     symlink anywhere on the path, its sha256 matches, and the artifacts total at most 2 MB;
+1. creates an empty dir `~/.workgraph-work/evidence/<run>/<label>/<check>` and passes it as
+   `WG_EVIDENCE_DIR`, the one variable it adds to that check's environment. The dir sits outside
+   `~/.workgraph/`, which every agent is denied (§5.2), and it is created after the last LLM call
+   before the check;
+2. runs the check as usual, recording its exit code and tail. When the check ends, the kernel
+   kills its process group and removes the `verify` container (`<factory_compose> rm -fsv
+   verify`), so nothing the harness started can still write to the dir. A timeout or a signal is
+   a failed run like any other check's;
+3. treats exit 75 (`EX_TEMPFAIL`) as "the doctor found the environment unusable": a missing
+   browser, tool or image layer, never a file the task can change. A missing or broken app is a
+   feature failure. On exit 75 the task parks at `needs_decision` with the check's tail. No unit
+   is blamed and no fix round runs. The owner answers either "rerun" or "drop runtime evidence
+   for this task", and the second is recorded like any decision;
+4. otherwise validates what the harness left there (`wg/src/runtime_verify.rs`). The validator
+   treats `manifest.json` (`{v:1, features:[{id, passed, artifacts:[{path, sha256}]}]}`) as
+   untrusted, refuses exit 75 outright, and accepts the manifest only if:
+   - it is a regular file of at most 64 KB with no unknown fields;
+   - the set of feature ids equals the non-empty set in `features/` at the tree under test. A
+     mapped feature with no evidence fails, and so does an unmapped one;
+   - every artifact is a relative path to a regular file under the dir, with no `..`, no symlink
+     anywhere on the path, and one link. It is opened once and checked against what was seen
+     before opening, then read through that handle. Its sha256 matches, and the artifacts total
+     at most 2 MB;
    - the harness exit code agrees with the per-feature results (exit 0 if and only if all
      passed);
-4. passes the check only if both the exit code and the validation pass. A validation error fails
-   the check with that reason as its tail, so the fixer sees it;
-5. records `RuntimeEvidence {tree, harness_exit, features[...]}` in the journal and token store,
-   next to the `CheckResult` for the same tree.
+5. passes the check only if both the exit code and the validation pass. On a failure, the tail
+   that goes to the fixer and to blame is what the kernel writes: the validation error, or the
+   failed feature ids, each with the last lines of its first artifact, within the usual 40
+   lines. The harness's own stdout is not enough, because a harness writes its transcripts to the
+   evidence dir;
+6. keeps the validated bytes in `<run>/evidence/<label>/<check>`, under the trusted state dir, and
+   records `RuntimeEvidence {tree, base, harness_exit, removed, features[...]}` in the journal and
+   token store, next to the `CheckResult` for the same tree.
 
-Evidence is tied to the commit the way Haruspex evidence is. `finalize_run` (§9.5) requires a
-passing `RuntimeEvidence` at the current tree for every `evidence = true` check, then writes
-`runtime.json` and the artifacts to `.haruspex/evidence/<task>/runtime/` in the evidence commit.
-A reviewer can recompute every sha256 from the PR. Transcripts and exit codes are the default
-artifacts. A web harness adds screenshots and response bodies, which count toward the 2 MB cap.
+Every recheck that follows a fix reruns the `evidence = true` checks along with the gate. That
+covers the agent stages' fix round and the review fix round. Otherwise a task whose QA found a
+bug would reach finalize with evidence for a tree it no longer has.
 
-**In the sandbox.** A tainted task runs `[repo.sandbox].checks.verify` as one step in the job's
-pod (§8.5). Nothing about the isolation changes: `--network none`, no bind mount, services on
-loopback inside the pod. Three additions:
+**Baseline.** Evidence checks run at baseline like the gate checks, with one difference: the unit
+is the feature, not the check.
 
-- the job gains `return_evidence: true`. The agent creates a per-job named volume
-  `wgsbx-<job>-evidence`, mounts it read-write at `/evidence` in the step, and sets
-  `WG_EVIDENCE_DIR=/evidence`. That is the step's only environment variable;
-  `--env-file /dev/null` stays;
-- after the steps, the agent runs `volume export`, base64-encodes the tar (capped at 2 MB) and
-  returns it in the result line. Cleanup removes the volume with the job's other volumes;
-- the Mac treats the tar like a returned patch: it extracts it into a fresh dir, refusing any
-  entry that is not a regular file or directory, any absolute path and any `..`, then runs the
-  same validator.
+- **A feature that fails at baseline** is left out of this run. It is recorded as "already
+  failing at baseline" in the evidence, the PR body and the owner report, and it is never blamed
+  on units. The others stay required.
+- **A harness that cannot produce valid evidence at baseline** (no manifest, a validation error,
+  or exit 75) parks the task at `needs_decision` ("runtime verification is broken on main"). The
+  owner answers like an exit-75 park.
+
+Shift preflight requires `.workgraph/verify/run` at `origin/<default>` for every repo that lists
+an evidence check.
+
+**Finalize.** Evidence is tied to the commit the way Haruspex evidence is. `finalize_run` (§9.5)
+requires a passing `RuntimeEvidence` at the current tree for every `evidence = true` check, minus
+the features left out at baseline, and no open harness escalation. It then writes `runtime.json`
+plus the stored validated bytes, never a fresh read of the work dir, to
+`.haruspex/evidence/<task>/runtime/` in the evidence commit. A task the owner exempted with "drop
+runtime evidence" finalizes without it, and `runtime.json` says so. The PR body and the shift's
+owner report list each feature with its result.
+
+The sha256s prove the bytes did not change after validation, nothing more. Where the evidence came
+from rests on the kernel having made the dir, run the approved command, and removed what it left
+running. Transcripts and exit codes are the default artifacts. A web harness adds screenshots and
+response bodies, which count toward the 2 MB cap.
+
+**In the sandbox.** A tainted task runs `[repo.sandbox].checks.verify` (for example
+`.workgraph/verify/run`) as one step in the job's pod (§8.5). Nothing about the isolation
+changes: `--network none`, no bind mount, services on loopback inside the pod. Job protocol 2
+adds:
+
+- **The evidence volume.** A step gains `evidence: true`. The agent creates a per-job named
+  volume `wgsbx-<job>-evidence` with the `wg.job` label, so cleanup and the reaper find it, and
+  lists it with the job's other volumes in `run.rs`. It mounts the volume with
+  `--mount type=volume,source=wgsbx-<job>-evidence,target=/evidence,U=true`, so the step user
+  1000:1000 can write there, and adds `WG_EVIDENCE_DIR=/evidence` to that step's environment
+  next to the fixed `HOME=/tmp`. `--env-file /dev/null` stays. The container doctor's step-profile
+  probe covers the extra mount.
+- **Getting the tar back.** After the steps, the agent exports the volume to a tar in its job
+  store, then removes the containers and volumes and writes the result line. The tar is at most
+  2.5 MB, which leaves room for the manifest and the tar headers, and files the manifest does not
+  list count toward that cap. The result line carries only `evidence: {bytes, sha256}`, because
+  the line is capped at 256 KB. The Mac fetches the tar with a new subcommand,
+  `wg sandbox-agent evidence --job J`, which writes it raw to stdout. The Mac then deletes it with
+  `--delete`, or the reaper removes it later. A failed fetch, or a size or sha256 that differs
+  from the line, parks the task ("sandbox evidence unavailable") and is never blamed on units.
+- **Checking the tar.** The Mac treats the tar like a returned patch: it extracts it into a fresh
+  dir, refusing any entry that is not a regular file or directory, any absolute path and any
+  `..`, then runs the same validator.
+
+Until protocol 2 exists, an evidence check on a tainted task parks: "sandbox unavailable: runtime
+evidence needs job protocol 2". Without that, today's `checks.rs::in_sandbox` would run the
+harness with no evidence dir and blame the units.
 
 The app must reach a usable state offline. A web app needs headless Chromium, its fonts and every
 asset baked into the repo's sandbox image, with no CDN. A journey that needs the network fails,
@@ -1740,36 +1847,75 @@ and the reason goes in that feature's Gotchas. It is never mocked past a product
 
 - no `.workgraph/verify/` and no `evidence = true` check: runtime verification is
   `not_configured`. The QA summary, the PR body and the shift report say so in those words;
-- a harness dir with no regular `run` file, or a map with no feature: an error, never treated as
-  absent;
+- a harness dir with no executable `run`, a symlink on the way, or a map with no feature: an
+  error, never treated as absent;
 - an `evidence = true` check whose harness is missing at the tree under test: the check fails
   (exit 127, or no manifest);
-- a tainted task whose `[repo.sandbox].checks` has no `verify`: the check parks "sandbox
-  unavailable", as any sandbox check does. It never runs on the Mac;
 - no agent may write `manifest.json` or artifacts. The dir is created after the last LLM call
-  before the check and lies outside every write root (§5.2). A worker that edits the harness
-  itself is reviewed like any other code change.
+  before the check and lies outside every agent's write roots (§5.2). A worker that edits the
+  harness taints the task and raises the harness escalation (above).
 
-**Built so far (prototype).** `wg/src/runtime_verify.rs` holds the harness lookup (`harness`:
-not configured, present with its map, or half built), the validator, and unit tests for each
-rule above. `wg/tests/runtime_verify.rs` runs a fixture harness against a 10-line `todo` CLI
+A feature the harness cannot reach fails, and its reason goes in that feature's Gotchas. Its
+drive gets fixed, or its feature file gets removed through the harness escalation. Keeping the
+map current is the dev pipeline's job: a unit that adds a user-facing feature adds its feature
+file and its drive, and the escalation shows the owner both.
+
+**The first harness.** Preflight needs `run` on `origin/<default>`, so the first harness lands as
+an ordinary dev task with no evidence check configured, reviewed like any change. The owner then
+runs it once by hand, checks that it passes and that its evidence survives cleanup, and only then
+runs `allow-check --evidence`.
+
+**Known limit.** A runtime check can never retire a Learn stopgap (§10.4). Retirement needs the
+check to gate the run, and an evidence check runs only in QA. If that matters, a later change can
+let Learn name a feature, `verify:<feature-id>`, as a stopgap's check.
+
+**Built so far (prototype).** `wg/src/runtime_verify.rs` holds:
+
+- the harness lookup (`harness`: not configured, present with its map, or half built; a symlink
+  on the way or a `run` that is not executable is an error);
+- the validator, which refuses `UNAVAILABLE_EXIT` and keeps the bytes it hashed
+  (`Artifact::data`) for finalize;
+- one unit test per rule above, each asserting its own error.
+
+`wg/tests/runtime_verify.rs` runs a fixture harness against a 10-line `todo` CLI
 (`wg/tests/fixtures/verify-cli/`, two features) with exactly `PATH` and `WG_EVIDENCE_DIR`. It
-covers five cases:
+covers six cases:
 
 - a working CLI yields evidence for both features;
 - a broken `list` is recorded as a failed feature;
+- a missing CLI fails both features. It is not "unavailable";
 - a mapped feature the harness skips fails closed;
-- a harness that dies before writing its manifest fails closed;
+- a doctor that finds a tool missing exits 75 and writes no manifest;
 - a repo with no harness is `not_configured`.
 
-Not built, each waiting for the owner's yes:
+Not built, each waiting for the owner's yes, in this order:
 
-- the `evidence` flag in `factory.toml` and `allow-check`;
-- the kernel wiring in `checks.rs`, plus `RuntimeEvidence` as a token;
-- the finalize step that writes `.haruspex/evidence/<task>/runtime/`;
-- `return_evidence` in the sandbox job and agent;
-- the explorer prompt change;
-- a `wg verify init` that generates the harness the way pstack does.
+1. **Config.**
+   - the `evidence` field and `allow-check --evidence` with its compose-only rule;
+   - the `verify` service check in `wg doctor`;
+   - the `harness` risk path;
+   - the CHECKS refusal of evidence checks in `required_checks`;
+   - the preflight check.
+2. **Kernel wiring** in `checks.rs`, plus `RuntimeEvidence` as a token. `CheckExec` gains an env
+   argument, in both the real and the replay impl. This step also covers:
+   - the work dir;
+   - kill and `rm` before validating;
+   - exit 75;
+   - the kernel-written tail;
+   - the base pin and the harness escalation;
+   - rechecks after a fix;
+   - the per-feature baseline;
+   - `qa_verified_at` and publish honouring left-out features;
+   - leaving evidence checks out of `approved` and `qa_proof`;
+   - the protocol-2 park for tainted tasks.
+3. **Finalize:** the step that writes `.haruspex/evidence/<task>/runtime/`, and §9.5's step 1
+   requirement.
+4. **One real harness**, landed and run as described under "The first harness". Until one
+   exists, nothing above proves anything.
+5. **Job protocol 2:** `evidence` steps and `sandbox-agent evidence`.
+
+There is no explorer prompt change. The explorer can already Read the map, and with §6.4a what it
+drives by hand counts only when the kernel reruns it.
 
 ---
 

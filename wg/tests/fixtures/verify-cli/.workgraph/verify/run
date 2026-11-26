@@ -3,14 +3,17 @@
 # it as an owner-approved check with WG_EVIDENCE_DIR set to an empty dir; it drives every feature
 # in features/, writes one transcript per feature plus manifest.json, and exits 0 only if all pass.
 set -u
+# Doctor: the tools this harness needs, never files the task can change. Exit 75 means the
+# environment is unusable; the kernel parks instead of blaming the app.
+for t in dirname mktemp grep cut; do
+  command -v "$t" >/dev/null || { echo "doctor: $t is missing"; exit 75; }
+done
+command -v sha256sum >/dev/null || command -v shasum >/dev/null || { echo "doctor: no sha256 tool"; exit 75; }
 ev=${WG_EVIDENCE_DIR:?WG_EVIDENCE_DIR must name an empty dir}
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 cli="$repo/todo"
 scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT   # Cleanup: scratch data only, never the evidence
-
-# Doctor: is this build worth driving?
-[ -x "$cli" ] || { echo "doctor: $cli is not executable"; exit 3; }
 
 sha() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
 

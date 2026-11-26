@@ -8,6 +8,9 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
+use std::fs::{File, Metadata};
+use std::io::{ErrorKind, Read};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path};
 
 /// Where a repo keeps its harness, relative to the repo root.
@@ -15,8 +18,11 @@ pub const HARNESS_DIR: &str = ".workgraph/verify";
 /// The manifest's name inside the evidence dir.
 pub const MANIFEST: &str = "manifest.json";
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
-/// Total artifact bytes per run; screenshots count. Matches the sandbox's patch cap (§8.5).
+/// Total artifact bytes per run; screenshots count.
 pub const MAX_EVIDENCE_BYTES: u64 = 2 * 1024 * 1024;
+/// `EX_TEMPFAIL`: the harness's doctor found the environment unusable. The kernel parks the task
+/// instead of blaming units, and never validates.
+pub const UNAVAILABLE_EXIT: i64 = 75;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -61,6 +67,9 @@ pub struct Artifact {
     pub path: String,
     pub sha256: String,
     pub bytes: u64,
+    /// The bytes that were hashed; finalize writes these, never a fresh read of the dir.
+    #[serde(skip)]
+    pub data: Vec<u8>,
 }
 
 /// Whether a repo has a harness at all. `NotConfigured` is reported as such, never as a pass.
@@ -70,18 +79,28 @@ pub enum Harness {
     Present { features: BTreeSet<String> },
 }
 
-/// The repo's harness and feature map. A harness dir with no runnable `run` or no feature file is
-/// an error, not "not configured": a half-built harness must not read as an absent one.
+/// The repo's harness and feature map. Only a missing `.workgraph` or `.workgraph/verify` is "not
+/// configured". A symlink on the way, a `run` that is not an executable regular file, or a map
+/// with no feature is an error: a half-built harness must not read as an absent one.
 pub fn harness(repo: &Path) -> Result<Harness, String> {
-    let dir = repo.join(HARNESS_DIR);
-    if !dir.exists() {
-        return Ok(Harness::NotConfigured);
+    let mut dir = repo.to_path_buf();
+    for part in HARNESS_DIR.split('/') {
+        dir.push(part);
+        match std::fs::symlink_metadata(&dir) {
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Harness::NotConfigured),
+            Err(e) => return Err(format!("{HARNESS_DIR} is not readable: {e}")),
+            Ok(m) if !m.is_dir() => return Err(format!("{HARNESS_DIR} is not a plain directory")),
+            Ok(_) => {}
+        }
     }
-    let run = dir.join("run");
-    let meta =
-        std::fs::symlink_metadata(&run).map_err(|_| format!("{HARNESS_DIR}/run is missing"))?;
-    if !meta.is_file() {
-        return Err(format!("{HARNESS_DIR}/run is not a regular file"));
+    let meta = std::fs::symlink_metadata(dir.join("run")).map_err(|e| match e.kind() {
+        ErrorKind::NotFound => format!("{HARNESS_DIR}/run is missing"),
+        _ => format!("{HARNESS_DIR}/run is not readable: {e}"),
+    })?;
+    if !meta.is_file() || meta.permissions().mode() & 0o111 == 0 {
+        return Err(format!(
+            "{HARNESS_DIR}/run is not an executable regular file"
+        ));
     }
     let features = features(&dir.join("features"))?;
     Ok(Harness::Present { features })
@@ -89,19 +108,29 @@ pub fn harness(repo: &Path) -> Result<Harness, String> {
 
 /// Feature ids: `features/<id>.md`, README excluded; ids follow the check-name grammar.
 fn features(dir: &Path) -> Result<BTreeSet<String>, String> {
+    let meta = std::fs::symlink_metadata(dir)
+        .map_err(|e| format!("{HARNESS_DIR}/features is not readable: {e}"))?;
+    if !meta.is_dir() {
+        return Err(format!("{HARNESS_DIR}/features is not a plain directory"));
+    }
     let entries = std::fs::read_dir(dir)
         .map_err(|e| format!("{HARNESS_DIR}/features is not readable: {e}"))?;
     let mut ids = BTreeSet::new();
     for entry in entries {
-        let name = entry.map_err(|e| e.to_string())?.file_name();
+        let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name();
         let name = name.to_string_lossy();
         let Some(id) = name.strip_suffix(".md") else {
             continue;
         };
+        let shown = crate::ids::one_line(&name, 64);
+        if !entry.file_type().map_err(|e| e.to_string())?.is_file() {
+            return Err(format!("feature file {shown} is not a regular file"));
+        }
         if id == "README" {
             continue;
         }
-        crate::ids::check_name(id).map_err(|e| format!("feature file {name}: {e}"))?;
+        crate::ids::check_name(id).map_err(|e| format!("feature file {shown}: {e}"))?;
         ids.insert(id.to_string());
     }
     if ids.is_empty() {
@@ -112,22 +141,31 @@ fn features(dir: &Path) -> Result<BTreeSet<String>, String> {
     Ok(ids)
 }
 
-/// Validates what the harness left in `evidence_dir` against the feature map.
+/// Validates what the harness left in `evidence_dir` against the feature map. The kernel calls it
+/// only after the harness's process group is gone, and never for `UNAVAILABLE_EXIT`.
 pub fn validate(
     features: &BTreeSet<String>,
     evidence_dir: &Path,
     harness_exit: i64,
     tree: &str,
 ) -> Result<Evidence, String> {
-    let manifest_path = evidence_dir.join(MANIFEST);
-    let meta = std::fs::symlink_metadata(&manifest_path)
-        .map_err(|_| format!("the harness wrote no {MANIFEST} (exit {harness_exit})"))?;
-    if !meta.is_file() || meta.len() > MAX_MANIFEST_BYTES {
-        return Err(format!("{MANIFEST} is not a regular file of at most 64 KB"));
+    if harness_exit == UNAVAILABLE_EXIT {
+        return Err("the harness reported the environment unusable (exit 75); that parks, it is never validated".into());
     }
-    let text = std::fs::read_to_string(&manifest_path).map_err(|e| e.to_string())?;
+    if features.is_empty() {
+        return Err("the feature map is empty; nothing can be proven".into());
+    }
+    let root = evidence_dir
+        .canonicalize()
+        .map_err(|e| format!("evidence dir: {e}"))?;
+    let seen = std::fs::symlink_metadata(root.join(MANIFEST)).map_err(|e| match e.kind() {
+        ErrorKind::NotFound => format!("the harness wrote no {MANIFEST} (exit {harness_exit})"),
+        _ => format!("{MANIFEST} is not readable: {e}"),
+    })?;
+    let text = read_once(&root.join(MANIFEST), &seen, MAX_MANIFEST_BYTES)
+        .map_err(|why| format!("{MANIFEST} {why}; it must be a regular file of at most 64 KB"))?;
     let m: Manifest =
-        serde_json::from_str(&text).map_err(|e| format!("{MANIFEST} is malformed: {e}"))?;
+        serde_json::from_slice(&text).map_err(|e| format!("{MANIFEST} is malformed: {e}"))?;
     if m.v != 1 {
         return Err(format!("{MANIFEST} version {} is not 1", m.v));
     }
@@ -142,12 +180,9 @@ pub fn validate(
     if let Some(id) = listed.iter().find(|id| !features.contains(**id)) {
         return Err(format!(
             "{MANIFEST} names feature {:?}, which is not in the map",
-            crate::ids::truncate(id, 32)
+            crate::ids::one_line(id, 32)
         ));
     }
-    let root = evidence_dir
-        .canonicalize()
-        .map_err(|e| format!("evidence dir: {e}"))?;
     let mut total = 0u64;
     let mut out = Vec::new();
     for f in m.features {
@@ -156,15 +191,13 @@ pub fn validate(
         }
         let mut artifacts = Vec::new();
         for a in f.artifacts {
-            let bytes = artifact(&root, &a)?;
-            total += bytes;
-            if total > MAX_EVIDENCE_BYTES {
-                return Err("evidence exceeds 2 MB".into());
-            }
+            let data = artifact(&root, &a, MAX_EVIDENCE_BYTES - total)?;
+            total += data.len() as u64;
             artifacts.push(Artifact {
                 path: a.path,
                 sha256: a.sha256,
-                bytes,
+                bytes: data.len() as u64,
+                data,
             });
         }
         out.push(FeatureEvidence {
@@ -188,38 +221,67 @@ pub fn validate(
 }
 
 /// One artifact: a relative path to a regular file under `root` (no symlink anywhere on the way)
-/// whose sha256 is the one claimed. Returns its size.
-fn artifact(root: &Path, a: &ManifestArtifact) -> Result<u64, String> {
+/// whose sha256 is the one claimed. Returns the bytes it hashed.
+fn artifact(root: &Path, a: &ManifestArtifact, budget: u64) -> Result<Vec<u8>, String> {
+    let shown = crate::ids::one_line(&a.path, 64);
     let rel = Path::new(&a.path);
     let plain = !a.path.is_empty() && rel.components().all(|c| matches!(c, Component::Normal(_)));
     if !plain {
         return Err(format!(
-            "artifact path {:?} must be relative with no `..`",
-            crate::ids::truncate(&a.path, 64)
+            "artifact path {shown:?} must be relative with no `..`"
         ));
     }
     let mut at = root.to_path_buf();
+    let mut seen = None;
     for c in rel.components() {
         at.push(c);
-        let meta = std::fs::symlink_metadata(&at)
-            .map_err(|_| format!("artifact {} is missing", a.path))?;
+        let meta =
+            std::fs::symlink_metadata(&at).map_err(|_| format!("artifact {shown} is missing"))?;
         if meta.file_type().is_symlink() {
-            return Err(format!("artifact {} goes through a symlink", a.path));
+            return Err(format!("artifact {shown} goes through a symlink"));
         }
+        seen = Some(meta);
     }
-    let meta = std::fs::metadata(&at).map_err(|e| e.to_string())?;
-    if !meta.is_file() {
-        return Err(format!("artifact {} is not a regular file", a.path));
+    let seen = seen.expect("a plain path has a component");
+    let bytes = read_once(&at, &seen, budget).map_err(|why| {
+        if why == "is too big" {
+            "evidence exceeds 2 MB".to_string()
+        } else {
+            format!("artifact {shown} {why}")
+        }
+    })?;
+    if format!("{:x}", Sha256::digest(&bytes)) != a.sha256 {
+        return Err(format!("artifact {shown} does not match its sha256"));
     }
-    if meta.len() > MAX_EVIDENCE_BYTES {
-        return Err("evidence exceeds 2 MB".into());
+    Ok(bytes)
+}
+
+/// Opens `path` once and reads at most `max` bytes through that handle. The open file must be the
+/// regular, singly linked file `seen` described, so a swap or a hard link to a file outside the
+/// dir is refused.
+// shortcut: a plain open follows a symlink or blocks on a FIFO swapped in after the lstat; safe
+// only because the kernel kills the harness before validating (§9.6), open with O_NOFOLLOW |
+// O_NONBLOCK if validation ever runs beside a live writer.
+fn read_once(path: &Path, seen: &Metadata, max: u64) -> Result<Vec<u8>, &'static str> {
+    if !seen.is_file() {
+        return Err("is not a regular file");
     }
-    let bytes = std::fs::read(&at).map_err(|e| e.to_string())?;
-    let got = format!("{:x}", Sha256::digest(&bytes));
-    if got != a.sha256 {
-        return Err(format!("artifact {} does not match its sha256", a.path));
+    let file = File::open(path).map_err(|_| "cannot be opened")?;
+    let meta = file.metadata().map_err(|_| "cannot be read")?;
+    if !meta.is_file() || meta.dev() != seen.dev() || meta.ino() != seen.ino() {
+        return Err("changed while it was checked");
     }
-    Ok(meta.len())
+    if meta.nlink() != 1 {
+        return Err("has more than one link");
+    }
+    let mut bytes = Vec::new();
+    file.take(max + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "cannot be read")?;
+    if bytes.len() as u64 > max {
+        return Err("is too big");
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -254,63 +316,163 @@ mod tests {
         );
     }
 
-    #[test]
-    fn accepts_a_matching_manifest() {
-        let d = tmp("ok");
-        fs::write(d.join("t.txt"), b"hi").unwrap();
-        one_feature(&d, "t.txt", &sha(b"hi"), true);
-        let e = validate(&map(&["add"]), &d, 0, "abc").unwrap();
-        assert!(e.passed && e.tree == "abc" && e.features[0].artifacts[0].bytes == 2);
+    fn err(dir: &Path) -> String {
+        validate(&map(&["add"]), dir, 0, "t").unwrap_err()
     }
 
     #[test]
-    fn refuses_what_a_faker_would_try() {
+    fn accepts_a_matching_manifest_and_keeps_the_bytes_it_hashed() {
+        let d = tmp("ok");
+        fs::create_dir(d.join("add")).unwrap();
+        fs::write(d.join("add/t.txt"), b"hi").unwrap();
+        one_feature(&d, "add/t.txt", &sha(b"hi"), true);
+        let e = validate(&map(&["add"]), &d, 0, "abc").unwrap();
+        let a = &e.features[0].artifacts[0];
+        assert!(e.passed && e.tree == "abc" && a.bytes == 2 && a.data == b"hi");
+    }
+
+    #[test]
+    fn refuses_a_bad_artifact() {
         let d = tmp("bad");
         fs::write(d.join("t.txt"), b"hi").unwrap();
+        fs::create_dir(d.join("sub")).unwrap();
         let cases: Vec<(&str, String, bool, i64, &str)> = vec![
             ("t.txt", sha(b"other"), true, 0, "sha256"),
             ("../t.txt", sha(b"hi"), true, 0, "relative"),
             ("/etc/passwd", sha(b"hi"), true, 0, "relative"),
+            ("", sha(b"hi"), true, 0, "relative"),
             ("gone.txt", sha(b"hi"), true, 0, "missing"),
+            ("sub", sha(b"hi"), true, 0, "not a regular file"),
             ("t.txt", sha(b"hi"), true, 1, "disagrees"),
             ("t.txt", sha(b"hi"), false, 0, "disagrees"),
         ];
         for (path, hash, passed, exit, want) in cases {
             one_feature(&d, path, &hash, passed);
             let err = validate(&map(&["add"]), &d, exit, "t").unwrap_err();
-            assert!(err.contains(want), "{path} {exit}: {err}");
+            assert!(err.contains(want), "{path:?} {exit}: {err}");
         }
-        std::os::unix::fs::symlink("/etc/hosts", d.join("link")).unwrap();
-        one_feature(&d, "link", &sha(b"x"), true);
-        assert!(validate(&map(&["add"]), &d, 0, "t")
-            .unwrap_err()
-            .contains("symlink"));
     }
 
     #[test]
-    fn coverage_must_equal_the_map() {
+    fn refuses_symlinks_anywhere_on_the_path_and_hard_links() {
+        let d = tmp("links");
+        let outside = tmp("links-outside");
+        fs::write(outside.join("secret"), b"x").unwrap();
+        std::os::unix::fs::symlink(outside.join("secret"), d.join("leaf")).unwrap();
+        one_feature(&d, "leaf", &sha(b"x"), true);
+        assert!(err(&d).contains("symlink"), "leaf");
+        std::os::unix::fs::symlink(&outside, d.join("mid")).unwrap();
+        one_feature(&d, "mid/secret", &sha(b"x"), true);
+        assert!(err(&d).contains("symlink"), "mid");
+        fs::hard_link(outside.join("secret"), d.join("hard")).unwrap();
+        one_feature(&d, "hard", &sha(b"x"), true);
+        assert!(err(&d).contains("more than one link"), "hard");
+    }
+
+    #[test]
+    fn refuses_artifacts_that_are_empty_or_over_the_total_cap() {
+        let d = tmp("caps");
+        write(
+            &d,
+            serde_json::json!({"v":1,"features":[{"id":"add","passed":true,"artifacts":[]}]}),
+        );
+        assert!(err(&d).contains("has no artifact"));
+        let half = vec![b'a'; (MAX_EVIDENCE_BYTES / 2) as usize + 1];
+        fs::write(d.join("a"), &half).unwrap();
+        fs::write(d.join("b"), &half).unwrap();
+        write(
+            &d,
+            serde_json::json!({"v":1,"features":[{"id":"add","passed":true,"artifacts":[
+                {"path":"a","sha256":sha(&half)},{"path":"b","sha256":sha(&half)}]}]}),
+        );
+        assert!(err(&d).contains("exceeds 2 MB"));
+    }
+
+    #[test]
+    fn never_validates_an_unavailable_run() {
+        let d = tmp("unavail");
+        fs::write(d.join("t.txt"), b"hi").unwrap();
+        one_feature(&d, "t.txt", &sha(b"hi"), false);
+        let err = validate(&map(&["add"]), &d, UNAVAILABLE_EXIT, "t").unwrap_err();
+        assert!(err.contains("exit 75"), "{err}");
+    }
+
+    #[test]
+    fn read_once_refuses_a_file_other_than_the_one_checked() {
+        let d = tmp("swap");
+        fs::write(d.join("a"), b"a").unwrap();
+        fs::write(d.join("b"), b"b").unwrap();
+        let seen = fs::symlink_metadata(d.join("a")).unwrap();
+        assert_eq!(
+            read_once(&d.join("b"), &seen, 10),
+            Err("changed while it was checked")
+        );
+        assert_eq!(read_once(&d.join("a"), &seen, 10), Ok(b"a".to_vec()));
+        assert_eq!(read_once(&d.join("a"), &seen, 0), Err("is too big"));
+    }
+
+    #[test]
+    fn refuses_a_bad_manifest() {
+        let d = tmp("manifest");
+        assert!(err(&d).contains("no manifest.json (exit 0)"));
+        fs::write(
+            d.join(MANIFEST),
+            vec![b' '; MAX_MANIFEST_BYTES as usize + 1],
+        )
+        .unwrap();
+        assert!(err(&d).contains("at most 64 KB"));
+        write(&d, serde_json::json!({"v":2,"features":[]}));
+        assert!(err(&d).contains("version 2"));
+        write(&d, serde_json::json!({"v":1,"features":[],"extra":1}));
+        assert!(err(&d).contains("malformed"));
+        let f = serde_json::json!({"id":"add","passed":true,"artifacts":[]});
+        write(&d, serde_json::json!({"v":1,"features":[f, f]}));
+        assert!(err(&d).contains("twice"));
+        fs::remove_file(d.join(MANIFEST)).unwrap();
+        fs::create_dir(d.join(MANIFEST)).unwrap();
+        assert!(err(&d).contains("not a regular file"));
+    }
+
+    #[test]
+    fn coverage_must_equal_a_non_empty_map() {
         let d = tmp("cov");
         fs::write(d.join("t.txt"), b"hi").unwrap();
         one_feature(&d, "t.txt", &sha(b"hi"), true);
-        assert!(validate(&map(&["add", "list"]), &d, 0, "t")
-            .unwrap_err()
-            .contains("list has no evidence"));
-        assert!(validate(&map(&["list"]), &d, 0, "t").is_err());
-        fs::remove_file(d.join(MANIFEST)).unwrap();
-        assert!(validate(&map(&["add"]), &d, 0, "t")
-            .unwrap_err()
-            .contains("no manifest.json"));
+        let v = |ids: &[&str]| validate(&map(ids), &d, 0, "t").unwrap_err();
+        assert!(v(&["add", "list"]).contains("list has no evidence"));
+        assert!(v(&[]).contains("map is empty"));
+        write(
+            &d,
+            serde_json::json!({"v":1,"features":[
+                {"id":"add","passed":true,"artifacts":[{"path":"t.txt","sha256":sha(b"hi")}]},
+                {"id":"x\ny","passed":true,"artifacts":[{"path":"t.txt","sha256":sha(b"hi")}]}]}),
+        );
+        assert!(v(&["add"]).contains("\"x y\", which is not in the map"));
     }
 
     #[test]
     fn harness_absent_is_not_configured_but_half_built_is_an_error() {
         let repo = tmp("h");
         assert_eq!(harness(&repo).unwrap(), Harness::NotConfigured);
+        fs::create_dir(repo.join(".workgraph")).unwrap();
+        assert_eq!(harness(&repo).unwrap(), Harness::NotConfigured);
         let dir = repo.join(HARNESS_DIR);
         fs::create_dir_all(dir.join("features")).unwrap();
         assert!(harness(&repo).unwrap_err().contains("run is missing"));
         fs::write(dir.join("run"), "#!/bin/sh\n").unwrap();
+        assert!(harness(&repo).unwrap_err().contains("not an executable"));
+        fs::set_permissions(dir.join("run"), fs::Permissions::from_mode(0o755)).unwrap();
         assert!(harness(&repo).unwrap_err().contains("maps no feature"));
+        fs::write(dir.join("features/Bad Name.md"), "").unwrap();
+        assert!(harness(&repo)
+            .unwrap_err()
+            .contains("feature file Bad Name.md"));
+        fs::remove_file(dir.join("features/Bad Name.md")).unwrap();
+        fs::create_dir(dir.join("features/add.md")).unwrap();
+        assert!(harness(&repo)
+            .unwrap_err()
+            .contains("add.md is not a regular file"));
+        fs::remove_dir(dir.join("features/add.md")).unwrap();
         fs::write(dir.join("features/README.md"), "").unwrap();
         fs::write(dir.join("features/add.md"), "").unwrap();
         assert_eq!(
@@ -319,5 +481,31 @@ mod tests {
                 features: map(&["add"])
             }
         );
+    }
+
+    #[test]
+    fn a_symlinked_harness_or_map_is_an_error() {
+        let real = tmp("h-real");
+        fs::create_dir_all(real.join("features")).unwrap();
+        let repo = tmp("h-link");
+        fs::create_dir(repo.join(".workgraph")).unwrap();
+        std::os::unix::fs::symlink(&real, repo.join(HARNESS_DIR)).unwrap();
+        assert!(harness(&repo)
+            .unwrap_err()
+            .contains("not a plain directory"));
+        let repo = tmp("h-root");
+        std::os::unix::fs::symlink(&real, repo.join(".workgraph")).unwrap();
+        assert!(harness(&repo)
+            .unwrap_err()
+            .contains("not a plain directory"));
+        let repo = tmp("h-map");
+        let dir = repo.join(HARNESS_DIR);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("run"), "#!/bin/sh\n").unwrap();
+        fs::set_permissions(dir.join("run"), fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink(real.join("features"), dir.join("features")).unwrap();
+        assert!(harness(&repo)
+            .unwrap_err()
+            .contains("features is not a plain directory"));
     }
 }

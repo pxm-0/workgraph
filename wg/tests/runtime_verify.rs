@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 use wg::exec::run::run_shell_in;
-use wg::runtime_verify::{harness, validate, Harness, HARNESS_DIR};
+use wg::runtime_verify::{harness, validate, Harness, HARNESS_DIR, UNAVAILABLE_EXIT};
 
 fn fixture_copy(name: &str) -> PathBuf {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/verify-cli");
@@ -24,8 +24,13 @@ fn fixture_copy(name: &str) -> PathBuf {
 }
 
 /// What the kernel would do: a fresh evidence dir, the harness with exactly PATH and
-/// WG_EVIDENCE_DIR, then validation against the map.
+/// WG_EVIDENCE_DIR, then validation against the map unless the doctor said the environment is
+/// unusable.
 fn verify(repo: &Path) -> Result<wg::runtime_verify::Evidence, String> {
+    verify_with_path(repo, "/usr/local/bin:/usr/bin:/bin")
+}
+
+fn verify_with_path(repo: &Path, path: &str) -> Result<wg::runtime_verify::Evidence, String> {
     let Harness::Present { features } = harness(repo)? else {
         return Err("not configured".into());
     };
@@ -33,7 +38,7 @@ fn verify(repo: &Path) -> Result<wg::runtime_verify::Evidence, String> {
     let _ = std::fs::remove_dir_all(&ev);
     std::fs::create_dir_all(&ev).unwrap();
     let env = vec![
-        ("PATH".into(), "/usr/local/bin:/usr/bin:/bin".into()),
+        ("PATH".into(), path.into()),
         ("WG_EVIDENCE_DIR".into(), ev.to_string_lossy().into_owned()),
     ];
     let (exit, tail) = run_shell_in(
@@ -42,6 +47,9 @@ fn verify(repo: &Path) -> Result<wg::runtime_verify::Evidence, String> {
         &env,
         Duration::from_secs(60),
     );
+    if exit == UNAVAILABLE_EXIT {
+        return Err(format!("unavailable\n{tail}"));
+    }
     validate(&features, &ev, exit, "tree-1").map_err(|e| format!("{e}\n{tail}"))
 }
 
@@ -86,11 +94,30 @@ fn a_mapped_feature_the_harness_skips_fails_closed() {
 }
 
 #[test]
-fn a_harness_that_dies_before_its_manifest_fails_closed() {
-    let repo = fixture_copy("doctor");
+fn a_missing_app_fails_its_features_and_is_not_unavailable() {
+    let repo = fixture_copy("noapp");
     std::fs::remove_file(repo.join("todo")).unwrap();
-    let err = verify(&repo).unwrap_err();
-    assert!(err.contains("no manifest.json (exit 3)"), "{err}");
+    let e = verify(&repo).unwrap();
+    assert!(!e.passed && e.harness_exit == 1);
+    assert!(e.features.iter().all(|f| !f.passed));
+}
+
+#[test]
+fn a_doctor_that_finds_a_tool_missing_reports_unavailable_without_a_manifest() {
+    let repo = fixture_copy("doctor");
+    let bin = repo.with_extension("bin");
+    let _ = std::fs::remove_dir_all(&bin);
+    std::fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink("/bin/sh", bin.join("sh")).unwrap();
+    let err = verify_with_path(&repo, bin.to_str().unwrap()).unwrap_err();
+    assert!(
+        err.starts_with("unavailable") && err.contains("doctor: dirname is missing"),
+        "{err}"
+    );
+    assert!(!repo
+        .with_extension("evidence")
+        .join("manifest.json")
+        .exists());
 }
 
 #[test]
