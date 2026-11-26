@@ -1,0 +1,50 @@
+#!/bin/sh
+# The deterministic entry point of this repo's verify harness (see SKILL.md here). The kernel runs
+# it as an owner-approved check with WG_EVIDENCE_DIR set to an empty dir; it drives every feature
+# in features/, writes one transcript per feature plus manifest.json, and exits 0 only if all pass.
+set -u
+# Doctor: the tools this harness needs, never files the task can change. Exit 75 means the
+# environment is unusable; the kernel parks instead of blaming the app.
+for t in dirname mktemp grep cut; do
+  command -v "$t" >/dev/null || { echo "doctor: $t is missing"; exit 75; }
+done
+command -v sha256sum >/dev/null || command -v shasum >/dev/null || { echo "doctor: no sha256 tool"; exit 75; }
+ev=${WG_EVIDENCE_DIR:?WG_EVIDENCE_DIR must name an empty dir}
+repo=$(cd "$(dirname "$0")/../.." && pwd)
+cli="$repo/todo"
+scratch=$(mktemp -d)
+trap 'rm -rf "$scratch"' EXIT   # Cleanup: scratch data only, never the evidence
+
+sha() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
+
+# Drive: one isolated data file per journey; the transcript holds each command, its output and exit.
+drive() {
+  feature=$1; shift
+  mkdir -p "$ev/$feature"
+  { printf '$ todo'; printf ' %s' "$@"; printf '\n'
+    TODO_FILE="$scratch/$feature.txt" "$cli" "$@" 2>&1; printf '[exit %s]\n' "$?"
+  } >> "$ev/$feature/transcript.txt"
+}
+
+entries=""
+failed=0
+record() { # feature passed
+  t="$1/transcript.txt"
+  [ "$2" = true ] || failed=1
+  entries="$entries${entries:+,}{\"id\":\"$1\",\"passed\":$2,\"artifacts\":[{\"path\":\"$t\",\"sha256\":\"$(sha "$ev/$t")\"}]}"
+}
+
+# features/add.md: the item lands in the data file and the CLI confirms it.
+drive add add buy milk
+if grep -qx 'buy milk' "$scratch/add.txt" 2>/dev/null && grep -q '^added: buy milk$' "$ev/add/transcript.txt"; then
+  record add true; else record add false; fi
+
+# features/list.md: items come back numbered, in the order they were added.
+drive list add first
+drive list add second
+drive list list
+if grep -q '^1\. first$' "$ev/list/transcript.txt" && grep -q '^2\. second$' "$ev/list/transcript.txt"; then
+  record list true; else record list false; fi
+
+printf '{"v":1,"features":[%s]}\n' "$entries" > "$ev/manifest.json"
+exit "$failed"

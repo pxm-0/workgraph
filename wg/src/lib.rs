@@ -23,6 +23,7 @@ pub mod ports;
 pub mod render;
 pub mod report;
 pub mod risk;
+pub mod runtime_verify;
 pub mod sandbox;
 pub mod scratch;
 pub mod selfimprove;

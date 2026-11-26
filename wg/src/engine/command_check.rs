@@ -53,6 +53,9 @@ pub fn approved(ctx: &RunCtx, k: &Kernel, with_qa: bool) -> Vec<(String, String)
         .iter()
         .chain(qa.iter())
         .filter_map(|n| ctx.cfg.check(&ctx.repo_name, n))
+        // §9.6: run without the kernel's evidence dir, an evidence check fails the same way every
+        // time, so no agent may call it and no repro may be rerun as it.
+        .filter(|e| !e.evidence)
         .map(|e| (e.project.clone(), e.factory.clone()))
         .collect()
 }

@@ -158,6 +158,10 @@ impl Kernel {
                 .map(|c| &c.command);
             let project_cmd = project.get(name);
             let approved = ctx.cfg.check(&ctx.repo_name, name);
+            if approved.is_some_and(|a| a.evidence) {
+                asks.push(format!("`{name}` is a runtime-evidence check: it runs only as a QA check (qa_checks), never from required_checks; drop it from required_checks"));
+                continue;
+            }
             let pinned = matches!((reading_cmd, project_cmd, approved),
                 (Some(rc), Some(pc), Some(a)) if rc == pc && *pc == a.project);
             if pinned {

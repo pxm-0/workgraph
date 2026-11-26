@@ -122,3 +122,7 @@ path = "tests/self_update.rs"
 [[test]]
 name = "eval_arm"
 path = "tests/eval_arm.rs"
+
+[[test]]
+name = "runtime_verify"
+path = "tests/runtime_verify.rs"

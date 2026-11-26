@@ -383,6 +383,23 @@ fn an_unapproved_check_command_escalates_checks() {
 }
 
 #[test]
+fn a_runtime_evidence_check_in_required_checks_is_refused() {
+    let o = run(Opts {
+        units: vec![unit("a", json!({}))],
+        approve_checks: false,
+        config_extra: "[[check]]\nrepo = \"o/r\"\nname = \"test\"\nproject = \"docker compose run --rm -T workspace .workgraph/verify/run\"\nfactory = \"run --rm -T verify .workgraph/verify/run\"\nevidence = true\n".into(),
+        ..Opts::default()
+    });
+    assert_eq!(o.result["status"], "needs_decision");
+    let e = &o.result["escalations"][0];
+    assert_eq!(e["id"], "CHECKS");
+    assert!(e["question"]
+        .as_str()
+        .unwrap()
+        .contains("`test` is a runtime-evidence check"));
+}
+
+#[test]
 fn a_reading_that_leaves_other_gate_blockers_gets_one_read_gate_call_then_fails() {
     let hx = Arc::new(fake_hx(&[unit("a", json!({}))], &[("test", "npm test")]));
     hx.blockers

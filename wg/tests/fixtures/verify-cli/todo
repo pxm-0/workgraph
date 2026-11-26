@@ -1,0 +1,10 @@
+#!/bin/sh
+# A tiny todo CLI: the fixture app that runtime verification drives (design §9.6).
+set -eu
+file=${TODO_FILE:?TODO_FILE must name the data file}
+case "${1:-}" in
+  add) shift; [ $# -gt 0 ] || { echo "usage: todo add <text>" >&2; exit 2; }
+       printf '%s\n' "$*" >> "$file"; echo "added: $*" ;;
+  list) [ -f "$file" ] || exit 0; awk '{ printf "%d. %s\n", NR, $0 }' "$file" ;;
+  *) echo "usage: todo add <text> | todo list" >&2; exit 2 ;;
+esac
