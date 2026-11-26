@@ -4,7 +4,7 @@
 //!
 //!   wg run --task-file F [--task-id T] [--initialized] [--user-changes-file F] [--decisions-file F]
 //!   wg finalize --run R --by NAME --message M --evidence-message M2
-//!   wg config allow-check --repo SLUG --name N --cmd C --factory-cmd C2 | pin-haruspex --cli /abs
+//!   wg config allow-check --repo SLUG --name N --cmd C --factory-cmd C2 [--evidence] | pin-haruspex --cli /abs
 //!   wg doctor [--live] | wg memory import | wg guard --manifest P | wg auth key PROVIDER
 //!   wg shift run | resume ID | status | report [ID] | recover | gc | schedule-print
 //!   wg decide --repo R --issue N --decisions-file F | wg approve --repo R --pr N --by NAME

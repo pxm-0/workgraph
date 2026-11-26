@@ -1888,14 +1888,25 @@ covers six cases:
 - a doctor that finds a tool missing exits 75 and writes no manifest;
 - a repo with no harness is `not_configured`.
 
+**Built: config (step 1).**
+
+- `[[check]].evidence`, set by `wg config allow-check --evidence`. Config load enforces the rule,
+  so a hand-edited file cannot skip it: `project` must be a plain `docker compose ...` string
+  and `factory` must be `run [flags] verify ...`, neither with a shell operator.
+- `.workgraph/verify/**` is risk category `harness` (`risk.rs`).
+- The CHECKS step escalates a `required_checks` entry that names an evidence check and never pins
+  it.
+- `command_check::approved` drops evidence checks, which keeps them out of every agent's Bash
+  allowlist and out of `qa_proof::host_command`.
+- Shift preflight and `wg doctor` check `factory_compose` for an override that defines `verify`.
+  The check is a line scan, not a YAML parser, so flow style fails closed. Preflight also needs
+  `.workgraph/verify/run` at `origin/<default>`.
+
+Until step 2 lands, an evidence check listed in `qa_checks` runs without `WG_EVIDENCE_DIR`, so its
+compose call fails and blames units. Do not list one before then.
+
 Not built, each waiting for the owner's yes, in this order:
 
-1. **Config.**
-   - the `evidence` field and `allow-check --evidence` with its compose-only rule;
-   - the `verify` service check in `wg doctor`;
-   - the `harness` risk path;
-   - the CHECKS refusal of evidence checks in `required_checks`;
-   - the preflight check.
 2. **Kernel wiring** in `checks.rs`, plus `RuntimeEvidence` as a token. `CheckExec` gains an env
    argument, in both the real and the replay impl. This step also covers:
    - the work dir;
@@ -1906,7 +1917,6 @@ Not built, each waiting for the owner's yes, in this order:
    - rechecks after a fix;
    - the per-feature baseline;
    - `qa_verified_at` and publish honouring left-out features;
-   - leaving evidence checks out of `approved` and `qa_proof`;
    - the protocol-2 park for tainted tasks.
 3. **Finalize:** the step that writes `.haruspex/evidence/<task>/runtime/`, and §9.5's step 1
    requirement.

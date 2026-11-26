@@ -85,6 +85,35 @@ pub struct CheckEntry {
     pub name: String,
     pub project: String,
     pub factory: String,
+    /// A runtime-verification check (design §9.6): it runs only as a QA check, with an evidence
+    /// dir, in the factory compose override's `verify` service.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub evidence: bool,
+}
+
+/// §9.6: an evidence check's `project` string is a compose invocation, so it never runs task code
+/// on the Mac, and its `factory` string runs the override's `verify` service, the only one with the
+/// evidence mount. No shell operators, so neither string can chain a host command.
+fn evidence_rule(c: &CheckEntry) -> Result<(), String> {
+    let plain = |s: &str| !s.chars().any(|ch| ";&|`$<>()\\".contains(ch));
+    if !c.project.starts_with("docker compose ") || !plain(&c.project) {
+        return Err(format!(
+            "check {}: an evidence check's project command must be a plain `docker compose ...` invocation",
+            c.name
+        ));
+    }
+    let mut words = c.factory.split_whitespace();
+    let service = words
+        .next()
+        .filter(|w| *w == "run")
+        .and_then(|_| words.find(|w| !w.starts_with('-')));
+    if service != Some("verify") || !plain(&c.factory) {
+        return Err(format!(
+            "check {}: an evidence check's factory command must be `run [flags] verify ...`",
+            c.name
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -144,6 +173,9 @@ pub fn parse(text: &str) -> Result<Config, String> {
         }
         one_line_cmd(&c.project, &format!("check {} project", c.name))?;
         one_line_cmd(&c.factory, &format!("check {} factory", c.name))?;
+        if c.evidence {
+            evidence_rule(c)?;
+        }
     }
     for r in &f.repo {
         crate::shift::config::repo(r)?;
@@ -272,6 +304,26 @@ mod tests {
     }
 
     #[test]
+    fn an_evidence_check_runs_the_verify_service_and_is_not_written_when_off() {
+        let text = "[[check]]\nrepo = \"o/r\"\nname = \"verify\"\nproject = \"docker compose -f compose.dev.yml run --rm -T workspace .workgraph/verify/run\"\nfactory = \"run --rm -T verify .workgraph/verify/run\"\nevidence = true\n";
+        assert!(
+            parse(text)
+                .unwrap()
+                .check("o/r", "verify")
+                .unwrap()
+                .evidence
+        );
+        let plain = CheckEntry {
+            repo: "o/r".into(),
+            name: "test".into(),
+            project: "a".into(),
+            factory: "a".into(),
+            evidence: false,
+        };
+        assert!(!toml::to_string(&plain).unwrap().contains("evidence"));
+    }
+
+    #[test]
     fn each_rule_rejects_one_bad_file() {
         let sha = "a".repeat(64);
         let cases = [
@@ -298,6 +350,21 @@ mod tests {
                 "[[check]]\nrepo = \"o/r\"\nname = \"t\"\nproject = \"a\\nb\"\nfactory = \"a\"\n"
                     .into(),
                 "one-line",
+            ),
+            (
+                "[[check]]\nrepo = \"o/r\"\nname = \"v\"\nproject = \".workgraph/verify/run\"\nfactory = \"run --rm -T verify x\"\nevidence = true\n"
+                    .into(),
+                "plain `docker compose",
+            ),
+            (
+                "[[check]]\nrepo = \"o/r\"\nname = \"v\"\nproject = \"docker compose run --rm workspace x && .workgraph/verify/run\"\nfactory = \"run --rm -T verify x\"\nevidence = true\n"
+                    .into(),
+                "plain `docker compose",
+            ),
+            (
+                "[[check]]\nrepo = \"o/r\"\nname = \"v\"\nproject = \"docker compose run --rm workspace x\"\nfactory = \"run --rm -T workspace x\"\nevidence = true\n"
+                    .into(),
+                "verify ...",
             ),
         ];
         for (text, want) in cases {

@@ -122,6 +122,18 @@ fn repo_problem(cfg: &Config, repo: &RepoCfg) -> Option<String> {
     {
         return Some(format!("the factory compose override {f} does not exist"));
     }
+    // §9.6: an evidence check needs the harness on the default branch and the `verify` service.
+    let run = format!("{}/run", crate::runtime_verify::HARNESS_DIR);
+    if let Some(n) = crate::runtime_verify::evidence_checks(cfg, repo).next() {
+        if !crate::git::exists_at(path, &rev, &run) {
+            return Some(format!(
+                "RepoNotCompliant: {rev} has no {run} (evidence check {n})"
+            ));
+        }
+        if let Err(e) = crate::runtime_verify::verify_service(repo.factory_compose.as_deref()) {
+            return Some(format!("evidence check {n}: {e}"));
+        }
+    }
     match task::config_problem(repo, |rel| crate::git::blob_sha256(path, &rev, rel)) {
         Ok(p) => p.map(|p| format!("{p} on {rev}")),
         Err(e) => Some(format!("cannot read {rev}: {e}")),

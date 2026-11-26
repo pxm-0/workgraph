@@ -284,6 +284,53 @@ fn read_once(path: &Path, seen: &Metadata, max: u64) -> Result<Vec<u8>, &'static
     Ok(bytes)
 }
 
+/// The repo's QA checks the owner approved with `--evidence`.
+pub fn evidence_checks<'a>(
+    cfg: &'a crate::config::Config,
+    repo: &'a crate::shift::config::RepoCfg,
+) -> impl Iterator<Item = &'a str> + 'a {
+    repo.qa_checks
+        .iter()
+        .filter(|n| cfg.check(&repo.name, n).is_some_and(|c| c.evidence))
+        .map(String::as_str)
+}
+
+/// `Ok` when one of the owner-local override files in `factory_compose` defines the `verify`
+/// service, the only one with the evidence mount (§9.6).
+pub fn verify_service(factory_compose: Option<&str>) -> Result<(), String> {
+    let compose = factory_compose
+        .ok_or("an evidence check needs factory_compose with an override that defines `verify`")?;
+    for f in compose.split_whitespace().filter(|t| t.starts_with('/')) {
+        let text =
+            std::fs::read_to_string(f).map_err(|e| format!("cannot read override {f}: {e}"))?;
+        if defines_verify(&text) {
+            return Ok(());
+        }
+    }
+    Err("no factory compose override defines a `verify` service".into())
+}
+
+// shortcut: a line scan, not a YAML parser; it misses flow style (`services: {verify: ...}`), so
+// that fails closed. Upgrade to `<factory_compose> config --services` if overrides get fancier.
+fn defines_verify(text: &str) -> bool {
+    let (mut in_services, mut indent) = (false, None);
+    for l in text.lines() {
+        let body = l.split('#').next().unwrap_or("").trim_end();
+        let key = body.trim_start();
+        if key.is_empty() {
+            continue;
+        }
+        let at = body.len() - key.len();
+        if at == 0 {
+            in_services = body == "services:";
+            indent = None;
+        } else if in_services && *indent.get_or_insert(at) == at && key == "verify:" {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,6 +365,31 @@ mod tests {
 
     fn err(dir: &Path) -> String {
         validate(&map(&["add"]), dir, 0, "t").unwrap_err()
+    }
+
+    #[test]
+    fn defines_verify_only_under_services() {
+        assert!(defines_verify(
+            "services:\n  workspace: {}\n  verify:  # evidence\n    extends: workspace\n"
+        ));
+        assert!(!defines_verify("services:\n  workspace:\n    verify: x\n"));
+        assert!(!defines_verify(
+            "services:\n  workspace:\n    verify:\n      a: 1\n"
+        ));
+        assert!(!defines_verify(
+            "volumes:\n  verify:\nservices:\n  workspace:\n"
+        ));
+        assert!(verify_service(None).is_err());
+        let d = std::env::temp_dir().join(format!("wg-verify-svc-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("o.yml");
+        std::fs::write(&f, "services:\n  verify:\n    extends: workspace\n").unwrap();
+        let ok = format!("docker compose -p r -f compose.dev.yml -f {}", f.display());
+        assert!(verify_service(Some(&ok)).is_ok());
+        std::fs::write(&f, "services:\n  workspace: {}\n").unwrap();
+        assert!(verify_service(Some(&ok))
+            .unwrap_err()
+            .contains("no factory compose override"));
     }
 
     #[test]

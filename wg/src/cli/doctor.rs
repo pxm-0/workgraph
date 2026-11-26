@@ -180,6 +180,14 @@ pub fn doctor(args: &[String]) -> Result<Value, String> {
                 }
             }
         }
+        for r in &cfg.repos {
+            if let Some(n) = crate::runtime_verify::evidence_checks(cfg, r).next() {
+                let res = crate::runtime_verify::verify_service(r.factory_compose.as_deref());
+                let ok = res.is_ok();
+                let detail = res.map_or_else(|e| e, |()| format!("defined (evidence check {n})"));
+                add(&format!("verify service {}", r.name), ok, "error", detail);
+            }
+        }
         for p in &cfg.auth.providers {
             let note = match (&p.kind, &p.keychain_service) {
                 (Kind::Gateway { .. }, _) => {

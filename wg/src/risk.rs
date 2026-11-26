@@ -37,6 +37,9 @@ pub fn path(p: &str) -> Option<String> {
     let lower = p.to_lowercase();
     let first = parts.first().copied().unwrap_or("");
     let hit = |c: &str, why: &str| Some(reason(c, why, p));
+    if parts.starts_with(&[".workgraph", "verify"]) {
+        return hit("harness", "the runtime-verification harness");
+    }
     if dirs.contains(&"migrations") || lower.contains("migration") || name.ends_with(".sql") {
         return hit("migration", "a database migration");
     }
@@ -146,6 +149,9 @@ mod tests {
             ("src/payments/charge.ts", Some("payments")),
             ("package-lock.json", Some("deps")),
             ("sub/Cargo.lock", Some("deps")),
+            (".workgraph/verify/run", Some("harness")),
+            (".workgraph/verify/features/add.md", Some("harness")),
+            (".workgraph/notes.md", None),
             ("src/calc.py", None),
             ("README.md", None),
         ];

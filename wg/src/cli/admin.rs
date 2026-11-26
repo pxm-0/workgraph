@@ -22,13 +22,14 @@ pub fn config(args: &[String]) -> Result<Value, String> {
 /// Appends an approved check; a later entry for the same repo and name overrides an earlier one,
 /// so the owner's file keeps its comments and history.
 fn allow_check(args: &[String]) -> Result<Value, String> {
-    let a = parse(args, &[])?;
-    a.only(&["repo", "name", "cmd", "factory-cmd"])?;
+    let a = parse(args, &["evidence"])?;
+    a.only(&["repo", "name", "cmd", "factory-cmd", "evidence"])?;
     let entry = CheckEntry {
         repo: a.need("repo")?.to_string(),
         name: a.need("name")?.to_string(),
         project: a.need("cmd")?.to_string(),
         factory: a.need("factory-cmd")?.to_string(),
+        evidence: a.on("evidence"),
     };
     let dirs = Dirs::from_env()?;
     let path = dirs.config();
@@ -53,7 +54,7 @@ fn allow_check(args: &[String]) -> Result<Value, String> {
     crate::config::parse(&next)?;
     write_config(&path, &next)?;
     Ok(
-        json!({ "allowed": true, "repo": entry.repo, "name": entry.name, "project": entry.project, "factory": entry.factory }),
+        json!({ "allowed": true, "repo": entry.repo, "name": entry.name, "project": entry.project, "factory": entry.factory, "evidence": entry.evidence }),
     )
 }
 
